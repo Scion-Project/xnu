@@ -1098,7 +1098,8 @@ static uint64_t sgu_as_n, sgu_as_prev_waits, sgu_as_prev_ns, sgu_as_gpu_ns, sgu_
  * or more chains (a pass is a vertex/tiler chain and a fragment chain; a blur is many passes), so the render thread
  * spent the GPU's time spinning on a core and the next frame's CPU work never overlapped this frame's GPU work.
  * With the queue a submit only appends (FIFO, one chain on the GPU at a time, in the order given, which Panfrost
- * needs), the worker starts each chain and sleeps in short naps until it is done, and waiters sleep until their
+ * needs), the worker starts each chain and, after sgu_spin_us of looking (a chain takes 0.3 to 0.5 ms), sleeps in
+ * short naps until it is done, and waiters sleep until their
  * chain's number is done. sg_lock is not held while a chain runs (as before), so buffers can be mapped meanwhile.
  * This is what Scion's iOS 16.5 Mali driver does (drivers/gpu/mali/hakios.mali.c: mali_queue, mali_worker).
  */
@@ -1113,6 +1114,7 @@ static bool sgu_q_on, sgu_q_started;
 static int sgu_q_checked;
 static int sgu_q_nap_event;
 static uint32_t sgu_q_nap_us = 50;                      /* boot-arg sgu_nap_us (10 to 1000) */
+static uint32_t sgu_q_spin_us = 200;                    /* boot-arg sgu_spin_us (0 to 2000): looks 10 us apart before the first nap */
 static LCK_MTX_DECLARE(sgu_q_lock, &sg_lck_grp);
 static LCK_MTX_DECLARE(sgu_q_nap_lock, &sg_lck_grp);
 extern uint32_t sweet_speed_flags(void);                /* boot-arg sweetspeed (osfmk/arm64/sweet_a64e.c) */
@@ -1223,7 +1225,7 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 			if (state != EBUSY) {
 				break;
 			}
-			if (looks < 20) {
+			if (looks < sgu_q_spin_us / 10) {
 				delay(10);
 				continue;
 			}
@@ -1285,9 +1287,14 @@ sgu_q_enabled(void)
 			if (PE_parse_boot_argn("sgu_nap_us", &nap, sizeof(nap)) && nap >= 10 && nap <= 1000) {
 				sgu_q_nap_us = nap;
 			}
+			uint32_t spin = 0;
+			if (PE_parse_boot_argn("sgu_spin_us", &spin, sizeof(spin)) && spin <= 2000) {
+				sgu_q_spin_us = spin;
+			}
 			sgu_q_on = (sweet_speed_flags() & 262144) != 0;
 			sgu_q_checked = 1;
-			printf("STARLTE GPU QUEUE: %s (sweetspeed&262144), nap %u us\n", sgu_q_on ? "on" : "off", sgu_q_nap_us);
+			printf("STARLTE GPU QUEUE: %s (sweetspeed&262144), spin %u us, nap %u us\n", sgu_q_on ? "on" : "off", sgu_q_spin_us,
+			    sgu_q_nap_us);
 		}
 		lck_mtx_unlock(&sgu_q_lock);
 	}
