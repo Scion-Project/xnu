@@ -88,7 +88,7 @@
 /* ARM64_TODO: move to higher memory */
 #endif
 #define SHARED_REGION_BASE_ARM64                0x180000000ULL
-#define SHARED_REGION_SIZE_ARM64                0x180000000ULL
+#define SHARED_REGION_SIZE_ARM64                0x200000000ULL /* iOS 27 on STARLTE: its cache + max slide need > 6 GiB */
 #define SHARED_REGION_NESTING_BASE_ARM64        SHARED_REGION_BASE_ARM64
 #define SHARED_REGION_NESTING_SIZE_ARM64        SHARED_REGION_SIZE_ARM64
 #define SHARED_REGION_NESTING_MIN_ARM64         ?
