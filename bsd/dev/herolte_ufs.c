@@ -1247,6 +1247,63 @@ starlte_wdog_start(void)
 	    "kern.sweetwdog_test provokes it)\n", secs);
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, starlte_wdog_start);
+
+/*
+ * Boot-arg scionup=1 (off by default): the loader's boot record gets its "user space is up" mark, so that the loader
+ * can tell a boot that reached user space from one that did not (its failed-boot fallback; the record's layout and
+ * owner: the loader's docs/BOOT-RECORD.md). The record is 64 bytes at PA 0x91ffe000, the loader's but for two words:
+ * when its first eight bytes are the magic "SCIONBR1", the sequence number at +0x08 is copied to +0x2c and "SNUP" is
+ * written at +0x28, once per boot, at the first system call from user space (the same sign of life the hang watchdog
+ * uses, seen within a second by a thread that then ends). No other byte of the page is written; without the magic,
+ * nothing is. The page is mapped at boot, not when the mark is made.
+ */
+#define SCION_BOOT_RECORD_PA    0x91ffe000ULL
+#define SCION_BOOT_RECORD_MAGIC 0x3152424e4f494353ULL   /* "SCIONBR1" */
+#define SCION_BOOT_RECORD_UP    0x50554e53U             /* "SNUP" */
+static volatile uint8_t *starlte_bootrec_va;
+
+static void
+starlte_upmark_thread(__unused void *arg, __unused wait_result_t wr)
+{
+	static int chan;
+	/* (with the watchdog on, its look clears the mark every 2 s: its "armed" says the same) */
+	while (sweet_wdog_mark == 0 && !starlte_wdog_armed) {
+		(void)tsleep(&chan, PZERO, "scionup", hz);
+	}
+	volatile uint8_t *r = starlte_bootrec_va;
+	if (*(volatile uint64_t *)(void *)r == SCION_BOOT_RECORD_MAGIC) {
+		uint32_t seq = *(volatile uint32_t *)(void *)(r + 0x08);
+		*(volatile uint32_t *)(void *)(r + 0x2c) = seq;
+		__asm__ volatile ("dsb sy" ::: "memory");
+		*(volatile uint32_t *)(void *)(r + 0x28) = SCION_BOOT_RECORD_UP;
+		__asm__ volatile ("dsb sy" ::: "memory");
+		printf("HEROLTE LOG: scionup: the loader's boot record (sequence %u) is marked: user space is up\n", seq);
+	} else {
+		printf("HEROLTE LOG: scionup: no boot record of the loader's at %#llx (no magic): nothing written\n", SCION_BOOT_RECORD_PA);
+	}
+}
+
+static void
+starlte_upmark_start(void)
+{
+	uint32_t on = 0;
+	thread_t th;
+	if (!PE_parse_boot_argn("scionup", &on, sizeof(on)) || on == 0) {
+		return;
+	}
+	starlte_bootrec_va = (volatile uint8_t *)ml_io_map(SCION_BOOT_RECORD_PA, PAGE_SIZE);
+	if (starlte_bootrec_va == NULL) {
+		printf("HEROLTE LOG: scionup: the boot record's page is not mapped: no mark\n");
+		return;
+	}
+	if (starlte_wdog_secs == 0) {
+		sweet_wdog_mark = 0;                    /* (no watchdog: this is the only reader; the first system call sets it for good) */
+	}
+	if (kernel_thread_start(starlte_upmark_thread, NULL, &th) == KERN_SUCCESS) {
+		thread_deallocate(th);
+	}
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, starlte_upmark_start);
 #endif
 
 static void

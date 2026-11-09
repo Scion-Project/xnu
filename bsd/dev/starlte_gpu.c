@@ -1115,6 +1115,12 @@ static int sgu_q_checked;
 static int sgu_q_nap_event;
 static uint32_t sgu_q_nap_us = 50;                      /* boot-arg sgu_nap_us (10 to 1000) */
 static uint32_t sgu_q_spin_us = 200;                    /* boot-arg sgu_spin_us (0 to 2000): looks 10 us apart before the first nap */
+/*
+ * boot-arg sgu_depth (16 to 256; default 256, the whole queue): how many chains may wait. A submit beyond it sleeps until
+ * the queue is half that long. A frame is 20 to 40 chains; with the whole queue free the window server ran three frames
+ * ahead of the GPU on average and up to ten (queued 55 ms on average in a 57 fps scroll: frames on time, each one late).
+ */
+static uint32_t sgu_q_depth = SGU_QUEUE;
 static LCK_MTX_DECLARE(sgu_q_lock, &sg_lck_grp);
 static LCK_MTX_DECLARE(sgu_q_nap_lock, &sg_lck_grp);
 extern uint32_t sweet_speed_flags(void);                /* boot-arg sweetspeed (osfmk/arm64/sweet_a64e.c) */
@@ -1291,10 +1297,14 @@ sgu_q_enabled(void)
 			if (PE_parse_boot_argn("sgu_spin_us", &spin, sizeof(spin)) && spin <= 2000) {
 				sgu_q_spin_us = spin;
 			}
+			uint32_t depth = 0;
+			if (PE_parse_boot_argn("sgu_depth", &depth, sizeof(depth)) && depth >= 16 && depth <= SGU_QUEUE) {
+				sgu_q_depth = depth;
+			}
 			sgu_q_on = (sweet_speed_flags() & 262144) != 0;
 			sgu_q_checked = 1;
-			printf("STARLTE GPU QUEUE: %s (sweetspeed&262144), spin %u us, nap %u us\n", sgu_q_on ? "on" : "off", sgu_q_spin_us,
-			    sgu_q_nap_us);
+			printf("STARLTE GPU QUEUE: %s (sweetspeed&262144), spin %u us, nap %u us, depth %u\n", sgu_q_on ? "on" : "off",
+			    sgu_q_spin_us, sgu_q_nap_us, sgu_q_depth);
 		}
 		lck_mtx_unlock(&sgu_q_lock);
 	}
@@ -1314,8 +1324,11 @@ sgu_q_enqueue(uint64_t jc, uint32_t requirements)
 			sgu_q_started = true;
 		}
 	}
-	while (sgu_q_count == SGU_QUEUE) {
-		lck_mtx_sleep(&sgu_q_lock, LCK_SLEEP_DEFAULT, (event_t)&sgu_q_head, THREAD_UNINT);
+	if (sgu_q_count >= sgu_q_depth) {
+		/* (down to half: a submitter that woke for every chain done would ride the limit, one wake per chain) */
+		while (sgu_q_count > sgu_q_depth / 2) {
+			lck_mtx_sleep(&sgu_q_lock, LCK_SLEEP_DEFAULT, (event_t)&sgu_q_head, THREAD_UNINT);
+		}
 	}
 	uint64_t seq = ++sgu_q_seq;
 	unsigned at = (sgu_q_head + sgu_q_count) % SGU_QUEUE;
