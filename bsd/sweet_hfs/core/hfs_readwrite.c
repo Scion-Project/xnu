@@ -3166,8 +3166,9 @@ fail_change_next_allocation:
 
 	/*
 	 * APFS's purgeable-file and directory-statistics calls, which iOS's programs make on the data
-	 * volume whatever it is (PosterFoundation's -[NSURL pf_setPurgable:afterDate:error:] on every
-	 * poster directory: "Error marking ... as purgable" and no wallpaper store). This volume keeps no
+	 * volume whatever it is (PosterBoard's -[NSURL pbf_setPurgable:error:] on every file and
+	 * directory of the wallpaper store, "Error marking ... as purgable" and no store; PosterFoundation's
+	 * -[NSURL pf_setPurgable:afterDate:error:] with the newer forms). This volume keeps no
 	 * such accounting and nothing here purges files, so marking is accepted and forgotten, and the
 	 * questions answer "no statistics, not purgeable" (the zeroes fsctl() hands in). Boot-arg
 	 * sweetspeed&0x1000000 (sweet_hfs_pclass.c); without it they are ENOTTY as before.
@@ -3176,6 +3177,7 @@ fail_change_next_allocation:
 	case SWEET_APFSIOC_DIR_STATS_SET:
 	case SWEET_APFSIOC_PURGEABLE_GET:
 	case SWEET_APFSIOC_PURGEABLE_MARK:
+	case SWEET_APFSIOC_MARK_PURGEABLE:
 		return sweet_hfs_purgeable_enabled() ? 0 : ENOTTY;
 
 	default:

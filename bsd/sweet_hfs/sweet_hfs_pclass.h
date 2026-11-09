@@ -27,6 +27,8 @@ void     sweet_hfs_pclass_newnode(struct vnode *dvp, struct vnode *vp, struct vn
 #define SWEET_APFSIOC_DIR_STATS_SET     0xc1104a71u
 #define SWEET_APFSIOC_PURGEABLE_GET     0x40304a6du
 #define SWEET_APFSIOC_PURGEABLE_MARK    0xc0304a6fu
+/* ... and the older one-word form PosterBoard's own -[NSURL pbf_setPurgable:error:] uses (ffsctl, 'J' 68, 8 bytes of flags) */
+#define SWEET_APFSIOC_MARK_PURGEABLE    0xc0084a44u
 int      sweet_hfs_purgeable_enabled(void);
 
 #endif
