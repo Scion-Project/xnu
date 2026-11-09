@@ -813,6 +813,28 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		a5xelte_emmc_probe();
 	}
 	}
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+	{
+	uint32_t ufsprobe = 0;
+	PE_parse_boot_argn("ufsprobe", &ufsprobe, sizeof(ufsprobe));
+	if (ufsprobe == 1) {
+		extern void herolte_ufs_probe(void);
+		herolte_ufs_probe();
+	}
+	}
+	if (strcmp(rdBootVar, "ufsroot0") == 0) {
+		extern int herolte_ufs_rootdev(dev_t *dev);
+		OSSafeReleaseNULL(matching);
+		int ufs_error = herolte_ufs_rootdev(root);
+		if (ufs_error) {
+			panic("IOFindBSDRoot: HEROLTE UFS root %s unavailable: %d", rdBootVar, ufs_error);
+		}
+		strlcpy(rootName, rdBootVar, rootNameSize);
+		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
+		*oflags = 0;
+		goto iofrootx;
+	}
+#endif
 	if (strcmp(rdBootVar, "emmcroot0") == 0) {
 		extern int a5xelte_emmc_rootdev(dev_t *dev);
 		OSSafeReleaseNULL(matching);
