@@ -1379,8 +1379,22 @@ madvise_sanitize(
 	addr_u = vm_sanitize_canonicalize_ut_addr(user_map, addr_u);
 #endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/*
+	 * sweet: 4 KiB-page kernel, 16 KiB user maps. Aligning to the map's page
+	 * here widened libmalloc's 4 KiB MADV_FREE_REUSABLE to the whole 16 KiB
+	 * page and discarded 12 KiB of live heap: launchd died in libSystem
+	 * start-up (free-list checksum, zeroed isa) under iOS 16 and iPadOS 18.
+	 * Align to the hardware page, as xnu-8796's madvise did by passing the
+	 * range through; mach_vm_behavior_set() still picks the map page for the
+	 * behaviors that need it.
+	 */
+	return vm_sanitize_addr_size(addr_u, len_u, VM_SANITIZE_CALLER_MADVISE,
+	           PAGE_MASK, user_map, VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH, start, end, size);
+#else
 	return vm_sanitize_addr_size(addr_u, len_u, VM_SANITIZE_CALLER_MADVISE,
 	           user_map, VM_SANITIZE_FLAGS_SIZE_ZERO_FALLTHROUGH, start, end, size);
+#endif
 }
 
 int
