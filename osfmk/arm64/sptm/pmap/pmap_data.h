@@ -1185,8 +1185,10 @@ typedef struct {
 	 */
 	void *sptm_iommu_scratch;
 
+#if HAS_APPLE_PAC
 	/* Accumulator for batched user pointer SPTM ops, to avoid excessive stack usage. */
 	sptm_user_pointer_op_t sptm_user_pointer_ops[SPTM_MAPPING_LIMIT];
+#endif /* HAS_APPLE_PAC */
 
 	/* Accumulator for batched disjoint SPTM ops, to avoid excessive stack usage. */
 	sptm_disjoint_op_t sptm_ops[SPTM_MAPPING_LIMIT];
@@ -1199,8 +1201,10 @@ typedef struct {
 		sptm_paddr_t sptm_paddrs[SPTM_MAPPING_LIMIT];
 	};
 
+#if HAS_APPLE_PAC
 	/* Base PA of user pointer ops array, for passing the ops into the SPTM. */
 	pmap_paddr_t sptm_user_pointer_ops_pa;
+#endif /* HAS_APPLE_PAC */
 
 	/* Base PA of ops array, for passing the ops into the SPTM. */
 	pmap_paddr_t sptm_ops_pa;

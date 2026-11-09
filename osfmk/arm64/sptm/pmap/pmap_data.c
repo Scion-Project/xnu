@@ -2059,7 +2059,9 @@ pmap_cpu_data_init_internal(unsigned int cpu_number)
 	/* Setup per-cpu fields used when calling into the SPTM. */
 	pmap_sptm_percpu_data_t *sptm_pcpu = PERCPU_GET(pmap_sptm_percpu);
 	assert(((uintptr_t)sptm_pcpu & (PMAP_SPTM_PCPU_ALIGN - 1)) == 0);
+#if HAS_APPLE_PAC
 	sptm_pcpu->sptm_user_pointer_ops_pa = kvtophys_nofail((vm_offset_t)sptm_pcpu->sptm_user_pointer_ops);
+#endif /* HAS_APPLE_PAC */
 	sptm_pcpu->sptm_ops_pa = kvtophys_nofail((vm_offset_t)sptm_pcpu->sptm_ops);
 	sptm_pcpu->sptm_templates_pa = kvtophys_nofail((vm_offset_t)sptm_pcpu->sptm_templates);
 	sptm_pcpu->sptm_paddrs_pa = kvtophys_nofail((vm_offset_t)sptm_pcpu->sptm_paddrs);
