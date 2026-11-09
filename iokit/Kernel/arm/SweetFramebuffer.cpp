@@ -305,6 +305,10 @@ public:
 
 OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
 
+/* the panel's memory as start() found it, for hakios_fb_scanned() below */
+static uintptr_t sweet_fb_scan_base;
+static uint32_t sweet_fb_scan_width, sweet_fb_scan_height, sweet_fb_scan_rowbytes;
+
 bool
 AppleCLCD::start(IOService *provider)
 {
@@ -398,6 +402,10 @@ AppleCLCD::start(IOService *provider)
 		IOLog("SWEET FB: scaled: panel mapping %ux%u for the scaler\n", fWidth, fHeight);
 	}
 	fWorkLoop = IOWorkLoop::workLoop();
+	sweet_fb_scan_base = fPixels;
+	sweet_fb_scan_width = fWidth;
+	sweet_fb_scan_height = fHeight;
+	sweet_fb_scan_rowbytes = fRowBytes;
 	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
 		IOLog("SWEET FB: setup failed\n");
 		OSSafeReleaseNULL(fSurface);    /* stays published: also held by the table */
@@ -490,6 +498,25 @@ AppleCLCD::start(IOService *provider)
 	    hz, 60 / fFlushTicks, fPerfLog ? "on" : "off");
 #endif
 	return true;
+}
+
+/*
+ * The panel's memory for the USB console's "shot" (drivers/usb/hakios.dwc3.c): this board has no vinfo for it to fall
+ * back on (the shot failed with "a picture of 0x0"). 1 ("the shown buffer"), or 0 before the framebuffer has started.
+ */
+extern "C" int hakios_fb_scanned(uintptr_t *base, uint32_t *width, uint32_t *height, uint32_t *rowbytes, unsigned *index);
+extern "C" int
+hakios_fb_scanned(uintptr_t *base, uint32_t *width, uint32_t *height, uint32_t *rowbytes, unsigned *index)
+{
+	if (sweet_fb_scan_base == 0) {
+		return 0;
+	}
+	*base = sweet_fb_scan_base;
+	*width = sweet_fb_scan_width;
+	*height = sweet_fb_scan_height;
+	*rowbytes = sweet_fb_scan_rowbytes;
+	*index = 0;
+	return 1;
 }
 
 void
