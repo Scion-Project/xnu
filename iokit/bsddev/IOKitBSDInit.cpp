@@ -70,6 +70,9 @@ extern int mdevgetrange(int devid, uint64_t *base, uint64_t *size);
 extern void di_root_ramfile(IORegistryEntry * entry);
 extern int IODTGetDefault(const char *key, void *infoAddr, unsigned int infoSize);
 extern boolean_t cpuid_vmm_present(void);
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+extern void a5xelte_emmc_probe(void);
+#endif
 
 #define ROUNDUP(a, b) (((a) + ((b) - 1)) & (~((b) - 1)))
 
@@ -794,6 +797,28 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 			regEntry->release();                                                            /* Toss the entry */
 		}
 	}
+
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+	{
+	uint32_t emmcprobe = 0;
+	PE_parse_boot_argn("emmcprobe", &emmcprobe, sizeof(emmcprobe));
+	if (emmcprobe == 1) {
+		a5xelte_emmc_probe();
+	}
+	}
+	if (strcmp(rdBootVar, "emmcroot0") == 0) {
+		extern int a5xelte_emmc_rootdev(dev_t *dev);
+		OSSafeReleaseNULL(matching);
+		int emmc_error = a5xelte_emmc_rootdev(root);
+		if (emmc_error) {
+			panic("IOFindBSDRoot: A5XELTE eMMC root unavailable: %d", emmc_error);
+		}
+		strlcpy(rootName, rdBootVar, rootNameSize);
+		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
+		*oflags = 0;
+		goto iofrootx;
+	}
+#endif
 
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 //
