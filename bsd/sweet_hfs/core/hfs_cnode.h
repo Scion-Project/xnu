@@ -199,6 +199,8 @@ struct cnode {
 #endif /* HFS_COMPRESSION */
 #if CONFIG_PROTECT
 	struct cprotect *c_cpentry;	/* content protection data */
+#else
+	uint8_t c_sweet_pclass;		/* the data-protection class as a label (sweet_hfs_pclass.c) */
 #endif
 };
 typedef struct cnode cnode_t;

@@ -68,6 +68,7 @@
 #include "hfs_cnode.h"
 #include "hfs_fsctl.h"
 #include "hfs_cprotect.h"
+#include "sweet_hfs_pclass.h"
 
 #include "FileMgrInternal.h"
 #include "BTreesInternal.h"
@@ -954,6 +955,12 @@ OSErr hfs_MountHFSPlusVolume(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 		vfs_clearflags(hfsmp->hfs_mp, MNT_CPROTECT);	
 #endif
 	}
+#if !CONFIG_PROTECT
+	/* classes as labels (sweet_hfs_pclass.c): boot-arg sweetspeed&0x200000 says so in the mount's flags */
+	if (sweet_hfs_pclass_mntflag()) {
+		vfs_setflags(hfsmp->hfs_mp, MNT_CPROTECT);
+	}
+#endif
 
 	/*
 	 * Establish a metadata allocation zone.

@@ -76,6 +76,8 @@
 #include	"BTreesInternal.h"
 #include	"hfs_cnode.h"
 #include	"hfs_dbg.h"
+#include "sweet_hfs_pclass.h"
+#include <sys/content_protection.h>
 
 #if HFS_CONFIG_KEY_ROLL
 #include	"hfs_key_roll.h"
@@ -3140,6 +3142,19 @@ fail_change_next_allocation:
 
 	case F_GETDEFAULTPROTLEVEL:
 		return cp_get_default_level(vp, (uint32_t *)ap->a_data);
+#else
+	/* classes as labels (sweet_hfs_pclass.c): the layout version Apple's HFS reports, and D for what has no class */
+	case F_GETPROTECTIONLEVEL:
+		if (!sweet_hfs_pclass_enabled())
+			return ENOTTY;
+		*(uint32_t *)ap->a_data = 5;
+		return 0;
+
+	case F_GETDEFAULTPROTLEVEL:
+		if (!sweet_hfs_pclass_enabled())
+			return ENOTTY;
+		*(uint32_t *)ap->a_data = PROTECTION_CLASS_D;
+		return 0;
 #endif // CONFIG_PROTECT
 
 	case FIOPINSWAP:

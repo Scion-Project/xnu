@@ -69,6 +69,7 @@
 #include "hfs_endian.h"
 #include "hfs_kdebug.h"
 #include "hfs_cprotect.h"
+#include "sweet_hfs_pclass.h"
 
 #if HFS_CONFIG_KEY_ROLL
 #include "hfs_key_roll.h"
@@ -1154,6 +1155,12 @@ hfs_vnop_getattr(struct vnop_getattr_args *ap)
     		vap->va_dataprotect_class = cp->c_cpentry ? CP_CLASS(cp->c_cpentry->cp_pclass) : 0;
     		VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
     	} 	
+#else
+	/* the class as a label: what was set, else D (sweet_hfs_pclass.c; boot-arg sweetspeed&0x100000) */
+	if (VATTR_IS_ACTIVE(vap, va_dataprotect_class) && sweet_hfs_pclass_enabled()) {
+		vap->va_dataprotect_class = sweet_hfs_pclass_get(vp, cp);
+		VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
+	}
 #endif
 	if (VATTR_IS_ACTIVE(vap, va_write_gencount)) {
 		if (ubc_is_mapped_writable(vp)) {
@@ -1646,6 +1653,12 @@ out:
 	VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
 	if (!error && VATTR_IS_ACTIVE(vap, va_dataprotect_class))
 		error = cp_vnode_setclass(vp, vap->va_dataprotect_class);
+#else
+	if (sweet_hfs_pclass_enabled()) {
+		VATTR_SET_SUPPORTED(vap, va_dataprotect_class);
+		if (!error && VATTR_IS_ACTIVE(vap, va_dataprotect_class))
+			error = sweet_hfs_pclass_set(vp, vap->va_dataprotect_class);
+	}
 #endif
 
 	return (error);
@@ -6874,6 +6887,13 @@ hfs_makenode(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp,
 			/* cp could have been zeroed earlier */ 
 			(void) hfs_getinoquota(cp); 
 		}
+	}
+#endif
+
+#if !CONFIG_PROTECT
+	/* the class as a label: the one asked for, else the directory's (sweet_hfs_pclass.c) */
+	if (cp != NULL && sweet_hfs_pclass_enabled()) {
+		sweet_hfs_pclass_newnode(dvp, tvp, vap);
 	}
 #endif
 
