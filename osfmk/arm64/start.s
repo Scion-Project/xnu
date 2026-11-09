@@ -534,7 +534,7 @@ LEXT(start_first_cpu)
 	str		x11, [x10]
 	dsb		sy
 	/* XNU-owned green entry block on the Exynos DECON scanout buffer. */
-	MOV64	x10, (A5XELTE_FB_PA+88*A5XELTE_FB_STRIDE+960)
+	MOV64	x10, (A5XELTE_CONSOLE_PA+88*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xff00ff00
 	mov		x12, #21
 	mov		x15, #A5XELTE_FB_STRIDE
@@ -897,10 +897,16 @@ common_start:
 	MOV64   x0, SCTLR_EL1_DEFAULT
 	MSR_SCTLR_EL1_X0
 	isb		sy
+#if defined(STARLTE)
+	/* Cortex-A55: PSTATE.PAN off (SCTLR.SPAN keeps it off from here). The
+	 * A53-targeted assembler has no PAN name: msr PAN, #0 = 0xd500409f. */
+	.long	0xd500409f
+	isb		sy
+#endif
 
 #if defined(A5XELTE)
 	/* Blue block: the 4 KiB MMU is active and the framebuffer alias works. */
-	MOV64	x10, (A5XELTE_FB_PA+120*A5XELTE_FB_STRIDE+960)
+	MOV64	x10, (A5XELTE_CONSOLE_PA+120*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xff0000ff
 	mov		x12, #21
 	mov		x15, #A5XELTE_FB_STRIDE
@@ -944,7 +950,7 @@ La5_mmu_pixel:
 
 #if defined(A5XELTE)
 	/* fp_enabled: write directly to the DECON scanout alias. */
-	MOV64	x10, (A5XELTE_FB_PA+152*A5XELTE_FB_STRIDE+960)
+	MOV64	x10, (A5XELTE_CONSOLE_PA+152*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xff00ffff
 	mov	x12, #21
 	mov	x15, #A5XELTE_FB_STRIDE
@@ -979,7 +985,7 @@ La5_fp_enabled_pixel:
 
 #if defined(A5XELTE)
 	/* tunables_done: write directly to the DECON scanout alias. */
-	MOV64	x10, (A5XELTE_FB_PA+184*A5XELTE_FB_STRIDE+960)
+	MOV64	x10, (A5XELTE_CONSOLE_PA+184*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xffff00ff
 	mov	x12, #21
 	mov	x15, #A5XELTE_FB_STRIDE
@@ -1025,7 +1031,7 @@ La5_tunables_done_pixel:
 
 #if defined(A5XELTE)
 	/* arm_init_jump: write directly to the DECON scanout alias. */
-	MOV64	x10, (A5XELTE_FB_PA+216*A5XELTE_FB_STRIDE+960)
+	MOV64	x10, (A5XELTE_CONSOLE_PA+216*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xffffff00
 	mov	x12, #21
 	mov	x15, #A5XELTE_FB_STRIDE
@@ -1111,7 +1117,7 @@ arm_init_tramp:
 La5_draw_text:
 	adrp	x3, EXT(iso_font)@page
 	add	x3, x3, EXT(iso_font)@pageoff
-	MOV64	x4, A5XELTE_FB_PA
+	MOV64	x4, A5XELTE_CONSOLE_PA
 	mov	x5, #A5XELTE_FB_STRIDE
 	madd	x4, x2, x5, x4
 	add	x4, x4, x1, lsl #2

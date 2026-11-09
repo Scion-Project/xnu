@@ -800,7 +800,43 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		}
 	}
 
-#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* Exynos 9810: GPIO keys with S9 pins (a5xelte_keys.c) and the
+	 * S6SY761 touch driver (starlte_touch.c); no S7 PMIC/GPU code.
+	 * Boot-arg ufsprobe=1: read-only UFS host state and LUN 0 GPT. */
+	{
+		extern void starlte_brand_banner(bool full);
+		starlte_brand_banner(true);
+	}
+	a5xelte_keys_init();
+	{
+		extern void starlte_touch_probe(void);
+		starlte_touch_probe();
+		extern void starlte_smp_probe(void);   /* boot-arg starsmpprobe=1 */
+		starlte_smp_probe();
+	}
+	{
+	uint32_t ufsprobe = 0;
+	PE_parse_boot_argn("ufsprobe", &ufsprobe, sizeof(ufsprobe));
+	if (ufsprobe == 1) {
+		extern void herolte_ufs_probe(void);
+		herolte_ufs_probe();
+	}
+	}
+	/* rd=ufsroot0: the ufsroot= partition (default USERDATA), read-only. */
+	if (strcmp(rdBootVar, "ufsroot0") == 0) {
+		extern int herolte_ufs_rootdev(dev_t *dev);
+		OSSafeReleaseNULL(matching);
+		int ufs_error = herolte_ufs_rootdev(root);
+		if (ufs_error) {
+			panic("IOFindBSDRoot: STARLTE UFS root %s unavailable: %d", rdBootVar, ufs_error);
+		}
+		strlcpy(rootName, rdBootVar, rootNameSize);
+		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
+		*oflags = 0;
+		goto iofrootx;
+	}
+#elif defined(ARM64_BOARD_CONFIG_A5XELTE)
 	/* GPIO keys: Exynos 7580 or, on HEROLTE, the Exynos 8890 ALIVE pins. */
 	a5xelte_keys_init();
 #if defined(ARM64_BOARD_CONFIG_HEROLTE)

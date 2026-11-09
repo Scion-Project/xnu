@@ -1163,6 +1163,39 @@ sweet_sample_task(const char *name, int pid, task_t task)
 	printf("SMP %s[%d] slide 0x%llx mh 0x%llx\n", name, pid, slide, task->mach_header_vm_address);
 
 	task_lock(task);
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* Kernel side of each thread: where is it blocked? The saved kernel
+	 * registers of a thread that is not running sit at kstackptr; walk its
+	 * frame-pointer chain inside its own kernel stack only. */
+	{
+		int kn = 0;
+		extern vm_offset_t vm_kernel_slide;
+		queue_iterate(&task->threads, thread, thread_t, task_threads) {
+			char kl[400];
+			int m = snprintf(kl, sizeof(kl), "SMP %s k%d state 0x%x wait 0x%llx hint %d cont 0x%lx kslide 0x%lx",
+			    name, kn++, thread->state, (uint64_t)thread->wait_event, (int)thread->block_hint,
+			    (unsigned long)VM_KERNEL_UNSLIDE(thread->continuation), (unsigned long)vm_kernel_slide);
+			vm_offset_t lo = thread->kernel_stack, hi = lo + kernel_stack_size;
+			if (thread != current_thread() && thread->machine.kstackptr && lo) {
+				arm_kernel_saved_state_t *ks = (arm_kernel_saved_state_t *)thread->machine.kstackptr;
+				uint64_t kfp = ks->fp;
+				m += snprintf(kl + m, sizeof(kl) - m, " klr 0x%lx kbt",
+				    (unsigned long)VM_KERNEL_UNSLIDE(ks->lr));
+				for (int i = 0; i < 20 && kfp >= lo && kfp + 16 <= hi && (kfp & 7) == 0 &&
+				    m < (int)sizeof(kl) - 20; i++) {
+					uint64_t *f = (uint64_t *)kfp;
+					m += snprintf(kl + m, sizeof(kl) - m, " 0x%lx",
+					    (unsigned long)VM_KERNEL_UNSLIDE(f[1]));
+					if (f[0] <= kfp) {
+						break;
+					}
+					kfp = f[0];
+				}
+			}
+			printf("%s\n", kl);
+		}
+	}
+#endif
 	queue_iterate(&task->threads, thread, thread_t, task_threads) {
 		arm_saved_state_t *ss = find_user_regs(thread);
 		char line[400];
