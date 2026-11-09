@@ -819,12 +819,36 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		starlte_gpu_probe();
 	}
 	{
+	/* Boot-arg sdprobe=1: read-only microSD probe (bsd/dev/starlte_sd.c):
+	 * card, MBR, p1/p2 heads, sdroot= range; sdprobe=2 ends in a panic. */
+	uint32_t sdprobe = 0;
+	PE_parse_boot_argn("sdprobe", &sdprobe, sizeof(sdprobe));
+	if (sdprobe) {
+		extern void starlte_sd_probe(void);
+		starlte_sd_probe();
+	}
+	}
+	{
 	uint32_t ufsprobe = 0;
 	PE_parse_boot_argn("ufsprobe", &ufsprobe, sizeof(ufsprobe));
 	if (ufsprobe == 1) {
 		extern void herolte_ufs_probe(void);
 		herolte_ufs_probe();
 	}
+	}
+	/* rd=sdroot0: the sdroot= range of the microSD card (pN or lba:START,COUNT,
+	 * no default), read-only; UFS is never brought up. */
+	if (strcmp(rdBootVar, "sdroot0") == 0) {
+		extern int starlte_sd_rootdev(dev_t *dev);
+		OSSafeReleaseNULL(matching);
+		int sd_error = starlte_sd_rootdev(root);
+		if (sd_error) {
+			panic("IOFindBSDRoot: STARLTE microSD root %s unavailable: %d", rdBootVar, sd_error);
+		}
+		strlcpy(rootName, rdBootVar, rootNameSize);
+		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
+		*oflags = 0;
+		goto iofrootx;
 	}
 	/* rd=ufsroot0: the ufsroot= partition (default USERDATA), read-only. */
 	if (strcmp(rdBootVar, "ufsroot0") == 0) {
