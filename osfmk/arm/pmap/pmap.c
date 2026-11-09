@@ -4952,8 +4952,14 @@ pmap_page_protect_options_with_flush_range(
 			}
 #endif
 			if (remove && (options & PMAP_OPTIONS_COMPRESSOR)) {
+#if XNU_MONITOR
 				panic("pmap_page_protect: attempt to compress ppnum 0x%x owned by iommu %p, pve_p=%p",
 				    ppnum, ptep_get_iommu(pte_p), pve_p);
+#else
+				/* Scion: ptep_get_iommu() comes with the monitor's IOMMU code, which the open source lacks */
+				panic("pmap_page_protect: attempt to compress ppnum 0x%x owned by an iommu (pte %p), pve_p=%p",
+				    ppnum, pte_p, pve_p);
+#endif
 			}
 			goto protect_skip_pve_pass1;
 		}
@@ -6179,6 +6185,9 @@ pmap_construct_pte(
 	pte |= ARM_PTE_AF;
 	return pte;
 }
+
+/* Scion: defined further down, and called before that */
+MARK_AS_PMAP_TEXT static void pmap_phys_write_disable(vm_address_t va);
 
 MARK_AS_PMAP_TEXT kern_return_t
 pmap_enter_options_internal(
@@ -12243,7 +12252,8 @@ pmap_cs_lockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
 #if XNU_MONITOR
 	pmap_ppl_lockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
 #else
-	pmap_ppl_lockdown_pages(kva, size, 0, ppl_writable);
+	/* Scion: without a monitor there is nothing to lock the pages against; Apple's helper for it is not open source */
+#pragma unused(kva, size, ppl_writable)
 #endif
 }
 
@@ -12253,7 +12263,8 @@ pmap_cs_unlockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
 #if XNU_MONITOR
 	pmap_ppl_unlockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
 #else
-	pmap_ppl_unlockdown_pages(kva, size, 0, ppl_writable);
+	/* Scion: likewise (pmap_cs_lockdown_pages) */
+#pragma unused(kva, size, ppl_writable)
 #endif
 }
 
