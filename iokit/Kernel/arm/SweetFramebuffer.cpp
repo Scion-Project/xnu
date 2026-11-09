@@ -56,6 +56,7 @@ extern "C" uint64_t a5xelte_power_pressed_at;   /* bsd/dev/a5xelte_keys.c */
 #include <kern/thread.h>
 #include <sys/proc.h>
 extern "C" uint32_t sweet_speed_flags(void);     /* boot-arg sweetspeed (osfmk/arm64/sweet_a64e.c) */
+static uint32_t sweet_fb_gaps[5];       /* vsync ticks between presented frames (sweetspeed&16384, see the present path) */
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
 /* the S6E3HA8 panel brightness (bsd/dev/hakios.s6e3ha8.c; on with boot-arg sweetspeed&512) */
 extern "C" void hakios_s6e3ha8_init(void);
@@ -561,6 +562,15 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 			uint64_t ns = 0;
 			absolutetime_to_nanoseconds(mach_absolute_time() - before, &ns);
 			fb->fPerfFrames++;
+			{
+				/* sweetspeed&16384: vsync ticks between presented frames (1 = 60 fps, 2 = one tick missed, 7+ = idle) */
+				static uint64_t last_tick;
+				uint64_t gap = count - last_tick;
+				last_tick = count;
+				if ((sweet_fb_sbx & 16384) != 0) {
+					sweet_fb_gaps[gap <= 1 ? 0 : gap == 2 ? 1 : gap == 3 ? 2 : gap <= 6 ? 3 : 4]++;
+				}
+			}
 			fb->fPerfBytes += bytes;
 			fb->fPerfNS += ns;
 			if (ns > fb->fPerfMaxNS) {
@@ -585,7 +595,12 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 			    fb->fPerfFrames, elapsedNS / 1000000, fpsTenths / 10,
 			    fpsTenths % 10, fb->fPerfBytes,
 			    fb->fPerfNS / fb->fPerfFrames / 1000, fb->fPerfMaxNS / 1000);
+			if ((sweet_fb_sbx & 16384) != 0) {
+				IOLog("A5XELTE FB gaps: 1:%u 2:%u 3:%u 4-6:%u 7+:%u\n", sweet_fb_gaps[0], sweet_fb_gaps[1], sweet_fb_gaps[2],
+				    sweet_fb_gaps[3], sweet_fb_gaps[4]);
+			}
 		}
+		bzero(sweet_fb_gaps, sizeof(sweet_fb_gaps));
 		fb->fPerfFrames = fb->fPerfBytes = fb->fPerfNS = fb->fPerfMaxNS = 0;
 		fb->fPerfWindowStart = finished;
 	}

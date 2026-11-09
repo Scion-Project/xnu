@@ -1369,6 +1369,12 @@ handle_uncategorized(arm_saved_state_t *state)
 				thread_block(THREAD_CONTINUE_NULL);
 				return;
 			}
+		} else {
+			/* trapped on an M3, migrated to an A55 before the checks above: run it again here */
+			extern bool sweet_a55_retry_ok(uint32_t, thread_t, uint64_t);
+			if (sweet_a55_retry_ok(instr, current_thread(), get_saved_state_pc(state))) {
+				return;
+			}
 		}
 	}
 #endif

@@ -215,6 +215,7 @@ enum running_timer {
 	RUNNING_TIMER_KPERF,
 #endif /* KPERF */
 	RUNNING_TIMER_PERFCONTROL,
+	RUNNING_TIMER_SWEETPROF,        /* osfmk/arm64/sweet_prof.c (sweetspeed&16384) */
 	RUNNING_TIMER_MAX,
 };
 

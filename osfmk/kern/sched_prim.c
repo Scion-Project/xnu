@@ -3857,6 +3857,8 @@ thread_dispatch(
 			 * CPU is not running.
 			 */
 			kperf_running_setup(processor, processor->last_dispatch);
+			extern void sweet_prof_running_setup(processor_t, uint64_t);
+			sweet_prof_running_setup(processor, processor->last_dispatch);
 		}
 		running_timers_activate(processor);
 		processor->first_timeslice = TRUE;

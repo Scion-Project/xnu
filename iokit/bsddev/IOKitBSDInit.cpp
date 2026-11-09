@@ -820,6 +820,9 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		extern bool hakios_exynos_cpufreq_gov_start(void);
 		(void)hakios_exynos_cpufreq_gov_start();
 		/* Boot-arg wifi_pcie=N (1-5): Scion's Wi-Fi stage 1, PCIe channel 0 to the BCM4361 (bsd/dev/hakios.exynos_pcie.c). */
+		/* Boot-arg extra_ram_canary=1 (with extra_ram=1): the extra RAM's canary pages checked every 10 s (arm_vm_init.c). */
+		extern void hakios_extra_ram_canary_start(void);
+		hakios_extra_ram_canary_start();
 		extern void hakios_exynos_pcie_init(void);
 		hakios_exynos_pcie_init();
 		/* Boot-arg dpu_probe=1: Scion's DPU scan-out service, its read-only probe (bsd/dev/hakios.exynos_dpu.c). */

@@ -2208,10 +2208,17 @@ ml_release_deferred_pages(void)
  * does for its pages.
  */
 void hakios_extra_ram_give(ppnum_t first, ppnum_t end);
+extern unsigned int hakios_extra_ram_canary_stride;     /* arm_vm_init.c: pages kept out as canaries, one in this many */
 void
 hakios_extra_ram_give(ppnum_t first, ppnum_t end)
 {
+	unsigned int kept = 0;
+
 	for (ppnum_t ppn = first; ppn < end; ppn++) {
+		if (hakios_extra_ram_canary_stride != 0 && (ppn - first) % hakios_extra_ram_canary_stride == 0) {
+			kept++;         /* a canary: not the VM's (extra_ram_canary=1) */
+			continue;
+		}
 		if (__probable(!ml_static_mfree_queue_up)) {
 			vm_page_create_canonical(ppn);
 		} else {
@@ -2221,8 +2228,8 @@ hakios_extra_ram_give(ppnum_t first, ppnum_t end)
 		}
 	}
 	vm_page_lockspin_queues();
-	vm_page_wire_count -= (unsigned int)(end - first);
-	vm_page_wire_count_initial -= (unsigned int)(end - first);
+	vm_page_wire_count -= (unsigned int)(end - first) - kept;
+	vm_page_wire_count_initial -= (unsigned int)(end - first) - kept;
 	vm_page_unlock_queues();
 }
 

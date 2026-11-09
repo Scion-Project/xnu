@@ -30,6 +30,7 @@
 #include <debug.h>
 
 #include <kern/assert.h>
+#include <kern/thread.h>
 #include <kern/misc_protos.h>
 #include <kern/monotonic.h>
 #include <mach/vm_types.h>
@@ -44,6 +45,7 @@
 #include <arm64/sweet_early.h>
 #include <arm/cpu_data_internal.h>
 #include <arm/misc_protos.h>
+#include <arm/caches_internal.h>
 #include <pexpert/arm64/boot.h>
 #include <pexpert/device_tree.h>
 
@@ -390,6 +392,7 @@ SECURITY_READ_ONLY_LATE(unsigned int) hakios_extra_ram_count = 0;
 SECURITY_READ_ONLY_LATE(unsigned int) hakios_extra_ram_pages = 0;
 SECURITY_READ_ONLY_LATE(static unsigned int) hakios_extra_ram_refused = 0;
 SECURITY_READ_ONLY_LATE(static unsigned int) hakios_extra_ram_offered = 0;
+extern unsigned int hakios_extra_ram_canary_stride;       /* (below: extra_ram_canary=1) */
 
 static void
 hakios_extra_ram_init(void)
@@ -403,6 +406,16 @@ hakios_extra_ram_init(void)
 		return;
 	}
 	(void)PE_parse_boot_argn("extra_ram_mask", &mask, sizeof(mask));
+	uint32_t canary = 0;
+	uint32_t canary_bit = 0;
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	extern uint32_t sweet_speed_flags(void);        /* sweetspeed&32768 = extra_ram_canary=1 (for a command line that is full) */
+	canary_bit = sweet_speed_flags() & 32768;
+#endif
+	if (canary_bit != 0 ||
+	    (PE_parse_boot_argn("extra_ram_canary", &canary, sizeof(canary)) && canary != 0)) {
+		hakios_extra_ram_canary_stride = (unsigned int)((4u << 20) / PAGE_SIZE);
+	}
 	cap_mb = on > 1 ? on : 0;
 	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
 	    SecureDTGetProperty(chosen, "hakios-extra-ram", (void const **)&ranges, &size) != kSuccess) {
@@ -445,6 +458,87 @@ hakios_extra_ram_init(void)
 		if ((ppnum_t)atop(pa) < pmap_first_pnum) {
 			pmap_first_pnum = (ppnum_t)atop(pa);
 		}
+	}
+}
+
+/*
+ * extra_ram_canary=1: one 4 KB page every 4 MB of each extra range is kept out of the VM, filled with a pattern (its own
+ * address, so a page moved or copied shows too), and checked every 10 s by hakios_extra_ram_canary_thread() (started from
+ * IOKitBSDInit.cpp), out of the cache: a page that changes says that something outside the kernel (the firmware, a DMA
+ * engine left running by S-Boot) writes in that range. A diagnostic for the S-Boot path's ranges; costs 1/1024 of them.
+ */
+SECURITY_READ_ONLY_LATE(unsigned int) hakios_extra_ram_canary_stride = 0;
+#define HAKIOS_CANARY_WORD(pa) ((uint64_t)(pa) ^ 0xC0FFEE005CA1AB1EULL)
+
+static void
+hakios_extra_ram_canary_fill(pmap_paddr_t pa)
+{
+	volatile uint64_t *w = (volatile uint64_t *)phystokv(pa);
+
+	for (unsigned k = 0; k < ARM_PGBYTES / 8; k++) {
+		w[k] = HAKIOS_CANARY_WORD(pa + 8 * k);
+	}
+	FlushPoC_DcacheRegion((vm_offset_t)w, ARM_PGBYTES);
+}
+
+void hakios_extra_ram_canary_start(void);
+static void
+hakios_extra_ram_canary_thread(__unused void *arg, __unused wait_result_t wr)
+{
+	unsigned pages = 0, total = 0, round = 0;
+
+	for (unsigned i = 0; i < hakios_extra_ram_count; i++) {
+		pages += (unsigned)((atop(hakios_extra_ram[i].end - hakios_extra_ram[i].pa) + hakios_extra_ram_canary_stride - 1) /
+		    hakios_extra_ram_canary_stride);
+	}
+	printf("hakios: extra RAM canary: %u pages (one every %u KB), checked every 10 s\n", pages,
+	    hakios_extra_ram_canary_stride * (unsigned)(PAGE_SIZE >> 10));
+	for (;;) {
+		unsigned changed = 0;
+		for (unsigned i = 0; i < hakios_extra_ram_count; i++) {
+			for (pmap_paddr_t pa = hakios_extra_ram[i].pa; pa < hakios_extra_ram[i].end;
+			    pa += ptoa((pmap_paddr_t)hakios_extra_ram_canary_stride)) {
+				volatile uint64_t *w = (volatile uint64_t *)phystokv(pa);
+				FlushPoC_DcacheRegion((vm_offset_t)w, ARM_PGBYTES);
+				unsigned bad = 0, first = 0;
+				uint64_t got = 0;
+				for (unsigned k = 0; k < ARM_PGBYTES / 8; k++) {
+					if (w[k] != HAKIOS_CANARY_WORD(pa + 8 * k)) {
+						if (bad++ == 0) {
+							first = k;
+							got = w[k];
+						}
+					}
+				}
+				if (bad) {
+					changed++;
+					total++;
+					if (total <= 64) {
+						printf("hakios: extra RAM canary: page 0x%llx changed (range %u): %u words, first at +0x%x = 0x%llx\n",
+						    (unsigned long long)pa, i, bad, first * 8, got);
+					}
+					hakios_extra_ram_canary_fill(pa);
+				}
+			}
+		}
+		if (changed || round % 30 == 0) {
+			printf("hakios: extra RAM canary: round %u: %u of %u pages changed (%u in all)\n", round, changed, pages, total);
+		}
+		round++;
+		delay_for_interval(10 * 1000, NSEC_PER_MSEC);
+	}
+}
+
+void
+hakios_extra_ram_canary_start(void)
+{
+	thread_t thread;
+
+	if (hakios_extra_ram_canary_stride == 0 || hakios_extra_ram_count == 0) {
+		return;
+	}
+	if (kernel_thread_start(hakios_extra_ram_canary_thread, NULL, &thread) == KERN_SUCCESS) {
+		thread_deallocate(thread);
 	}
 }
 
@@ -1804,6 +1898,10 @@ arm_vm_prot_finalize(boot_args * args __unused)
 	 */
 	for (unsigned int i = 0; i < hakios_extra_ram_count; i++) {
 		extern void hakios_extra_ram_give(ppnum_t first, ppnum_t end);
+		for (pmap_paddr_t pa = hakios_extra_ram[i].pa; hakios_extra_ram_canary_stride != 0 && pa < hakios_extra_ram[i].end;
+		    pa += ptoa((pmap_paddr_t)hakios_extra_ram_canary_stride)) {
+			hakios_extra_ram_canary_fill(pa);
+		}
 		hakios_extra_ram_give((ppnum_t)atop(hakios_extra_ram[i].pa), (ppnum_t)atop(hakios_extra_ram[i].end));
 		printf("hakios: extra RAM 0x%llx..0x%llx (%llu MB) given to the VM\n", (unsigned long long)hakios_extra_ram[i].pa,
 		    (unsigned long long)hakios_extra_ram[i].end - 1,

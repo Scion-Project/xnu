@@ -214,11 +214,13 @@ pset_is_primary(pset_id_t pset_id)
 #if !SCHED_TEST_HARNESS
 
 struct processor        PERCPU_DATA(processor);
+extern void sweet_prof_expire(timer_call_param_t, timer_call_param_t);
 static timer_call_func_t running_timer_funcs[] = {
 	[RUNNING_TIMER_QUANTUM] = thread_quantum_expire,
 	[RUNNING_TIMER_PREEMPT] = thread_preempt_expire,
 	[RUNNING_TIMER_KPERF] = kperf_timer_expire,
 	[RUNNING_TIMER_PERFCONTROL] = perfcontrol_timer_expire,
+	[RUNNING_TIMER_SWEETPROF] = sweet_prof_expire,
 };
 static_assert(sizeof(running_timer_funcs) / sizeof(running_timer_funcs[0])
     == RUNNING_TIMER_MAX, "missing running timer function");
