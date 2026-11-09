@@ -68,6 +68,7 @@ subsystem
 #endif	/* KERNEL_SERVER || KOBJECT_SERVER */
 	  task 3400;
 
+#include <mach/sweet_ports_compat.h>
 #include <mach/std_types.defs>
 #include <mach/mach_types.defs>
 #include <mach_debug/mach_debug_types.defs>
@@ -132,7 +133,7 @@ task_threads(
  *	Stash a handful of ports for the target task; child
  *	tasks inherit this stash at task_create time.
  */
-#if LIBSYSCALL_INTERFACE
+#if LIBSYSCALL_INTERFACE || SWEET_LEGACY_PORT_ARRAYS
 routine	mach_ports_register(
 		target_task	: task_t;
 		init_port_set	: mach_port_array_t =
@@ -148,7 +149,7 @@ routine	_kernelrpc_mach_ports_register3(
 /*
  *	Retrieve the stashed ports for the target task.
  */
-#if LIBSYSCALL_INTERFACE
+#if LIBSYSCALL_INTERFACE || SWEET_LEGACY_PORT_ARRAYS
 routine	mach_ports_lookup(
 		target_task	: task_t;
 	out	init_port_set	: mach_port_array_t =

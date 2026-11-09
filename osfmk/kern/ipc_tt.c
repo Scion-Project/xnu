@@ -2180,6 +2180,68 @@ out:
  *		KERN_INVALID_ARGUMENT	Too many port rights supplied.
  */
 
+#include <mach/sweet_ports_compat.h>
+#if SWEET_LEGACY_PORT_ARRAYS
+/*
+ * Starbite (mach/sweet_ports_compat.h): the older out-of-line form of the two routines, for macOS 13 user space;
+ * the three-port routines below do the work. MIG gives the array as kernel memory of mach_port_ool_t (consumed).
+ */
+kern_return_t _kernelrpc_mach_ports_register3(task_t, mach_port_t, mach_port_t, mach_port_t);
+kern_return_t _kernelrpc_mach_ports_lookup3(task_t, ipc_port_t *, ipc_port_t *, ipc_port_t *);
+kern_return_t mach_ports_register(task_t, mach_port_array_t, mach_msg_type_number_t);
+kern_return_t mach_ports_lookup(task_t, mach_port_array_t *, mach_msg_type_number_t *);
+
+kern_return_t
+mach_ports_register(
+	task_t                  task,
+	mach_port_array_t       memory,
+	mach_msg_type_number_t  portsCnt)
+{
+	ipc_port_t p[TASK_PORT_REGISTER_MAX] = { IP_NULL, IP_NULL, IP_NULL };
+
+	if (task == TASK_NULL || portsCnt > TASK_PORT_REGISTER_MAX || (portsCnt != 0 && memory == NULL)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	for (mach_msg_type_number_t i = 0; i < portsCnt; i++) {
+		p[i] = memory[i].port;
+	}
+	kern_return_t kr = _kernelrpc_mach_ports_register3(task, p[0], p[1], p[2]);
+	if (kr == KERN_SUCCESS && portsCnt != 0) {
+		mach_port_array_free(memory, portsCnt);     /* the rights went to the task */
+	}
+	return kr;
+}
+
+kern_return_t
+mach_ports_lookup(
+	task_t                  task,
+	mach_port_array_t      *portsp,
+	mach_msg_type_number_t *portsCnt)
+{
+	ipc_port_t p[TASK_PORT_REGISTER_MAX];
+	mach_port_array_t memory;
+
+	if (task == TASK_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	memory = mach_port_array_alloc(TASK_PORT_REGISTER_MAX, Z_WAITOK | Z_ZERO);
+	if (memory == NULL) {
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	kern_return_t kr = _kernelrpc_mach_ports_lookup3(task, &p[0], &p[1], &p[2]);
+	if (kr != KERN_SUCCESS) {
+		mach_port_array_free(memory, TASK_PORT_REGISTER_MAX);
+		return kr;
+	}
+	for (int i = 0; i < TASK_PORT_REGISTER_MAX; i++) {
+		memory[i].port = p[i];
+	}
+	*portsp = memory;
+	*portsCnt = TASK_PORT_REGISTER_MAX;
+	return KERN_SUCCESS;
+}
+#endif /* SWEET_LEGACY_PORT_ARRAYS */
+
 kern_return_t
 _kernelrpc_mach_ports_register3(
 	task_t                  task,
