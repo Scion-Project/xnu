@@ -1,6 +1,7 @@
 /*
- * sweet: Apple's UAT (GPU unified address translator) header is not in the
- * open source drop. No UAT on Qualcomm hardware; bootstrap is a no-op.
+ * Scion: stand-in for arm64/ppl/uat.h, which Apple's open-source XNU includes but does not ship. The UAT (the unified
+ * address translator) is the page table format of Apple's own GPU; a machine without that GPU needs nothing from it,
+ * so bootstrap is a no-op. One copy for every board of this tree (VMAPPLE and the generic ARMv8 boards).
  */
 #ifndef _ARM64_PPL_UAT_H_
 #define _ARM64_PPL_UAT_H_
