@@ -60,6 +60,10 @@ $(foreach o,$(SWEET_HFS_OBJS),$(eval $(o)_CFLAGS_ADD += -include $(SWEET_HFS_ROO
 # HFSEncodings is a separate kext on Apple with its own allocation counter.
 hfs_encodings.o_CFLAGS_ADD += -Dhfs_allocated=hfs_encodings_allocated
 hfs_encodinghint.o_CFLAGS_ADD += -Dhfs_allocated=hfs_encodings_allocated
+
+# Scion's Wi-Fi: the station layer (hakios.sta.c) is in this kernel
+hakios.lx.o_CFLAGS_ADD += -DHAKIOS_WIFI_STA -include vm/vm_kern_xnu.h
+hakios.brcmfmac.o_CFLAGS_ADD += -DHAKIOS_WIFI_STA
 endif
 
 #

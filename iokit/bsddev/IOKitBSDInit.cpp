@@ -824,8 +824,8 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		/* Boot-arg extra_ram_canary=1 (with extra_ram=1): the extra RAM's canary pages checked every 10 s (arm_vm_init.c). */
 		extern void hakios_extra_ram_canary_start(void);
 		hakios_extra_ram_canary_start();
-		extern void hakios_exynos_pcie_init(void);
-		hakios_exynos_pcie_init();
+		extern void starlte_wifi_init(void);
+		starlte_wifi_init();       /* wifi_pcie=N: en0's options, then the link and (6) brcmfmac (bsd/dev/starlte_wifi.c) */
 		/* Boot-arg dpu_probe=1: Scion's DPU scan-out service, its read-only probe (bsd/dev/hakios.exynos_dpu.c). */
 		extern void hakios_exynos_dpu_boot_probe(void);
 		hakios_exynos_dpu_boot_probe();
