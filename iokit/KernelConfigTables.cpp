@@ -70,12 +70,16 @@ const char * gIOKernelConfigTables =
     "     'IOProviderClass' = IOResources;"
     "     'IOMatchCategory' = IOCoreSurfaceRoot;"
     "   },"
-#if !defined(ARM64_BOARD_CONFIG_A5XELTE)
     "   {"
     "     'IOClass'         = AppleCLCD;"
     "     'IOProviderClass' = IOPlatformDevice;"
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+    "     'IONameMatch'     = 'samsung,a5xelte-display';"
+#else
     "     'IONameMatch'     = 'sweet,display';"
+#endif
     "   },"
+#if !defined(ARM64_BOARD_CONFIG_A5XELTE)
     "   {"
     "     'IOClass'         = SweetHIDButtons;"
     "     'IOProviderClass' = IOResources;"
