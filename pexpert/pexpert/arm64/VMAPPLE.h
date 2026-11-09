@@ -67,6 +67,9 @@
 
 #ifndef ASSEMBLER
 #define PL011_UART
+#if defined(SCION_NATIVE_PAC) && SCION_NATIVE_PAC
+#define SCION_NS16550_UART      /* crosvm's console (pexpert/arm/pe_serial.c) */
+#endif
 #define PLATFORM_PANIC_LOG_DISABLED
 #endif /* ! ASSEMBLER */
 

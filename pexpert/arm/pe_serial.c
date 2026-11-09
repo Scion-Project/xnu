@@ -733,6 +733,86 @@ pl011_uart_setup(const DeviceTreeNode *const devicetree_node)
 
 /*****************************************************************************/
 
+#ifdef SCION_NS16550_UART
+/*
+ * 8250/16550 UART, devicetree compatible "ns16550a": the console of crosvm,
+ * the VMM of Android's Virtualization Framework (ttyS0 at 0x3f8, which AVF
+ * captures as the VM's console). Byte-wide registers one byte apart; crosvm
+ * ignores accesses of any other width. Polled, at the firmware's baud rate.
+ */
+static volatile uint8_t *ns16550_regs = NULL;
+
+#define NS16550_RBR_THR         0x0
+#define NS16550_IER             0x1
+#define NS16550_FCR             0x2
+#define NS16550_LCR             0x3
+#define NS16550_MCR             0x4
+#define NS16550_LSR             0x5
+#define NS16550_LSR_DR          0x01u
+#define NS16550_LSR_THRE        0x20u
+
+static unsigned int
+ns16550_transmit_ready(void)
+{
+	return (ns16550_regs[NS16550_LSR] & NS16550_LSR_THRE) != 0;
+}
+
+static void
+ns16550_transmit_data(uint8_t c)
+{
+	ns16550_regs[NS16550_RBR_THR] = c;
+}
+
+static unsigned int
+ns16550_receive_ready(void)
+{
+	return (ns16550_regs[NS16550_LSR] & NS16550_LSR_DR) != 0;
+}
+
+static uint8_t
+ns16550_receive_data(void)
+{
+	return ns16550_regs[NS16550_RBR_THR];
+}
+
+static void
+ns16550_init(void)
+{
+	ns16550_regs[NS16550_IER] = 0x00;       /* no interrupts */
+	ns16550_regs[NS16550_LCR] = 0x03;       /* 8N1, divisor latch closed */
+	ns16550_regs[NS16550_FCR] = 0x07;       /* FIFOs on and cleared */
+	ns16550_regs[NS16550_MCR] = 0x03;       /* DTR, RTS */
+}
+
+SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) ns16550_serial_functions =
+{
+	.init = ns16550_init,
+	.transmit_ready = ns16550_transmit_ready,
+	.transmit_data = ns16550_transmit_data,
+	.receive_ready = ns16550_receive_ready,
+	.receive_data = ns16550_receive_data,
+	.device = SERIAL_PL011_UART     /* the one serial device this board has */
+};
+
+static void
+ns16550_setup(const DeviceTreeNode *const devicetree_node)
+{
+	const struct {
+		uint64_t block_offset;
+		uint64_t block_size;
+	} *reg;
+	unsigned int reg_size;
+	if (SecureDTGetProperty(devicetree_node, "reg", (const void **)&reg, &reg_size) != kSuccess) {
+		panic("Unable to find the 'reg' property on the 16550 UART devicetree node");
+	}
+	const vm_offset_t soc_base_phys = pe_arm_get_soc_base_phys();
+	ns16550_regs = (volatile uint8_t *)ml_io_map(soc_base_phys + reg->block_offset, reg->block_size);
+	register_serial_functions(&ns16550_serial_functions);
+}
+#endif /* SCION_NS16550_UART */
+
+/*****************************************************************************/
+
 /**
  * Output @str onto every registered serial interface by polling.
  *
@@ -809,6 +889,9 @@ static const struct {
 #ifdef PL011_UART
 	{ .compatible = "arm,pl011", .setup = pl011_uart_setup },
 #endif // PL011_UART
+#ifdef SCION_NS16550_UART
+	{ .compatible = "ns16550a", .setup = ns16550_setup },
+#endif // SCION_NS16550_UART
 };
 
 /**
