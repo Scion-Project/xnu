@@ -3351,6 +3351,9 @@ vm_shared_region_slide_page_v3(
 			} else {
 				memcpy(rebaseLocation, &value, sizeof(value));
 			}
+#else /* __has_feature(ptrauth_calls) */
+			/* no pointer authentication: store the plain rebased pointer */
+			memcpy(rebaseLocation, &value, sizeof(value));
 #endif /* __has_feature(ptrauth_calls) */
 		} else {
 			// The new value for a rebase is the low 51-bits of the threaded value plus the slide.
@@ -3570,6 +3573,9 @@ vm_shared_region_slide_page_v5(
 			} else {
 				memcpy(rebaseLocation, &value, sizeof(value));
 			}
+#else /* __has_feature(ptrauth_calls) */
+			/* no pointer authentication: store the plain rebased pointer */
+			memcpy(rebaseLocation, &value, sizeof(value));
 #endif /* __has_feature(ptrauth_calls) */
 		} else {
 			// the value already has the correct low bits, so just add in the high8 if it exists

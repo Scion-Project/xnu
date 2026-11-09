@@ -474,6 +474,104 @@ shared_region_pager_data_initialize(
 	return KERN_FAILURE;
 }
 
+
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * sweet: a 4 KiB-page kernel sliding a 16 KiB-page (arm64e, slide info v5)
+ * cache. The loop below assumes slide pages are no larger than kernel pages;
+ * here each 4 KiB page is slid inside its whole 16 KiB slide page, assembled
+ * from the backing object, and only the page's part is copied out.
+ */
+static kern_return_t
+sweet_sr_read_src(vm_object_t obj, vm_object_offset_t off, void *buf,
+    struct vm_object_fault_info *fault_info)
+{
+	vm_page_t         page, top_page;
+	vm_prot_t         prot;
+	kern_return_t     error_code;
+	vm_fault_return_t vmfr;
+
+retry:
+	vm_page_grab_prime();
+	vm_object_lock(obj);
+	vm_object_paging_begin(obj);
+	error_code = 0;
+	prot = VM_PROT_READ;
+	page = VM_PAGE_NULL;
+	top_page = VM_PAGE_NULL;
+	vmfr = vm_fault_page(obj, off, VM_PROT_READ, FALSE, FALSE, &prot, &page, &top_page,
+	    NULL, &error_code, FALSE, fault_info, NULL);
+	switch (vmfr) {
+	case VM_FAULT_SUCCESS:
+		break;
+	case VM_FAULT_RETRY:
+		goto retry;
+	case VM_FAULT_MEMORY_SHORTAGE:
+		if (vm_page_wait(THREAD_UNINT)) {
+			goto retry;
+		}
+		return KERN_RESOURCE_SHORTAGE;
+	case VM_FAULT_SUCCESS_NO_VM_PAGE:
+		vm_object_paging_end(obj);
+		vm_object_unlock(obj);
+		return KERN_MEMORY_ERROR;
+	case VM_FAULT_BUSY:
+		return KERN_ALREADY_WAITING;
+	default:
+		return error_code ? error_code : KERN_MEMORY_ERROR;
+	}
+	vm_object_t page_obj = VM_PAGE_OBJECT(page);
+	bcopy((const void *)phystokv((pmap_paddr_t)VM_PAGE_GET_PHYS_PAGE(page) << PAGE_SHIFT), buf, PAGE_SIZE);
+	vm_page_wakeup_done(page_obj, page);
+	vm_object_paging_end(page_obj);
+	vm_object_unlock(page_obj);
+	if (top_page != VM_PAGE_NULL) {
+		vm_object_lock(obj);
+		VM_PAGE_FREE(top_page);
+		vm_object_paging_end(obj);
+		vm_object_unlock(obj);
+	}
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+sweet_sr_slide_subpage(shared_region_pager_t pager, vm_object_t obj,
+    struct vm_object_fault_info *fault_info, vm_object_offset_t chunk_offset,
+    vm_offset_t src, vm_offset_t dst, uint64_t sps, mach_vm_offset_t slide_start)
+{
+	vm_shared_region_slide_info_t si = pager->srp_slide_info;
+	vm_object_offset_t off_backing = chunk_offset + pager->srp_backing_offset;
+	kern_return_t      kr = KERN_SUCCESS;
+
+	bcopy((const void *)src, (void *)dst, PAGE_SIZE);
+	if (off_backing < si->si_start || off_backing >= si->si_end) {
+		return KERN_SUCCESS;            /* outside the sliding range */
+	}
+	vm_object_offset_t in_range = off_backing - si->si_start;
+	vm_object_offset_t sub = in_range % sps;
+	vm_object_offset_t block = in_range - sub;
+	void               *raw = kalloc_data(2 * sps, Z_WAITOK | Z_NOFAIL);
+	vm_offset_t        buf = ((vm_offset_t)raw + sps - 1) & ~(vm_offset_t)(sps - 1);
+
+	for (uint64_t o = 0; o < sps && kr == KERN_SUCCESS; o += PAGE_SIZE) {
+		if (o == sub) {
+			bcopy((const void *)src, (void *)(buf + o), PAGE_SIZE);
+		} else {
+			kr = sweet_sr_read_src(obj, off_backing - sub + o, (void *)(buf + o), fault_info);
+		}
+	}
+	if (kr == KERN_SUCCESS) {
+		kr = vm_shared_region_slide_page(si, buf, slide_start + block,
+		    (uint32_t)(block / sps), 0);
+	}
+	if (kr == KERN_SUCCESS) {
+		bcopy((const void *)(buf + sub), (void *)dst, PAGE_SIZE);
+	}
+	kfree_data(raw, 2 * sps);
+	return kr;
+}
+#endif /* SWEET || A5XELTE */
+
 /*
  * shared_region_pager_data_request()
  *
@@ -707,6 +805,19 @@ retry_src_fault:
 		 * Process the original contents of the source page
 		 * into the destination page.
 		 */
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+		if (slide_info_page_size > PAGE_SIZE) {
+			kr = sweet_sr_slide_subpage(pager, src_top_object, &fault_info,
+			    offset + cur_offset, src_vaddr, dst_vaddr, slide_info_page_size,
+			    slide_start_address);
+			if (kr != KERN_SUCCESS) {
+				shared_region_pager_slid_error++;
+				retval = KERN_MEMORY_ERROR;
+			} else {
+				shared_region_pager_slid++;
+			}
+		} else
+#endif
 		for (offset_in_page = 0;
 		    offset_in_page < PAGE_SIZE;
 		    offset_in_page += slide_info_page_size) {
