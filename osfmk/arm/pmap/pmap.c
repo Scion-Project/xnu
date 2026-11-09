@@ -4952,8 +4952,9 @@ pmap_page_protect_options_with_flush_range(
 			}
 #endif
 			if (remove && (options & PMAP_OPTIONS_COMPRESSOR)) {
-				panic("pmap_page_protect: attempt to compress ppnum 0x%x owned by iommu %p, pve_p=%p",
-				    ppnum, ptep_get_iommu(pte_p), pve_p);
+				/* ptep_get_iommu() only exists in Apple's PPL builds: report the raw PV entry */
+				panic("pmap_page_protect: attempt to compress ppnum 0x%x owned by iommu pte %p, pve_p=%p",
+				    ppnum, pte_p, pve_p);
 			}
 			goto protect_skip_pve_pass1;
 		}
@@ -6179,6 +6180,9 @@ pmap_construct_pte(
 	pte |= ARM_PTE_AF;
 	return pte;
 }
+
+/* defined further down; used by pmap_enter_options_internal() */
+MARK_AS_PMAP_TEXT static void pmap_phys_write_disable(vm_address_t va);
 
 MARK_AS_PMAP_TEXT kern_return_t
 pmap_enter_options_internal(
@@ -12243,7 +12247,8 @@ pmap_cs_lockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
 #if XNU_MONITOR
 	pmap_ppl_lockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
 #else
-	pmap_ppl_lockdown_pages(kva, size, 0, ppl_writable);
+	/* No PPL: nothing can lock pages down (pmap_ppl_lockdown_pages is PPL-only) */
+#pragma unused(kva, size, ppl_writable)
 #endif
 }
 
@@ -12253,7 +12258,7 @@ pmap_cs_unlockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
 #if XNU_MONITOR
 	pmap_ppl_unlockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
 #else
-	pmap_ppl_unlockdown_pages(kva, size, 0, ppl_writable);
+#pragma unused(kva, size, ppl_writable)
 #endif
 }
 

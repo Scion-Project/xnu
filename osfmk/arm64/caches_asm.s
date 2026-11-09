@@ -213,6 +213,7 @@ L_ipui_loop:
 	.globl EXT(CleanPoC_Dcache)
 	.globl EXT(clean_mmu_dcache)
 LEXT(CleanPoC_Dcache)
+LEXT(clean_mmu_dcache)		/* sweet: was exported without a label */
 	ARM64_PROLOG
 #if  defined(APPLE_ARM64_ARCH_FAMILY)
 	dsb		sy
@@ -353,6 +354,23 @@ LEXT(CleanPoC_DcacheRegion_Force)
 	ARM64_PROLOG
 	b		EXT(CleanPoC_DcacheRegion_internal)
 #endif /* APPLE_ARM64_ARCH_FAMILY */
+
+#if !defined(APPLE_ARM64_ARCH_FAMILY)
+/*
+ *	void CleanPoC_DcacheRegion_Force_nopreempt(vm_offset_t va, size_t length)
+ *	void CleanPoC_DcacheRegion_Force_nopreempt_nohid(vm_offset_t va, size_t length)
+ *
+ *		sweet: the Apple variants toggle HID bits around DC CVAC; generic
+ *		ARMv8 has no such bits, so both are the plain region clean.
+ */
+	.text
+	.align 2
+	.globl EXT(CleanPoC_DcacheRegion_Force_nopreempt)
+	.globl EXT(CleanPoC_DcacheRegion_Force_nopreempt_nohid)
+LEXT(CleanPoC_DcacheRegion_Force_nopreempt)
+LEXT(CleanPoC_DcacheRegion_Force_nopreempt_nohid)
+	b		EXT(CleanPoC_DcacheRegion_internal)
+#endif /* !APPLE_ARM64_ARCH_FAMILY */
 
 /*
  *	void FlushPoC_Dcache(void)
