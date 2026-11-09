@@ -1104,6 +1104,149 @@ starlte_reboot_timer(void)
 	}
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, starlte_reboot_timer);
+
+/*
+ * Boot-arg sweetwdog=SECONDS (0 or absent: off; at least 60): a watchdog for hard hangs. A phone that stops with no
+ * panic (9 November: dead 66 s into a boot, the console gone, nothing in pstore) never comes back by itself.
+ *
+ * Every 2 s a timer call (so: from the timer interrupt, with no thread to schedule and no lock taken) looks at two signs
+ * of life. The kernel's: a thread of ordinary priority that wakes every second and notes the time. User space's: a
+ * system call or Mach trap from EL0 since the last look (sweet_wdog_mark, osfmk/arm64/sleh.c). The watchdog is armed
+ * by the first system call it sees, so a boot that never reaches user space is the panic paths' business, not its.
+ * When either sign is older than SECONDS it writes one line (which sign, both ages, the uptime) and the console's
+ * tail into the ramoops pmsg ring, as a panic does (TWRP: /sys/fs/pstore/pmsg-ramoops-0), and resets into recovery
+ * through the PMU. It cannot see a hang in which no CPU takes timer interrupts any more (that needs the SoC's own
+ * watchdog timer, which this kernel does not drive), nor one on the single CPU its timer call lives on.
+ *
+ * kern.sweetwdog_test (the USB console: "sysctl kern.sweetwdog_test=N") provokes it without hanging anything:
+ * 1 = signs of life from user space are not counted any more, 2 = the kernel thread stops noting the time.
+ * kern.sweetwdog_ages reads "kernel-age user-age" in ms as the last look saw them.
+ */
+#include <kern/timer_call.h>
+#include <sys/sysctl.h>
+extern volatile uint32_t sweet_wdog_mark;
+static uint32_t starlte_wdog_secs, starlte_wdog_test, starlte_wdog_armed;
+static volatile uint64_t starlte_wdog_kbeat, starlte_wdog_ubeat;
+static uint64_t starlte_wdog_limit, starlte_wdog_step, starlte_wdog_kage_ms, starlte_wdog_uage_ms;
+static timer_call_data_t starlte_wdog_tc;
+static char starlte_wdog_why[160];
+SYSCTL_UINT(_kern, OID_AUTO, sweetwdog_test, CTLFLAG_RW | CTLFLAG_LOCKED, &starlte_wdog_test, 0,
+    "hang watchdog test: 1 = ignore user space's signs of life, 2 = stop the kernel thread's");
+SYSCTL_QUAD(_kern, OID_AUTO, sweetwdog_kernel_age_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &starlte_wdog_kage_ms,
+    "hang watchdog: ms since the kernel thread's last sign of life, at the last look");
+SYSCTL_QUAD(_kern, OID_AUTO, sweetwdog_user_age_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &starlte_wdog_uage_ms,
+    "hang watchdog: ms since user space's last system call, at the last look");
+
+/* From the timer interrupt: the reason and the console's tail into the pmsg ring, then the reset. No lock, no allocation. */
+static void
+starlte_wdog_fire(void)
+{
+	static const char mid[] = "--- console before the hang:\n";
+	volatile uint32_t *h = (volatile uint32_t *)(void *)starlte_pmsg_va;
+	const char *ring;
+	uint32_t rsize, o = 0;
+	uint64_t total;
+
+	if (h != NULL) {
+		volatile uint8_t *d = starlte_pmsg_va + 12;
+		starlte_pmsg_put(d, &o, starlte_wdog_why, (uint32_t)strlen(starlte_wdog_why));
+		starlte_pmsg_put(d, &o, mid, sizeof(mid) - 1);
+		a5xelte_log_snapshot(&ring, &rsize, &total);
+		uint64_t n = MIN(total, MIN((uint64_t)rsize, (uint64_t)(STARLTE_PMSG_DATA - o)));
+		for (uint64_t k = total - n; k < total; k++) {
+			starlte_pmsg_put(d, &o, &ring[k % rsize], 1);
+		}
+		h[0] = 0x43474244U;                     /* "DBGC" */
+		h[1] = o % STARLTE_PMSG_DATA;
+		h[2] = o;
+		__asm__ volatile ("dsb sy" ::: "memory");
+	}
+	starlte_reset_to_recovery();
+}
+
+static void
+starlte_wdog_tick(__unused timer_call_param_t p0, __unused timer_call_param_t p1)
+{
+	uint64_t now = mach_absolute_time(), kage = 0, uage = 0;
+
+	if (sweet_wdog_mark != 0) {
+		if (starlte_wdog_test != 1) {
+			starlte_wdog_ubeat = now;
+			if (!starlte_wdog_armed) {
+				starlte_wdog_armed = 1;         /* (the first system call: user space is up) */
+				starlte_wdog_kbeat = now;
+			}
+		}
+		sweet_wdog_mark = 0;
+	}
+	if (starlte_wdog_armed) {
+		kage = now - starlte_wdog_kbeat;
+		uage = now - starlte_wdog_ubeat;
+		absolutetime_to_nanoseconds(kage, &starlte_wdog_kage_ms);
+		absolutetime_to_nanoseconds(uage, &starlte_wdog_uage_ms);
+		starlte_wdog_kage_ms /= NSEC_PER_MSEC;
+		starlte_wdog_uage_ms /= NSEC_PER_MSEC;
+		if (kage > starlte_wdog_limit || uage > starlte_wdog_limit) {
+			uint64_t up = 0;
+			absolutetime_to_nanoseconds(now, &up);
+			snprintf(starlte_wdog_why, sizeof(starlte_wdog_why),
+			    "STARBITE: HANG WATCHDOG (sweetwdog=%u): no sign of life from %s; kernel thread %llu ms ago, user space %llu ms ago, "
+			    "up %llu s, test %u\n", starlte_wdog_secs, kage > starlte_wdog_limit ? "the kernel's thread" : "user space",
+			    starlte_wdog_kage_ms, starlte_wdog_uage_ms, up / NSEC_PER_SEC, starlte_wdog_test);
+			starlte_wdog_fire();
+		}
+	}
+	timer_call_enter(&starlte_wdog_tc, now + starlte_wdog_step, TIMER_CALL_SYS_CRITICAL);
+}
+
+static void
+starlte_wdog_thread(__unused void *arg, __unused wait_result_t wr)
+{
+	static int chan;
+	/* armed from here, a running thread, not from the start-up hook: the timer calls are surely up */
+	timer_call_setup(&starlte_wdog_tc, starlte_wdog_tick, NULL);
+	timer_call_enter(&starlte_wdog_tc, mach_absolute_time() + starlte_wdog_step, TIMER_CALL_SYS_CRITICAL);
+	for (;;) {
+		if (starlte_wdog_test != 2) {
+			starlte_wdog_kbeat = mach_absolute_time();
+		}
+		(void)tsleep(&chan, PZERO, "sweetwdog", hz);
+	}
+}
+
+static void
+starlte_wdog_start(void)
+{
+	uint32_t secs = 0;
+	thread_t th;
+	if (!PE_parse_boot_argn("sweetwdog", &secs, sizeof(secs)) || secs == 0) {
+		return;
+	}
+	if (secs < 60) {
+		secs = 60;
+	}
+	if (starlte_pmu_va == NULL || starlte_pmsg_va == NULL) {
+		starlte_reboot_setup();                 /* (no sweetreboot on the line: the reset's mappings are still needed) */
+	}
+	if (starlte_pmu_va == NULL) {
+		printf("HEROLTE LOG: sweetwdog: not armed (no PMU mapping)\n");
+		return;
+	}
+	starlte_wdog_secs = secs;
+	nanoseconds_to_absolutetime((uint64_t)secs * NSEC_PER_SEC, &starlte_wdog_limit);
+	nanoseconds_to_absolutetime(2ull * NSEC_PER_SEC, &starlte_wdog_step);
+	starlte_wdog_kbeat = starlte_wdog_ubeat = mach_absolute_time();
+	sweet_wdog_mark = 0;                            /* the first system call arms it */
+	if (kernel_thread_start(starlte_wdog_thread, NULL, &th) != KERN_SUCCESS) {
+		sweet_wdog_mark = 1;
+		printf("HEROLTE LOG: sweetwdog: not armed (no thread)\n");
+		return;
+	}
+	thread_deallocate(th);
+	printf("HEROLTE LOG: sweetwdog=%u: the hang watchdog starts with the first system call (looks every 2 s; "
+	    "kern.sweetwdog_test provokes it)\n", secs);
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, starlte_wdog_start);
 #endif
 
 static void
