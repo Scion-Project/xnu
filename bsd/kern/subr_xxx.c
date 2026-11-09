@@ -72,6 +72,7 @@
 
 #include <sys/signalvar.h>              /* for psignal() */
 #include <kern/debug.h>
+#include <sys/user.h>                   /* struct uthread (STARLTE NOSYS log) */
 
 #if DEVELOPMENT || DEBUG
 TUNABLE(bool, no_sigsys, "-no_sigsys", false);
@@ -180,6 +181,18 @@ nullsys(void)
 int
 nosys(__unused struct proc *p, __unused struct nosys_args *args, __unused int32_t *retval)
 {
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	{
+		/* which syscall a new userland (macOS 26) wants that this kernel lacks; capped */
+		static int left = 200;
+		if (left > 0) {
+			left--;
+			uthread_t ut = current_uthread();
+			printf("STARBITE NOSYS: %s[%d] syscall %u\n", p ? p->p_comm : "?", p ? proc_getpid(p) : -1,
+			    ut ? (unsigned)ut->syscall_code : 0u);
+		}
+	}
+#endif
 	if (send_sigsys) {
 		psignal_uthread(current_thread(), SIGSYS);
 	}
