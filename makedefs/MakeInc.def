@@ -1151,8 +1151,13 @@ LD_KERNEL_LIBS	   = -lcc_kext
 LD_KERNEL_ARCHIVES = $(LDFLAGS_KERNEL_SDK) -lfirehose_kernel
 
 # Link binary support library
+# Scion: Apple's binary support library comes with a KDK, which this build does not use: the parts of the
+# machine layer it holds are compiled from this tree instead (nos_arm_asm, nos_arm_pmap in the machine's MASTER).
+# It is linked only when it is there.
 ifneq ($(CURRENT_MACHINE_CONFIG),NONE)
+ifneq ($(wildcard $(KDKROOT)/System/Library/KernelSupport/lib$(CURRENT_MACHINE_CONFIG).os.$(CURRENT_KERNEL_CONFIG).a),)
         LDFLAGS_KERNEL_ONLY += -rdynamic -Wl,-force_load,$(KDKROOT)/System/Library/KernelSupport/lib$(CURRENT_MACHINE_CONFIG).os.$(CURRENT_KERNEL_CONFIG).a
+endif
 endif
 
 #
