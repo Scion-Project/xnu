@@ -801,9 +801,10 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 	}
 
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
-#if !defined(ARM64_BOARD_CONFIG_HEROLTE)
-	/* Exynos 7580 GPIO/I2C addresses; HEROLTE needs its own drivers. */
+	/* GPIO keys: Exynos 7580 or, on HEROLTE, the Exynos 8890 ALIVE pins. */
 	a5xelte_keys_init();
+#if !defined(ARM64_BOARD_CONFIG_HEROLTE)
+	/* Exynos 7580 I2C touch; HEROLTE needs its own driver. */
 	a5xelte_touch_probe();
 #endif
 	{
