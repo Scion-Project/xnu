@@ -53,6 +53,7 @@ EXPORTS_FILES := $(foreach symbolset,$(SYMBOL_COMPONENT_LIST),$(symbolset).expor
 # Private.arm64.generic.exports are Private.exports and Private.arm64.exports without the symbols of Apple's closed
 # support library (IOMMU, DART, UAT, ...) that these boards do not have.
 ifneq ($(filter SWEET A5XELTE HEROLTE STARLTE,$(CURRENT_MACHINE_CONFIG)),)
+GENERIC_EXPORTS_SUFFIX := .generic
 EXPORTS_FILES := $(patsubst Private.exports,Private.generic.exports,$(patsubst Private.arm64.exports,Private.arm64.generic.exports,$(EXPORTS_FILES)))
 endif
 # sweet: the generic boards do not link Apple's closed libTightbeam.
@@ -144,8 +145,8 @@ check_all_exports: $(TARGET)/allsymbols $(KEXT_CREATE_SYMBOL_SET)
 		$(ARCH_FLAGS_$(CURRENT_ARCH_CONFIG))			\
 		-import $(TARGET)/allsymbols				\
 		$(foreach symbolset,$(filter-out Unsupported,$(SYMBOL_COMPONENT_LIST)),	\
-			-export $(SOURCE)/$(symbolset).exports		\
-			-export $(SOURCE)/$(symbolset).$(EXPORT_SOURCE_ARCH_CONFIG_LC).exports)	\
+			-export $(SOURCE)/$(symbolset)$(if $(filter Private,$(symbolset)),$(GENERIC_EXPORTS_SUFFIX)).exports		\
+			-export $(SOURCE)/$(symbolset).$(EXPORT_SOURCE_ARCH_CONFIG_LC)$(if $(filter Private,$(symbolset)),$(GENERIC_EXPORTS_SUFFIX)).exports)	\
 		-output /dev/null $(_vstdout)
 
 $(OBJPATH)/$(MD_SUPPORTED_KPI_FILENAME): $(EXPORTS_FILES)
