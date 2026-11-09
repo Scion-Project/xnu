@@ -76,6 +76,8 @@
 #include	"BTreesInternal.h"
 #include	"hfs_cnode.h"
 #include	"hfs_dbg.h"
+#include "sweet_hfs_pclass.h"
+#include <sys/content_protection.h>
 
 #if HFS_CONFIG_KEY_ROLL
 #include	"hfs_key_roll.h"
@@ -3140,6 +3142,19 @@ fail_change_next_allocation:
 
 	case F_GETDEFAULTPROTLEVEL:
 		return cp_get_default_level(vp, (uint32_t *)ap->a_data);
+#else
+	/* classes as labels (sweet_hfs_pclass.c): the layout version Apple's HFS reports, and D for what has no class */
+	case F_GETPROTECTIONLEVEL:
+		if (!sweet_hfs_pclass_enabled())
+			return ENOTTY;
+		*(uint32_t *)ap->a_data = 5;
+		return 0;
+
+	case F_GETDEFAULTPROTLEVEL:
+		if (!sweet_hfs_pclass_enabled())
+			return ENOTTY;
+		*(uint32_t *)ap->a_data = PROTECTION_CLASS_D;
+		return 0;
 #endif // CONFIG_PROTECT
 
 	case FIOPINSWAP:
@@ -3148,6 +3163,22 @@ fail_change_next_allocation:
 
 	case FSIOC_CAS_BSDFLAGS:
 		return hfs_cas_bsdflags(hfsmp, vp, ap);
+
+	/*
+	 * APFS's purgeable-file and directory-statistics calls, which iOS's programs make on the data
+	 * volume whatever it is (PosterBoard's -[NSURL pbf_setPurgable:error:] on every file and
+	 * directory of the wallpaper store, "Error marking ... as purgable" and no store; PosterFoundation's
+	 * -[NSURL pf_setPurgable:afterDate:error:] with the newer forms). This volume keeps no
+	 * such accounting and nothing here purges files, so marking is accepted and forgotten, and the
+	 * questions answer "no statistics, not purgeable" (the zeroes fsctl() hands in). Boot-arg
+	 * sweetspeed&0x1000000 (sweet_hfs_pclass.c); without it they are ENOTTY as before.
+	 */
+	case SWEET_APFSIOC_DIR_STATS_GET:
+	case SWEET_APFSIOC_DIR_STATS_SET:
+	case SWEET_APFSIOC_PURGEABLE_GET:
+	case SWEET_APFSIOC_PURGEABLE_MARK:
+	case SWEET_APFSIOC_MARK_PURGEABLE:
+		return sweet_hfs_purgeable_enabled() ? 0 : ENOTTY;
 
 	default:
 		return (ENOTTY);

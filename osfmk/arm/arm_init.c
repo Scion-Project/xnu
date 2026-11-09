@@ -166,6 +166,99 @@ boot_args const_boot_args BOOTARGS_SECTION_ATTR;
 boot_args      *BootArgs BOOTARGS_SECTION_ATTR;
 
 TUNABLE(uint32_t, arm_diag, "diag", 0);
+
+#if defined(STARLTE)
+/*
+ * The Galaxy S9's known-good settings, built in.
+ *
+ * The loader hands over a 608-byte command line (its boot_args is the older layout; this kernel's line is
+ * BOOT_LINE_LENGTH long), and the S9's settings alone fill almost all of it, so a test line had to drop
+ * one setting to add another. Each argument below is appended to the kernel's own copy of the line unless
+ * the loader's line already names it, so the loader's line carries only what it changes, and user space
+ * reads the whole line through kern.bootargs as before. "sweetreboot" is one of them on purpose: without
+ * it neither the USB console's "return" nor a panic can get the phone back to recovery.
+ * Naming "sweetdef" on the loader's line (sweetdef=0) leaves the line exactly as the loader gave it.
+ */
+static const char starlte_default_bootargs[] =
+    "debug=0xc serial=3 cpus=8 rd=ufsroot0 ufsroot=USERDATA ufsrw=1 rootrw=1 "
+    "cs_enforcement_disable=1 ignition_level=1 launchd_unsecure_cache=1 wdt=-1 "
+    "a5fb_keep_on=1 sweetfb_scale=1 sweetfb_lw=828 sweetfb_lh=1792 a5fb_noconsole=1 a5fb_hz=60 sweetfb_gpu=1 "
+    "vm_compression_limit=196608 cs_integrity_skip=1 sweetmemscale=4 sweetacl=1 sweetreboot=86400 usb_gadget=5 "
+    "sweetinject=/usr/lib/s.dylib,backboardd,Preferences;/usr/lib/m.dylib,PosterBoard,SpringBoard;/usr/lib/b.dylib,backboardd "
+    "sbprof=0 sbmtl=1 extra_ram=1 extra_ram_mask=127 cpufreq_gov=1 cpufreq_gov_big_min=1794000 "
+    "sweetm3unpin=2 sweetspeed=100351";
+
+static bool
+starlte_bootarg_sep(char c)
+{
+	return c == ' ' || c == '\t';
+}
+
+/* Does a token of `line` have the name `key` (klen bytes)? "key", "key=value" and "-key" forms are whole names. */
+static bool
+starlte_bootarg_named(const char *line, const char *key, size_t klen)
+{
+	const char *p = line;
+
+	while (*p) {
+		while (starlte_bootarg_sep(*p)) {
+			p++;
+		}
+		const char *t = p;
+		while (*p && !starlte_bootarg_sep(*p) && *p != '=') {
+			p++;
+		}
+		if ((size_t)(p - t) == klen && klen != 0 && strncmp(t, key, klen) == 0) {
+			return true;
+		}
+		while (*p && !starlte_bootarg_sep(*p)) {
+			p++;
+		}
+	}
+	return false;
+}
+
+static void
+starlte_bootargs_defaults(boot_args *ba)
+{
+	char *line = ba->CommandLine;
+	const char *d = starlte_default_bootargs;
+	size_t len;
+
+	line[BOOT_LINE_LENGTH - 1] = '\0';
+	len = strlen(line);
+	if (starlte_bootarg_named(line, "sweetdef", 8)) {
+		return;
+	}
+	while (*d) {
+		while (starlte_bootarg_sep(*d)) {
+			d++;
+		}
+		const char *t = d, *k = d;
+		while (*k && !starlte_bootarg_sep(*k) && *k != '=') {
+			k++;
+		}
+		while (*d && !starlte_bootarg_sep(*d)) {
+			d++;
+		}
+		size_t tlen = (size_t)(d - t);
+		if (tlen == 0) {
+			break;
+		}
+		if (starlte_bootarg_named(line, t, (size_t)(k - t)) || len + 1 + tlen >= BOOT_LINE_LENGTH) {
+			continue;
+		}
+		if (len != 0) {
+			line[len++] = ' ';
+		}
+		for (size_t i = 0; i < tlen; i++) {
+			line[len++] = t[i];
+		}
+		line[len] = '\0';
+	}
+}
+#endif /* STARLTE */
+
 #ifdef  APPLETYPHOON
 static unsigned cpus_defeatures = 0x0;
 extern void cpu_defeatures_set(unsigned int);
@@ -486,6 +579,9 @@ arm_init(
 	/* If kernel integrity is supported, use a constant copy of the boot args. */
 	const_boot_args = *args;
 	BootArgs = args = &const_boot_args;
+#if defined(STARLTE)
+	starlte_bootargs_defaults(&const_boot_args);
+#endif
 
 #if APPLEVIRTUALPLATFORM
 	reset_vector_vaddr = (vm_offset_t) &LowResetVectorBase;
