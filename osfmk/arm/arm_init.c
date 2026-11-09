@@ -226,6 +226,117 @@ extern vm_offset_t segLOWESTKC, segHIGHESTKC, segLOWESTROKC, segHIGHESTROKC;
 extern vm_offset_t segLOWESTAuxKC, segHIGHESTAuxKC, segLOWESTROAuxKC, segHIGHESTROAuxKC;
 extern vm_offset_t segLOWESTRXAuxKC, segHIGHESTRXAuxKC, segHIGHESTNLEAuxKC;
 
+#if SCION_NATIVE_PAC
+#include <mach-o/fixup-chains.h>
+
+/*
+ * Scion: apply the DYLD_CHAINED_PTR_ARM64E_KERNEL (format 7) chains of a
+ * standalone kernel. Targets are offsets from the image's first segment;
+ * authenticated ones are signed with the keys PAC_INIT_KEY_STATE loaded, like
+ * rebase_chain() does for threaded starts. Runs before anything uses a data
+ * pointer, so it calls nothing that could need one. Returns false if the image
+ * has no chained fixups (nothing done).
+ */
+MARK_AS_FIXUP_TEXT static bool
+scion_rebase_chained_fixups(kernel_mach_header_t *mh)
+{
+	const struct load_command *lc = (const struct load_command *)((uintptr_t)mh + sizeof(*mh));
+	const struct linkedit_data_command *fixups = NULL;
+	uint64_t text_vmaddr = 0, linkedit_vmaddr = 0, linkedit_fileoff = 0;
+	const kernel_segment_command_t *segs[16];
+	uint32_t nsegs = 0;
+
+	for (uint32_t i = 0; i < mh->ncmds; i++, lc = (const struct load_command *)((uintptr_t)lc + lc->cmdsize)) {
+		if (lc->cmd == LC_DYLD_CHAINED_FIXUPS) {
+			fixups = (const struct linkedit_data_command *)lc;
+		} else if (lc->cmd == LC_SEGMENT_KERNEL) {
+			const kernel_segment_command_t *sg = (const kernel_segment_command_t *)lc;
+			if (nsegs < 16) {
+				segs[nsegs++] = sg;
+			}
+			if (sg->segname[0] == '_' && sg->segname[2] == 'T' && sg->segname[3] == 'E' &&
+			    sg->segname[4] == 'X' && sg->segname[5] == 'T' && sg->segname[6] == 0) {
+				text_vmaddr = sg->vmaddr;
+			} else if (sg->segname[2] == 'L' && sg->segname[3] == 'I' && sg->segname[4] == 'N' &&
+			    sg->segname[5] == 'K' && sg->segname[6] == 'E' && sg->segname[7] == 'D') {
+				linkedit_vmaddr = sg->vmaddr;
+				linkedit_fileoff = sg->fileoff;
+			}
+		}
+	}
+	if (fixups == NULL || text_vmaddr == 0 || linkedit_vmaddr == 0) {
+		return false;
+	}
+
+	const uintptr_t slide = (uintptr_t)mh - text_vmaddr;
+	const uintptr_t base = (uintptr_t)mh;   /* where offset 0 of the image is now */
+	const uint8_t *hdr_p = (const uint8_t *)(linkedit_vmaddr + slide + (fixups->dataoff - linkedit_fileoff));
+	const struct dyld_chained_fixups_header *hdr = (const struct dyld_chained_fixups_header *)hdr_p;
+	const struct dyld_chained_starts_in_image *img = (const struct dyld_chained_starts_in_image *)(hdr_p + hdr->starts_offset);
+
+	for (uint32_t si = 0; si < img->seg_count && si < nsegs; si++) {
+		if (img->seg_info_offset[si] == 0) {
+			continue;
+		}
+		const struct dyld_chained_starts_in_segment *seg =
+		    (const struct dyld_chained_starts_in_segment *)((const uint8_t *)img + img->seg_info_offset[si]);
+		if (seg->pointer_format != DYLD_CHAINED_PTR_ARM64E_KERNEL) {
+			panic("scion: chained fixups: pointer format %u", seg->pointer_format);
+		}
+		const uintptr_t seg_addr = base + seg->segment_offset;
+		for (uint32_t pi = 0; pi < seg->page_count; pi++) {
+			uint16_t start = seg->page_start[pi];
+			if (start == DYLD_CHAINED_PTR_START_NONE) {
+				continue;
+			}
+			uint32_t multi = 0;
+			bool more = true;
+			if (start & DYLD_CHAINED_PTR_START_MULTI) {
+				multi = start & ~DYLD_CHAINED_PTR_START_MULTI;
+			}
+			while (more) {
+				uint16_t off = start;
+				if (start & DYLD_CHAINED_PTR_START_MULTI) {
+					off = seg->page_start[multi] & ~DYLD_CHAINED_PTR_START_LAST;
+					more = (seg->page_start[multi] & DYLD_CHAINED_PTR_START_LAST) == 0;
+					multi++;
+				} else {
+					more = false;
+				}
+				uintptr_t loc = seg_addr + (uintptr_t)pi * seg->page_size + off;
+				uint64_t next;
+				do {
+					uint64_t v = *(volatile uint64_t *)loc;
+					uint64_t out;
+					next = (v >> 51) & 0x7FF;
+					if (v & (1ULL << 62)) {
+						panic("scion: chained fixups: bind at %p", (void *)loc);
+					}
+					if (v & (1ULL << 63)) {
+						uint64_t target = base + (v & 0xFFFFFFFFULL);
+						uintptr_t disc = (uintptr_t)((v >> 32) & 0xFFFF);
+						if (v & (1ULL << 48)) {
+							disc = disc ? __builtin_ptrauth_blend_discriminator((void *)loc, disc) : loc;
+						}
+						switch ((v >> 49) & 3) {
+						case 0: out = (uint64_t)__builtin_ptrauth_sign_unauthenticated((void *)target, ptrauth_key_asia, disc); break;
+						case 1: out = (uint64_t)__builtin_ptrauth_sign_unauthenticated((void *)target, ptrauth_key_asib, disc); break;
+						case 2: out = (uint64_t)__builtin_ptrauth_sign_unauthenticated((void *)target, ptrauth_key_asda, disc); break;
+						default: out = (uint64_t)__builtin_ptrauth_sign_unauthenticated((void *)target, ptrauth_key_asdb, disc); break;
+						}
+					} else {
+						out = ((v >> 43) & 0xFF) << 56 | (base + (v & 0x7FFFFFFFFFFULL));
+					}
+					*(volatile uint64_t *)loc = out;
+					loc += next * 4;
+				} while (next != 0);
+			}
+		}
+	}
+	return true;
+}
+#endif /* SCION_NATIVE_PAC */
+
 static void
 arm_slide_rebase_and_sign_image(void)
 {
@@ -291,6 +402,11 @@ arm_slide_rebase_and_sign_image(void)
 			    &__thread_starts_sect_end[0],
 			    (uintptr_t)k_mh, (uintptr_t)k_mh - slide, slide);
 		}
+#if SCION_NATIVE_PAC
+		else {
+			(void)scion_rebase_chained_fixups(k_mh);
+		}
+#endif /* SCION_NATIVE_PAC */
 #if defined(HAS_APPLE_PAC)
 		OSRuntimeSignStructors(&_mh_execute_header);
 #endif /* defined(HAS_APPLE_PAC) */
