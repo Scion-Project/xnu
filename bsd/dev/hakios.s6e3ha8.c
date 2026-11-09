@@ -117,7 +117,14 @@
 #include <sys/hakios.log.h>
 #include <sys/hakios.xnu.h>
 
-extern int hakios_panel_register(const char *name, int (*set)(int level));     /* hakios.backlight.cpp */
+/* The iOS 27 series has no hakios.backlight.cpp (iOS 16.5's service that takes iOS's "brightness"): the framebuffer calls
+ * hakios_panel_brightness() and _nits() below (SweetFramebuffer.cpp; boot-arg sweetspeed&512). */
+static int
+hakios_panel_register(__unused const char *name, __unused int (*set)(int level))
+{
+	return 0;
+}
+extern uint32_t sweet_speed_flags(void);       /* boot-arg sweetspeed (osfmk/arm64/sweet_a64e.c) */
 
 SYSCTL_DECL(_kern_hakios);
 
@@ -532,6 +539,34 @@ SYSCTL_PROC(_kern_hakios, OID_AUTO, brightness, CTLTYPE_INT | CTLFLAG_RW | CTLFL
     NULL, 0,
     panel_sysctl_brightness, "I", "the panel's brightness, 0-255 (-1: never set); writing sets it (Galaxy S9, panel=1)");
 
+/* brightness 0-255 for the framebuffer (SweetFramebuffer.cpp): 0, or an errno (EINVAL while the panel is not started) */
+int hakios_panel_brightness(int level);
+int
+hakios_panel_brightness(int level)
+{
+	return panel_set(level);
+}
+
+/* a brightness in nits (iOS 27's swap brightness): the lowest level whose luminance row reaches it; the level sent, or -1 */
+int hakios_panel_brightness_nits(uint32_t nits);
+int
+hakios_panel_brightness_nits(uint32_t nits)
+{
+	int level = 255;
+
+	if (gamma_ready && gamma_panel != NULL) {
+		for (int l = 0; l <= 255; l++) {
+			if (gamma_panel->rows[ha8_row_of_level(l)].nits >= nits) {
+				level = l;
+				break;
+			}
+		}
+	} else {
+		level = nits >= 400 ? 255 : (int)(nits * 255 / 400);
+	}
+	return panel_set(level) == 0 ? level : -1;
+}
+
 
 /*
  * The panel dark, for a halt that powers the phone off (drivers/power/exynos/hakios.exynos_poweroff.c, halt_off=N): Samsung's
@@ -652,7 +687,11 @@ hakios_s6e3ha8_init(void)
 {
 	uint32_t enabled = 0, level = 0, mode = 2;
 
-	if (!PE_parse_boot_argn("panel", &enabled, sizeof(enabled)) || enabled == 0) {
+	(void)PE_parse_boot_argn("panel", &enabled, sizeof(enabled));
+	if ((sweet_speed_flags() & 512) != 0) {
+		enabled = 1;                    /* (the iOS 27 command line is short of room: sweetspeed&512 is panel=1) */
+	}
+	if (enabled == 0) {
 		return;
 	}
 	panel_lock = lck_mtx_alloc_init(lck_grp_alloc_init("s6e3ha8", LCK_GRP_ATTR_NULL), LCK_ATTR_NULL);
