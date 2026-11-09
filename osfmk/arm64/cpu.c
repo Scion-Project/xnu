@@ -349,6 +349,16 @@ cpu_sleep(void)
 #endif
 	}
 #else
+#if defined(GENERIC_PSCI_SMP)
+	/*
+	 * Scion (patch 1517): processor_exit() (sleep_cores=, GenericARMPE.cpp) waits in cpu_exit_wait() for this token,
+	 * which only the Apple path above sets. The caches are clean; what is left is the firmware's CPU_OFF
+	 * (PE_cpu_machine_quiesce() -> GenericARMCPU::quiesceCPU() -> psci_smp_cpu_off()), which cleans this core's own.
+	 * A start of this core waits for the firmware to say it is off (psci_smp_start_cpu()).
+	 */
+	cpu_data_ptr->cpu_sleep_token = ARM_CPU_ON_SLEEP_PATH;
+	__builtin_arm_dsb(DSB_ISH);
+#endif
 	PE_cpu_machine_quiesce(cpu_data_ptr->cpu_id);
 #endif
 	/*NOTREACHED*/

@@ -57,6 +57,7 @@
 #include <arm/machine_routines.h>
 #include <arm64/proc_reg.h>
 #include <libkern/OSAtomic.h>
+#include <pexpert/arm64/board_config.h>
 
 SECURITY_READ_ONLY_LATE(struct percpu_base) percpu_base;
 vm_address_t     percpu_base_cur;
@@ -671,6 +672,10 @@ cpu_exit_wait(int cpu_id)
 	}
 }
 
+#if defined(GENERIC_PSCI_SMP)
+uint32_t hakios_cpu_exit_mask;          /* patch 1517: a bit per cpu number, set by GenericARMPE.cpp (sleep_cores=) */
+#endif
+
 boolean_t
 cpu_can_exit(__unused int cpu)
 {
@@ -877,6 +882,17 @@ ml_cpu_can_exit(__unused int cpu_id, processor_reason_t reason)
 	}
 #else
 	(void)reason;
+#if defined(GENERIC_PSCI_SMP)
+	/*
+	 * Scion (patch 1517): the cores GenericARMPE.cpp's sleep_cores= takes off while the screen is off, and only those
+	 * (never the boot processor): their bits are set in hakios_cpu_exit_mask just before processor_exit(). Without
+	 * sleep_cores= the mask stays 0 and nothing changes: processor_exit() is refused, as it always was here.
+	 */
+	if (cpu_id >= 0 && cpu_id < 32 && (*(volatile uint32_t *)&hakios_cpu_exit_mask & (1u << cpu_id)) != 0 &&
+	    CpuDataEntries[cpu_id].cpu_data_vaddr != &BootCpuData) {
+		return true;
+	}
+#endif
 #endif
 	return false;
 }
