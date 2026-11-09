@@ -53,6 +53,8 @@
 
 
 #include <pexpert/arm64/apple_arm64_common.h>
+#undef  BTI_ENFORCED
+#define BTI_ENFORCED 0
 #undef  __ARM64_PMAP_SUBPAGE_L1__
 #undef  __ARM64_PMAP_KERN_SUBPAGE_L1__
 
