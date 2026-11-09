@@ -128,6 +128,11 @@ bsd/dev/herolte_gpu.c	optional scion_generic_arm64
 bsd/dev/a5xelte_keys.c	optional scion_generic_arm64
 bsd/dev/a5xelte_touch.c	optional scion_generic_arm64
 bsd/dev/sweet_sample.c	optional scion_generic_arm64
+bsd/dev/hakios.bcm4361_bt.c	optional scion_generic_arm64
+bsd/dev/hakios.audio.c	optional scion_generic_arm64
+bsd/dev/hakios.guard.c	optional scion_generic_arm64
+bsd/dev/hakios.exynos_abox.c	optional scion_generic_arm64
+bsd/dev/hakios.max98512.c	optional scion_generic_arm64
 bsd/dev/mem.c				standard
 bsd/dev/munge.c 			optional config_requires_u32_munging
 bsd/dev/unix_startup.c			standard
