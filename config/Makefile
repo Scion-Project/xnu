@@ -49,8 +49,11 @@ EXPORTS_FILES := $(foreach symbolset,$(SYMBOL_COMPONENT_LIST),$(symbolset).expor
 	$(symbolset).$(EXPORT_SOURCE_ARCH_CONFIG_LC).exports \
 	$(notdir $(wildcard $(SOURCE)/$(symbolset).$(EXPORT_SOURCE_ARCH_CONFIG_LC).$(PLATFORM).exports))) \
 	Unused.exports
+# sweet: the generic boards do not link Apple's closed libTightbeam.
+ifeq ($(filter SWEET A5XELTE HEROLTE STARLTE,$(CURRENT_MACHINE_CONFIG)),)
 EXPORTS_FILES += $(TIGHTBEAM_EXPORTS)
 Private_OTHER_EXPORTS += $(TIGHTBEAM_EXPORTS)
+endif
 
 
 Kasan_EXPORTS := $(SRCROOT)/config/Kasan_disabled.exports
