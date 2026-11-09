@@ -524,7 +524,15 @@ LEXT(start_first_cpu)
 	mov		x20, x0
 	mov		x21, #0
 
-#if defined(SWEET)
+#if defined(A5XELTE)
+	/* Earliest XNU-owned physical marker in preserved Samsung log RAM. */
+	MOV64	x10, 0x469ff100
+	MOV64	x11, 0x3145544c45554e58
+	str		x11, [x10]
+	dsb		sy
+#endif
+
+#if defined(SWEET) && !defined(A5XELTE)
 	/* Stage 0: white 64x32 band, no stack or page tables needed. */
 	MOV64	x0, (0x9c000000 + 2368 * 4320)
 	mov		w1, #-1
@@ -689,7 +697,7 @@ Lkernelcache_base_found:
 	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
 	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
 
-#if defined(SWEET)
+#if defined(SWEET) && !defined(A5XELTE)
 	/*
 	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
 	 * L2 table. Both framebuffer and RAM use L1 index 0; another call to
