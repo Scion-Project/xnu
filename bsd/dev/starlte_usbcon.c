@@ -124,9 +124,7 @@ void hakios_max77705_usb_close(void) {}
 int hakios_panel_brightness(int level);
 /* the real one is bsd/dev/hakios.s6e3ha8.c now */
 /* hakios_exynos_cpufreq_touch(): the CPU governor's, bsd/dev/hakios.exynos_cpufreq.c (a no-op without cpufreq_gov=1) */
-int hakios_fb_scanned(uintptr_t *base, uint32_t *width, uint32_t *height, uint32_t *rowbytes, unsigned *index);
-int hakios_fb_scanned(__unused uintptr_t *base, __unused uint32_t *width, __unused uint32_t *height,
-    __unused uint32_t *rowbytes, __unused unsigned *index) { return ENODEV; }
+/* hakios_fb_scanned(): iokit/Kernel/arm/SweetFramebuffer.cpp (the panel's memory, for the console's "shot") */
 bool hakios_acpm_init(int (*say)(const char *, ...));
 bool hakios_acpm_init(__unused int (*say)(const char *, ...)) { return false; }
 int hakios_acpm_pmic_read(uint32_t type, uint32_t reg, uint8_t *value);
