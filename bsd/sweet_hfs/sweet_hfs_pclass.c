@@ -23,7 +23,8 @@
  * (scion-kernel) says what that means.
  *
  * Boot-arg sweetspeed&0x100000 turns it on (off by default); sweetspeed&0x200000 also marks the
- * mount MNT_CPROTECT, which is what MKBDeviceFormattedForContentProtection() and SQLite look at.
+ * mount MNT_CPROTECT, which is what MKBDeviceFormattedForContentProtection() and SQLite look at;
+ * sweetspeed&0x1000000 accepts APFS's "mark purgeable" calls (the end of this file's header).
  *
  * Locking: sweet_hfs_pclass_get and _newnode are called with the cnode(s) locked (hfs_vnop_getattr,
  * hfs_makenode); sweet_hfs_pclass_set and _get_vp take the lock themselves.
@@ -68,6 +69,15 @@ sweet_hfs_pclass_mntflag(void)
 {
 	return (sweet_speed_flags() & (SWEET_SPEED_PCLASS | SWEET_SPEED_CPROTECT)) ==
 	       (SWEET_SPEED_PCLASS | SWEET_SPEED_CPROTECT);
+}
+
+/* APFS's purgeable fsctl()s are accepted (core/hfs_readwrite.c, hfs_vnop_ioctl) */
+#define SWEET_SPEED_PURGEABLE   0x1000000
+
+int
+sweet_hfs_purgeable_enabled(void)
+{
+	return (sweet_speed_flags() & SWEET_SPEED_PURGEABLE) != 0;
 }
 
 /* As HFS's cp_is_valid_class, with CX and without E: a directory may be "none" but never F. */
