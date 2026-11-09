@@ -1050,7 +1050,8 @@ sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subc
 			terse = 0;
 			PE_parse_boot_argn("sweetcrashterse", &terse, sizeof(terse));
 		}
-		if (terse) {
+		extern bool sweet_trace_match(const char *, int);
+		if (terse && !sweet_trace_match(name, pid)) {   /* the traced process keeps the full log */
 			printf("CRASH %s pc 0x%llx lr 0x%llx\n", name, get_saved_state_pc(ss), get_saved_state_lr(ss));
 			return;
 		}
