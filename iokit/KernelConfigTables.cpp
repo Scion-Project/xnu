@@ -94,6 +94,11 @@ const char * gIOKernelConfigTables =
     "     'IOProviderClass' = IOResources;"
     "     'IOMatchCategory' = SweetHIDTouch;"
     "   },"
+    "   {"
+    "     'IOClass'         = IOHIDSystem;"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = IOHIDSystem;"
+    "   },"
 #if !defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_HEROLTE)
     "   {"
     "     'IOClass'         = SweetBattery;"
