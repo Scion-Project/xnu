@@ -112,7 +112,7 @@ static const uint8_t sweet_aks_wrap_tag[8] = { 'S', '9', 'A', 'K', 'S', 'W', '0'
 
 extern "C" uint32_t sweet_speed_flags(void);    /* boot-arg sweetspeed (osfmk/arm64/sweet_a64e.c) */
 
-/* Boot-arg sweetspeed&0x800000: a passcode that gates the screen (SweetKeyStorePasscode.cpp). */
+/* Boot-arg sweetspeed&0x4000000: a passcode that gates the screen (SweetKeyStorePasscode.cpp). */
 static bool
 sweet_aks_passcode(void)
 {
@@ -424,7 +424,7 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 	uint64_t arg0 = in_scalars > 0 ? args->scalarInput[0] : 0;
 	bool nopasscode = sweet_aks_nopasscode();
 
-	/* a passcode (sweetspeed&0x800000): its module answers first; what it leaves goes on below */
+	/* a passcode (sweetspeed&0x4000000): its module answers first; what it leaves goes on below */
 	if (sweet_aks_passcode() && sweet_aks_passcode_external(selector, args, &ret)) {
 		goto done;
 	}

@@ -1,7 +1,7 @@
 /*
  * A passcode that gates the screen for the built-in AppleKeyStore of SWEET (SweetKeyStore.cpp):
  * a verifier kept in /private/var/keybags/scion-passcode, the lock state and the delays after wrong
- * attempts. Off unless boot-arg sweetspeed&0x800000. It is a screen lock, not data protection: no
+ * attempts. Off unless boot-arg sweetspeed&0x4000000. It is a screen lock, not data protection: no
  * data is encrypted with the passcode.
  */
 #ifndef _IOKIT_ARM_SWEETKEYSTOREPASSCODE_H
@@ -10,7 +10,7 @@
 #if defined(SWEET)
 #include <IOKit/IOUserClient.h>
 
-#define SWEET_SPEED_AKS_PASSCODE        0x800000
+#define SWEET_SPEED_AKS_PASSCODE        0x4000000
 
 /* Called from AppleKeyStore::start: allocates the lock (the record is read at the first selector). */
 void sweet_aks_passcode_init(void);

@@ -1,6 +1,6 @@
 /*
  * A passcode that gates the screen, for the built-in AppleKeyStore of SWEET (SweetKeyStore.cpp).
- * Boot-arg sweetspeed&0x800000 (off by default) switches it on; with the bit clear nothing here runs.
+ * Boot-arg sweetspeed&0x4000000 (off by default) switches it on; with the bit clear nothing here runs.
  *
  * What it keeps: whether the device has a passcode and, if so, a verifier of it, the lock state, the
  * count of wrong attempts and the delay they impose, and the grace period ManagedConfiguration sets.
