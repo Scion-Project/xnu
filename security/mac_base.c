@@ -250,7 +250,19 @@ static LCK_MTX_DECLARE(mac_policy_mtx, &mac_lck_grp);
 
 static int mac_policy_busy;
 
-#if !XNU_TARGET_OS_OSX
+/*
+ * Starbite boards: the built-in AMFI/Sandbox/Quarantine stand-ins
+ * (bsd/kern/sweet_amfi.c) register after machine_lockdown(), when an
+ * iOS-target kernel's SECURITY_READ_ONLY_LATE policy list is already
+ * read-only. Keep the macOS-style kalloc'ed, growable list on those boards.
+ */
+#if XNU_TARGET_OS_OSX || defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#define MAC_POLICY_LIST_DYNAMIC 1
+#else
+#define MAC_POLICY_LIST_DYNAMIC 0
+#endif
+
+#if !MAC_POLICY_LIST_DYNAMIC
 SECURITY_READ_ONLY_LATE(mac_policy_list_t) mac_policy_list;
 SECURITY_READ_ONLY_LATE(static struct mac_policy_list_element) mac_policy_static_entries[MAC_POLICY_LIST_CHUNKSIZE];
 #else
@@ -340,7 +352,7 @@ mac_policy_init(void)
 	mac_policy_list.freehint = 0;
 	mac_policy_list.chunks = 1;
 
-#if !XNU_TARGET_OS_OSX
+#if !MAC_POLICY_LIST_DYNAMIC
 	mac_policy_list.entries = mac_policy_static_entries;
 #else
 	mac_policy_list.entries = kalloc_type(struct mac_policy_list_element,
@@ -607,7 +619,7 @@ int
 mac_policy_register(struct mac_policy_conf *mpc, mac_policy_handle_t *handlep,
     void *xd)
 {
-#if XNU_TARGET_OS_OSX
+#if MAC_POLICY_LIST_DYNAMIC
 	struct mac_policy_list_element *tmac_policy_list_element;
 #endif
 	int error, slot, static_entry = 0;
@@ -646,7 +658,7 @@ mac_policy_register(struct mac_policy_conf *mpc, mac_policy_handle_t *handlep,
 	}
 
 	if (mac_policy_list.numloaded >= mac_policy_list.max) {
-#if XNU_TARGET_OS_OSX
+#if MAC_POLICY_LIST_DYNAMIC
 		/* allocate new policy list array, zero new chunk */
 		tmac_policy_list_element =
 		    kalloc_type(struct mac_policy_list_element,
