@@ -1255,6 +1255,16 @@ handle_uncategorized(arm_saved_state_t *state)
 		}
 	}
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* arm64e (ARMv8.3+) instructions these cores lack: sweet_a64e.c. */
+	if (PSR64_IS_USER64(get_saved_state_cpsr(state))) {
+		extern bool sweet_a64e_emulate(arm_saved_state_t *, uint32_t);
+		if (sweet_a64e_emulate(state, instr)) {
+			return;
+		}
+	}
+#endif
+
 	/*
 	 * Check for GDB breakpoint via illegal opcode.
 	 */

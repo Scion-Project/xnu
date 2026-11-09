@@ -72,7 +72,7 @@ grade_arm64e_binary(cpu_subtype_t execfeatures)
 *		not acceptable.
 **********************************************************************/
 int
-ml_grade_binary(cpu_type_t exectype, cpu_subtype_t execsubtype, cpu_subtype_t execfeatures __unused, bool allow_simulator_binary __unused)
+ml_grade_binary(cpu_type_t exectype, cpu_subtype_t execsubtype, cpu_subtype_t execfeatures, bool allow_simulator_binary __unused)
 {
 #if __arm64__
 	cpu_subtype_t hostsubtype =
@@ -91,6 +91,15 @@ ml_grade_binary(cpu_type_t exectype, cpu_subtype_t execsubtype, cpu_subtype_t ex
 				return 10;
 			case CPU_SUBTYPE_ARM64_ALL:
 				return 9;
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+			case CPU_SUBTYPE_ARM64E:
+				/*
+				 * sweet: no PAC here, but arm64e-only userland (iOS 26)
+				 * runs with sweet_a64e.c emulating the ARMv8.3 ops; an
+				 * arm64 slice is still preferred when there is one.
+				 */
+				return (execfeatures & CPU_SUBTYPE_PTRAUTH_ABI) ? 8 : 0;
+#endif
 			}
 			break;
 

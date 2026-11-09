@@ -53,6 +53,8 @@ osfmk/arm/arm_timer.c		standard
 osfmk/arm/arm_init.c	optional config_pmap_ppl
 osfmk/arm64/arm_vm_init.c	optional config_pmap_ppl
 osfmk/arm64/sweet_early.c	standard
+osfmk/arm64/sweet_a64e.c	standard
+osfmk/arm64/sweet_a64e_fp.s	standard
 osfmk/arm64/arm64_hypercall.c	standard
 osfmk/arm/io_map.c		standard
 osfmk/arm64/loose_ends.c	standard
