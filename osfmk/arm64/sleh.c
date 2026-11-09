@@ -602,7 +602,7 @@ kernel_integrity_error_handler(uint64_t esr, vm_offset_t far)
 
 #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 #define SWEET_PLATFORM_ERRORS 8
-static char sweet_platform_error_text[SWEET_PLATFORM_ERRORS][200];
+static char sweet_platform_error_text[SWEET_PLATFORM_ERRORS][240];
 static volatile uint32_t sweet_platform_error_head, sweet_platform_error_tail;
 static thread_call_data_t sweet_platform_error_call;
 
@@ -648,11 +648,16 @@ arm64_platform_error(arm_saved_state_t *state, uint64_t esr, vm_offset_t far, pl
 		uint32_t n = sweet_platform_error_head;
 		if (n - sweet_platform_error_tail < SWEET_PLATFORM_ERRORS) {
 			char name[32] = "";
+			uint64_t par = 0;
 			proc_selfname(name, sizeof(name));
+			if (source == PLAT_ERR_SRC_SYNC) {
+				/* what the user mapping translates to: PA (bits 47:12) and attributes (63:56) */
+				__asm__ volatile ("at s1e0r, %1\n isb\n mrs %0, par_el1" : "=r"(par) : "r"(far));
+			}
 			snprintf(sweet_platform_error_text[n % SWEET_PLATFORM_ERRORS], sizeof(sweet_platform_error_text[0]),
-			    "SWEET PLATFORM ERROR: %s in %s[%d]: esr %#llx far %#llx pc %#llx lr %#llx sp %#llx\n",
+			    "SWEET PLATFORM ERROR: %s in %s[%d]: esr %#llx far %#llx par %#llx pc %#llx lr %#llx sp %#llx\n",
 			    source == PLAT_ERR_SRC_SYNC ? "synchronous abort" : "serror", name, proc_selfpid(),
-			    esr, (unsigned long long)far, get_saved_state_pc(state), get_saved_state_lr(state),
+			    esr, (unsigned long long)far, par, get_saved_state_pc(state), get_saved_state_lr(state),
 			    get_saved_state_sp(state));
 			sweet_platform_error_head = n + 1;
 			thread_call_enter(&sweet_platform_error_call);
