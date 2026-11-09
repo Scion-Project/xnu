@@ -45,6 +45,8 @@
 #include <kern/socd_client.h>
 #include <kern/task.h>
 #include <kern/thread.h>
+#include <kern/thread_call.h>
+#include <kern/startup.h>
 #include <kern/zalloc_internal.h>
 #include <mach/exception.h>
 #include <mach/arm/traps.h>
@@ -598,6 +600,30 @@ kernel_integrity_error_handler(uint64_t esr, vm_offset_t far)
 #pragma clang diagnostic pop
 #endif
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+#define SWEET_PLATFORM_ERRORS 8
+static char sweet_platform_error_text[SWEET_PLATFORM_ERRORS][200];
+static volatile uint32_t sweet_platform_error_head, sweet_platform_error_tail;
+static thread_call_data_t sweet_platform_error_call;
+
+static void
+sweet_platform_error_print(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+{
+	while (sweet_platform_error_tail != sweet_platform_error_head) {
+		printf("%s", sweet_platform_error_text[sweet_platform_error_tail % SWEET_PLATFORM_ERRORS]);
+		sweet_platform_error_tail++;
+	}
+}
+
+__startup_func
+static void
+sweet_platform_error_init(void)
+{
+	thread_call_setup(&sweet_platform_error_call, sweet_platform_error_print, NULL);
+}
+STARTUP(THREAD_CALL, STARTUP_RANK_LAST, sweet_platform_error_init);
+#endif
+
 static void
 arm64_platform_error(arm_saved_state_t *state, uint64_t esr, vm_offset_t far, platform_error_source_t source)
 {
@@ -608,6 +634,33 @@ arm64_platform_error(arm_saved_state_t *state, uint64_t esr, vm_offset_t far, pl
 	(void)source;
 	cpu_data_t *cdp = getCpuDatap();
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/*
+	 * sweet: a bus error from user code (a mapping whose physical side answers with an
+	 * error: GPU memory, a wrapped IOSurface...) crashes that process, not the phone.
+	 * The details are kept and printed by a thread call (no console output here: this
+	 * runs with interrupts off), then the thread returns to an address in __PAGEZERO
+	 * and takes an ordinary instruction abort, which the CRASH logger reports.
+	 */
+	if (PSR64_IS_USER(get_saved_state_cpsr(state))) {
+		extern int proc_selfpid(void);
+		extern void proc_selfname(char *buf, int size);
+		uint32_t n = sweet_platform_error_head;
+		if (n - sweet_platform_error_tail < SWEET_PLATFORM_ERRORS) {
+			char name[32] = "";
+			proc_selfname(name, sizeof(name));
+			snprintf(sweet_platform_error_text[n % SWEET_PLATFORM_ERRORS], sizeof(sweet_platform_error_text[0]),
+			    "SWEET PLATFORM ERROR: %s in %s[%d]: esr %#llx far %#llx pc %#llx lr %#llx sp %#llx\n",
+			    source == PLAT_ERR_SRC_SYNC ? "synchronous abort" : "serror", name, proc_selfpid(),
+			    esr, (unsigned long long)far, get_saved_state_pc(state), get_saved_state_lr(state),
+			    get_saved_state_sp(state));
+			sweet_platform_error_head = n + 1;
+			thread_call_enter(&sweet_platform_error_call);
+		}
+		set_saved_state_pc(state, 0xdead0000ULL);
+		return;
+	}
+#endif
 	if (PE_handle_platform_error(far)) {
 		return;
 	} else if (cdp->platform_error_handler != NULL) {
