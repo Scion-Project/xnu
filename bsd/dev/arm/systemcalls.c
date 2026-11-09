@@ -256,6 +256,29 @@ unix_syscall(
 		extern int sweet_trace_left(void);
 		extern bool sweet_trace_match(const char *, int);
 		extern const char *syscallnames[];
+		/* iOS 27 on STARLTE: boot-arg sweeteacces=1: every process's filesystem calls failing with
+		 * EACCES or EPERM, with the path (first 300) */
+		{
+			static int eacces_on = -1, eacces_left = 300;
+			if (eacces_on < 0) {
+				int v = 0;
+				PE_parse_boot_argn("sweeteacces", &v, sizeof(v));
+				eacces_on = v;
+			}
+			if (__improbable(eacces_on > 0 && (error == EACCES || error == EPERM) && eacces_left > 0)) {
+				user_addr_t pa = sweet_trace_path_arg(code, uthread->uu_arg);
+				if (pa != 0) {
+					char path[200];
+					size_t done;
+					if (copyinstr(pa, path, sizeof(path), &done) == 0) {
+						eacces_left--;
+						printf("SWEET EACCES: %s[%d] %s(%d) = %d uid %d: %s\n", proc->p_comm, pid,
+						    code < nsysent ? syscallnames[code] : "?", code, error,
+						    kauth_cred_getuid(kauth_cred_get()), path);
+					}
+				}
+			}
+		}
 		/* persona(494) calls are logged from every process: user sessions depend on them */
 		if (__improbable(sweet_trace_match(proc->p_comm, pid))) {
 			bool failed = error != 0 && error != EJUSTRETURN && error != ERESTART;
