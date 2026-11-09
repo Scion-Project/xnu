@@ -995,6 +995,10 @@ bsd_init(void)
 		hakios_input_init();           /* /dev/hakios-touch */
 		hakios_audio_init();           /* /dev/hakios-audio */
 		hakios_virtio_blk_init();      /* /dev/rvblk0, a disk image of the host (QEMU) */
+		{
+			extern void hakios_vgpu3d_init(void);
+			hakios_vgpu3d_init();  /* boot-arg gpu3d=1: virtio-gpu 3D bring-up (bsd/dev/hakios.vgpu3d_xnu.c) */
+		}
 		hakios_sparse_init();          /* /dev/rsp0, part of an image too big to hold */
 #if APFS
 		/* mounts and walks /dev/rvblk0 once userland has /private/var up */
