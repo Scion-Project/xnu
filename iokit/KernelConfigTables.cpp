@@ -96,6 +96,14 @@ const char * gIOKernelConfigTables =
     "     'IOMatchCategory' = SweetBattery;"
     "   },"
 #endif
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+    "   {"
+    "     'IOClass'         = A5XELTEGPU;"
+    "     'IOProviderClass' = IOPlatformDevice;"
+    "     'IONameMatch'     = 'samsung,exynos7580-mali';"
+    "     'IOProbeScore'    = 10000:32;"
+    "   },"
+#endif
 #endif
     "   {"
     "     'IOClass'         = IOPanicPlatform;"
