@@ -48,6 +48,7 @@ void starlte_gpu_user_unmap(uint64_t va, unsigned n);
 int starlte_gpu_user_submit(uint64_t jc, uint32_t requirements);
 int starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_t *seq);
 int starlte_gpu_user_wait_seq(uint64_t seq, bool block);
+uint64_t starlte_gpu_user_seq(void);
 void starbite_mali_publish(void);
 }
 
@@ -641,6 +642,17 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 		IOLockUnlock(fLock);
 		if (bo == NULL) {
 			return kIOReturnBadArgument;
+		}
+		if (selector == SBM_GEM_CLOSE) {
+			/*
+			 * With the queue, a buffer goes only once every chain queued by now is done, not just the last one
+			 * that listed it: a chain reaches buffers its submit does not list (PanVK lists a batch's pools and
+			 * targets; a descriptor may point at any live buffer), and chains now wait in a queue behind others.
+			 */
+			uint64_t last = starlte_gpu_user_seq();
+			if (last > seq) {
+				seq = last;
+			}
 		}
 		bool block = selector == SBM_GEM_CLOSE || u.wait.timeout_ns != 0;
 		if (seq != 0 && starlte_gpu_user_wait_seq(seq, block) != 0 && selector == SBM_WAIT_BO) {
