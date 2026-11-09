@@ -79,7 +79,6 @@ const char * gIOKernelConfigTables =
     "     'IONameMatch'     = 'sweet,display';"
 #endif
     "   },"
-#if !defined(ARM64_BOARD_CONFIG_A5XELTE)
     "   {"
     "     'IOClass'         = SweetHIDButtons;"
     "     'IOProviderClass' = IOResources;"
@@ -90,6 +89,7 @@ const char * gIOKernelConfigTables =
     "     'IOProviderClass' = IOResources;"
     "     'IOMatchCategory' = SweetHIDTouch;"
     "   },"
+#if !defined(ARM64_BOARD_CONFIG_A5XELTE)
     "   {"
     "     'IOClass'         = SweetBattery;"
     "     'IOProviderClass' = IOResources;"

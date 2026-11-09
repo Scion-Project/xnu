@@ -87,11 +87,11 @@ kern_return_t thread_getstatus(thread_t act, int flavor,
     thread_state_t tstate, mach_msg_type_number_t *count);
 void task_act_iterate_wth_args(task_t, void (*)(thread_t, void *), void *);
 
-#if defined(SECURE_KERNEL) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(SECURE_KERNEL) || defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 /*
- * SWEET: off by default (sysctl kern.coredump=1 enables it). A crashing iOS
+ * iOS donor boards: off by default (sysctl kern.coredump=1 enables it). A crashing iOS
  * daemon maps the whole shared region, so one core is gigabytes on the root
- * volume and takes minutes on the phone's UFS.
+ * volume and takes minutes on phone storage.
  */
 __XNU_PRIVATE_EXTERN int do_coredump = 0;       /* default: don't dump cores */
 #else

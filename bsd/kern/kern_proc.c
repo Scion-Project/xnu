@@ -6687,9 +6687,9 @@ out:
 	return error;
 }
 
-#if !XNU_TARGET_OS_OSX || defined(ARM64_BOARD_CONFIG_SWEET)
+#if !XNU_TARGET_OS_OSX || defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 /*
- * SWEET runs the iOS userland on the macOS config: SpringBoard calls
+ * SWEET and A5XELTE run the iOS userland on the macOS config: SpringBoard calls
  * pid_hibernate when an app leaves the foreground, and nosys (SIGSYS)
  * killed it. Without CONFIG_FREEZE this returns 0, as on iOS.
  */
@@ -6765,7 +6765,7 @@ out:
 	*ret = error;
 	return error;
 }
-#endif /* !XNU_TARGET_OS_OSX || SWEET */
+#endif /* !XNU_TARGET_OS_OSX || SWEET || A5XELTE */
 
 #if SOCKETS
 

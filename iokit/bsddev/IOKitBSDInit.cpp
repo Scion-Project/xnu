@@ -72,6 +72,8 @@ extern int IODTGetDefault(const char *key, void *infoAddr, unsigned int infoSize
 extern boolean_t cpuid_vmm_present(void);
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
 extern void a5xelte_emmc_probe(void);
+extern void a5xelte_keys_init(void);
+extern void a5xelte_touch_probe(void);
 #endif
 
 #define ROUNDUP(a, b) (((a) + ((b) - 1)) & (~((b) - 1)))
@@ -799,6 +801,8 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 	}
 
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
+	a5xelte_keys_init();
+	a5xelte_touch_probe();
 	{
 	uint32_t emmcprobe = 0;
 	PE_parse_boot_argn("emmcprobe", &emmcprobe, sizeof(emmcprobe));
