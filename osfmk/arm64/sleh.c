@@ -1330,6 +1330,7 @@ handle_uncategorized(arm_saved_state_t *state)
 	if (PSR64_IS_USER64(get_saved_state_cpsr(state))) {
 		extern bool sweet_a64e_emulate(arm_saved_state_t *, uint32_t);
 		if (sweet_a64e_emulate(state, instr)) {
+			extern void sweet_m3_residual_note(uint32_t); sweet_m3_residual_note(instr); /*sm3r-emul*/
 			return;
 		}
 		/*
@@ -1342,7 +1343,7 @@ handle_uncategorized(arm_saved_state_t *state)
 			int cpu = (int)(thread_tid(current_thread()) % 4);
 			processor_t little = cpu_to_processor(cpu);
 			if (little != PROCESSOR_NULL) {
-				sweet_m3_pins++;
+				sweet_m3_pins++; sweet_m3_residual_note(instr); /*sm3r-pin*/
 				thread_bind(little);
 				extern void sweet_m3_pin_note(thread_t);
 				sweet_m3_pin_note(current_thread());
@@ -1377,6 +1378,7 @@ handle_uncategorized(arm_saved_state_t *state)
 			/* trapped on an M3, migrated to an A55 before the checks above: run it again here */
 			extern bool sweet_a55_retry_ok(uint32_t, thread_t, uint64_t);
 			if (sweet_a55_retry_ok(instr, current_thread(), get_saved_state_pc(state))) {
+				extern void sweet_m3_residual_note(uint32_t); sweet_m3_residual_note(instr); /*sm3r-retry*/
 				return;
 			}
 		}
