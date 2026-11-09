@@ -7092,7 +7092,7 @@ STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, exe_boothash_salt_generate);
 #define DYLD_FLAGS_KEY "dyld_flags="
 #define SUBSYSTEM_ROOT_PATH_KEY "subsystem_root_path="
 #define APP_BOOT_SESSION_KEY "executable_boothash="
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 #define PTRAUTH_DISABLED_FLAG "ptrauth_disabled=1"
 #endif /* __has_feature(ptrauth_calls) */
 #define MAIN_TH_PORT_KEY "th_port="
@@ -7344,6 +7344,25 @@ exec_add_apple_strings(struct image_params *imgp,
 
 		imgp->ip_applec++;
 	}
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/*
+	 * sweet: pointers are never signed on this kernel (sweet_a64e.c). A program
+	 * that gets a library inserted is told so, so dyld grades arm64 slices too
+	 * (load_arm64e_keysOff) and takes the arm64 GPU libraries into arm64e
+	 * backboardd; the arm64e shared cache is used as for arm64 on macOS.
+	 */
+	{
+		char inject_env[512];
+
+		if (sweet_exec_inject_env(imgp, inject_env, sizeof(inject_env))) {
+			error = exec_add_user_string(imgp, CAST_USER_ADDR_T(PTRAUTH_DISABLED_FLAG), UIO_SYSSPACE, FALSE);
+			if (error) {
+				goto bad;
+			}
+			imgp->ip_applec++;
+		}
+	}
+#endif
 #if __has_feature(ptrauth_calls)
 	if (is_arm64e_running_as_arm64(imgp)) {
 		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(PTRAUTH_DISABLED_FLAG), UIO_SYSSPACE, FALSE);
