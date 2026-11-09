@@ -2551,9 +2551,7 @@ typedef enum {
 	ESR_EC_SVC_64              = 0x15,
 	ESR_EC_HVC_64              = 0x16,
 	ESR_EC_MSR_TRAP            = 0x18,
-#if __has_feature(ptrauth_calls)
 	ESR_EC_PAC_FAIL            = 0x1C,
-#endif /* __has_feature(ptrauth_calls) */
 #if HAS_ARM_FEAT_SME
 	ESR_EC_SME                 = 0x1D,
 #endif
