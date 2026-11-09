@@ -113,6 +113,7 @@ bsd/dev/hakios.exynos_usb.c	optional scion_generic_arm64
 bsd/dev/starlte_usbcon.c	optional scion_generic_arm64
 bsd/dev/starlte_muic.c	optional scion_generic_arm64
 bsd/dev/hakios.exynos_hsi2c.c	optional scion_generic_arm64
+bsd/dev/hakios.exynos_spi.c	optional scion_generic_arm64
 bsd/dev/starlte_gpu.c	optional scion_generic_arm64
 bsd/dev/starlte_overlay.c	optional scion_generic_arm64
 bsd/dev/starlte_sd.c	optional scion_generic_arm64
@@ -128,6 +129,12 @@ bsd/dev/herolte_gpu.c	optional scion_generic_arm64
 bsd/dev/a5xelte_keys.c	optional scion_generic_arm64
 bsd/dev/a5xelte_touch.c	optional scion_generic_arm64
 bsd/dev/sweet_sample.c	optional scion_generic_arm64
+bsd/dev/hakios.bcm4361_bt.c	optional scion_generic_arm64
+bsd/dev/hakios.audio.c	optional scion_generic_arm64
+bsd/dev/hakios.guard.c	optional scion_generic_arm64
+bsd/dev/hakios.exynos_abox.c	optional scion_generic_arm64
+bsd/dev/hakios.max98512.c	optional scion_generic_arm64
+bsd/dev/hakios.cs47l93.c	optional scion_generic_arm64
 bsd/dev/mem.c				standard
 bsd/dev/munge.c 			optional config_requires_u32_munging
 bsd/dev/unix_startup.c			standard

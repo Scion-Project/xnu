@@ -89,7 +89,18 @@ loader_log_line(const char *line)
 
 void loader_return(void);
 extern void starlte_return_to_recovery(void);
-void loader_return(void) { starlte_return_to_recovery(); }
+extern void hakios_max98512_quiesce(void);      /* bsd/dev/hakios.max98512.c: nothing unless max98512=3 left them on */
+extern void hakios_cs47l93_quiesce(void);       /* bsd/dev/hakios.cs47l93.c: holds the codec in reset on return */
+extern void hakios_exynos_abox_quiesce(void);   /* bsd/dev/hakios.exynos_abox.c: nothing unless abox=7/8 runs RDMA0 */
+void
+loader_return(void)
+{
+	/* (Scion's order) the speaker amplifiers off while UAIF1's clocks still run, then the codec held in reset, then ABOX's UAIFs */
+	hakios_max98512_quiesce();
+	hakios_cs47l93_quiesce();
+	hakios_exynos_abox_quiesce();
+	starlte_return_to_recovery();
+}
 void hakios_var_save_on_return(void);
 void hakios_var_save_on_return(void) {}
 void hakios_ufs_summary(const char *when, int how);
@@ -103,15 +114,15 @@ void hakios_wifi_report(__unused bool first) {}
 void hakios_sta_console_scan(void);
 void hakios_sta_console_scan(void) {}
 #define STUB_ARG(fn) void fn(const char *arg); void fn(__unused const char *arg) { printf("usb: " #fn ": not on this kernel\n"); }
-STUB_ARG(hakios_bt_console)
+/* hakios_bt_console(): bsd/dev/hakios.bcm4361_bt.c (the S9 Bluetooth, bt=7) */
 STUB_ARG(hakios_net_console_ping)
 STUB_ARG(hakios_net_console_dns)
 STUB_ARG(hakios_net_console_tcp)
 STUB_ARG(hakios_net_console_names)
 STUB_ARG(hakios_input_console_touch)
 STUB_ARG(hakios_input_console_button)
-STUB_ARG(hakios_abox_console)
-STUB_ARG(hakios_cs47l93_console)
+/* hakios_abox_console(): bsd/dev/hakios.exynos_abox.c (the S9 ABOX speaker path, abox=N) */
+/* hakios_cs47l93_console(): bsd/dev/hakios.cs47l93.c (the S9 CS47L93 codec, cs47l93=N) */
 STUB_ARG(hakios_ssp_console)
 STUB_ARG(hakios_max77705_usb_console)
 void hakios_net_console_ip(void);
@@ -130,10 +141,31 @@ int hakios_fb_scanned(__unused uintptr_t *base, __unused uint32_t *width, __unus
     __unused uint32_t *rowbytes, __unused unsigned *index) { return ENODEV; }
 bool hakios_acpm_init(int (*say)(const char *, ...));
 bool hakios_acpm_init(__unused int (*say)(const char *, ...)) { return false; }
+/*
+ * The PMIC calls of sys/hakios.exynos_acpm.h go to this tree's one ACPM client, bsd/dev/starlte_touch.c (channel 2, its
+ * lock and sequence numbers): the S9's audio codec (hakios.cs47l93.c, cs47l93=N) powers its LDO34 through them.
+ * hakios_acpm_init() stays false above, so callers that ask it first (hakios.exynos_usb.c's LDO9-14) behave as before.
+ */
+extern bool starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
+extern bool starlte_pmic_write(uint32_t type, uint32_t reg, uint8_t val);
 int hakios_acpm_pmic_read(uint32_t type, uint32_t reg, uint8_t *value);
-int hakios_acpm_pmic_read(__unused uint32_t type, __unused uint32_t reg, __unused uint8_t *value) { return ENODEV; }
+int
+hakios_acpm_pmic_read(uint32_t type, uint32_t reg, uint8_t *value)
+{
+	return starlte_pmic_read(type, reg, value) ? 0 : EIO;
+}
 int hakios_acpm_pmic_update(uint32_t type, uint32_t reg, uint8_t value, uint8_t mask);
-int hakios_acpm_pmic_update(__unused uint32_t type, __unused uint32_t reg, __unused uint8_t value, __unused uint8_t mask) { return ENODEV; }
+int
+hakios_acpm_pmic_update(uint32_t type, uint32_t reg, uint8_t value, uint8_t mask)
+{
+	uint8_t v;
+
+	if (!starlte_pmic_read(type, reg, &v)) {
+		return EIO;
+	}
+	v = (uint8_t)((v & ~mask) | (value & mask));
+	return starlte_pmic_write(type, reg, v) ? 0 : EIO;
+}
 
 #include <stdarg.h>
 int hakios_say(const char *format, ...) __printflike(1, 2);

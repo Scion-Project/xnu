@@ -34,6 +34,7 @@
 #include <IOKit/IONVRAM.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOUserClient.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
 #include <libkern/c++/OSAllocation.h>
 
 extern "C" {
@@ -829,6 +830,19 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		/* Boot-arg dpu_probe=1: Scion's DPU scan-out service, its read-only probe (bsd/dev/hakios.exynos_dpu.c). */
 		extern void hakios_exynos_dpu_boot_probe(void);
 		hakios_exynos_dpu_boot_probe();
+		/* Boot-arg bt=N (1-7): Scion's S9 Bluetooth, BCM4361 on UART_BT (bsd/dev/hakios.bcm4361_bt.c); off: nothing. */
+		extern void hakios_bcm4361_bt_init(void);
+		hakios_bcm4361_bt_init();
+		/* Boot-arg max98512=N (1-3): Scion's S9 speaker amplifiers (bsd/dev/hakios.max98512.c); off: nothing. */
+		extern void hakios_max98512_init(void);
+		hakios_max98512_init();
+		/* Boot-arg cs47l93=N (1-6): Scion's S9 CS47L93 codec (bsd/dev/hakios.cs47l93.c); headphone OUT2 and mic IN3L. */
+		extern void hakios_cs47l93_init(void);
+		hakios_cs47l93_init();
+		/* Boot-arg abox=N (1-8): Scion's S9 ABOX speaker path, and at 8 /dev/hakios-audio (bsd/dev/hakios.exynos_abox.c);
+		 * off: nothing mapped or written. */
+		extern void hakios_exynos_abox_init(void);
+		hakios_exynos_abox_init();
 		extern void starlte_smp_probe(void);   /* boot-arg starsmpprobe=1 */
 		starlte_smp_probe();
 		/* Mali-G72 read-only probe (bsd/dev/starlte_gpu.c), boot-arg stargpu=0 off. */
@@ -2041,3 +2055,38 @@ IOVnodeGetEntitlement(vnode_t vnode, int64_t off, const char *entitlement)
 	}
 	return value;
 }
+
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/*
+ * (private iOS 27 port of Scion's S9 audio) A physically contiguous buffer below 4 GB for a 32-bit DMA (ABOX's RDMA0,
+ * bsd/dev/hakios.exynos_abox.c), from IOKit: physical mask 0xFFFFF000 (below 4 GB, page-aligned). Kept for good (the
+ * descriptor is never released): its kernel address, and its physical one in *pa; 0 when there is none (on the S9 there
+ * is RAM below 4 GB for the kernel only with boot-arg extra_ram=1).
+ */
+extern "C" vm_offset_t hakios_dma32_alloc(vm_size_t size, uint64_t *pa);
+extern "C" vm_offset_t
+hakios_dma32_alloc(vm_size_t size, uint64_t *pa)
+{
+	IOBufferMemoryDescriptor *md;
+	IOPhysicalAddress64 phys;
+
+	*pa = 0;
+	md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+	    kIODirectionInOut | kIOMemoryPhysicallyContiguous, size, 0x00000000FFFFF000ULL);
+	if (md == NULL) {
+		return 0;
+	}
+	if (md->prepare() != kIOReturnSuccess) {
+		md->release();
+		return 0;
+	}
+	phys = md->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
+	if (phys == 0 || phys + size > 0x100000000ULL) {
+		md->complete();
+		md->release();
+		return 0;
+	}
+	*pa = phys;
+	return (vm_offset_t)md->getBytesNoCopy();
+}
+#endif /* ARM64_BOARD_CONFIG_STARLTE */
