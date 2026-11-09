@@ -141,10 +141,31 @@ int hakios_fb_scanned(__unused uintptr_t *base, __unused uint32_t *width, __unus
     __unused uint32_t *rowbytes, __unused unsigned *index) { return ENODEV; }
 bool hakios_acpm_init(int (*say)(const char *, ...));
 bool hakios_acpm_init(__unused int (*say)(const char *, ...)) { return false; }
+/*
+ * The PMIC calls of sys/hakios.exynos_acpm.h go to this tree's one ACPM client, bsd/dev/starlte_touch.c (channel 2, its
+ * lock and sequence numbers): the S9's audio codec (hakios.cs47l93.c, cs47l93=N) powers its LDO34 through them.
+ * hakios_acpm_init() stays false above, so callers that ask it first (hakios.exynos_usb.c's LDO9-14) behave as before.
+ */
+extern bool starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
+extern bool starlte_pmic_write(uint32_t type, uint32_t reg, uint8_t val);
 int hakios_acpm_pmic_read(uint32_t type, uint32_t reg, uint8_t *value);
-int hakios_acpm_pmic_read(__unused uint32_t type, __unused uint32_t reg, __unused uint8_t *value) { return ENODEV; }
+int
+hakios_acpm_pmic_read(uint32_t type, uint32_t reg, uint8_t *value)
+{
+	return starlte_pmic_read(type, reg, value) ? 0 : EIO;
+}
 int hakios_acpm_pmic_update(uint32_t type, uint32_t reg, uint8_t value, uint8_t mask);
-int hakios_acpm_pmic_update(__unused uint32_t type, __unused uint32_t reg, __unused uint8_t value, __unused uint8_t mask) { return ENODEV; }
+int
+hakios_acpm_pmic_update(uint32_t type, uint32_t reg, uint8_t value, uint8_t mask)
+{
+	uint8_t v;
+
+	if (!starlte_pmic_read(type, reg, &v)) {
+		return EIO;
+	}
+	v = (uint8_t)((v & ~mask) | (value & mask));
+	return starlte_pmic_write(type, reg, v) ? 0 : EIO;
+}
 
 #include <stdarg.h>
 int hakios_say(const char *format, ...) __printflike(1, 2);
