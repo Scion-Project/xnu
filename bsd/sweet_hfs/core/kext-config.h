@@ -36,7 +36,9 @@
 
 // #define HFS_LEAK_DEBUG 1
 
-#if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) // iOS (real hardware)
+/* Starbite boards: no AppleKeyStore, so keep the OS X feature set
+ * (no content protection) even when the kernel is built iOS-target. */
+#if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) && 0 // iOS (real hardware)
 
 #define QUOTA 0
 #define CONFIG_PROTECT 1
