@@ -1452,9 +1452,29 @@ zone_id_require_aligned(zone_id_t zid, void *addr)
 	vm_offset_t elem, offs;
 
 	elem = (vm_offset_t)addr;
+#if CONFIG_PROB_GZALLOC
+	/*
+	 * sweet: with 4K kernel pages the ipc port zone uses multi-page
+	 * chunks, so an element in a secondary page is not element-aligned
+	 * relative to its own page.  A PGZ-protected element keeps only the
+	 * page offset, and its PGZ metadata has no page index, so the check
+	 * below panicked ("chunk len greater than max") on every PGZ-sampled
+	 * port.  Resolve back to the original element first, like
+	 * zone_element_bounds_check() does.
+	 */
+	if (__improbable(pgz_owned(elem))) {
+		struct zone_page_metadata *pmeta = zone_meta_from_addr(elem);
+
+		if (pmeta->zm_chunk_len == ZM_PGZ_ALLOCATED &&
+		    zid == pmeta->zm_index) {
+			elem = trunc_page(pmeta->zm_pgz_orig_addr) +
+			    (elem & PAGE_MASK);
+		}
+	}
+#endif /* CONFIG_PROB_GZALLOC */
 	offs = (elem & PAGE_MASK) - zone_elem_inner_offs(zone);
 
-	if (from_zone_map(addr, 1)) {
+	if (from_zone_map(elem, 1)) {
 		struct zone_page_metadata *meta;
 
 		meta = zone_meta_from_addr(elem);
