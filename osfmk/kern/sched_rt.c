@@ -44,6 +44,11 @@
 
 #include <machine/machine_routines.h>
 
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+/* Fast cores (boot-arg sweetfast), defined in sched_prim.c. */
+extern cpumap_t sweet_fast_map;
+#endif
+
 #define KTRC KDBG_RELEASE
 
 #pragma mark - Constants and Tunables
@@ -972,6 +977,12 @@ try_again:
 	if (avoid_cpu0) {
 		primary_map = bit_ror64(primary_map, 1);
 	}
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+	/* Realtime threads (touch, audio, CoreAnimation) on a fast core when one is free. */
+	if ((primary_map & sweet_fast_map) != 0) {
+		primary_map &= sweet_fast_map;
+	}
+#endif
 
 	int rotid = lsb_first(primary_map);
 	if (rotid >= 0) {
@@ -1085,7 +1096,13 @@ pset_choose_processor_for_realtime_thread(processor_set_t pset, processor_t skip
 		cpu_map &= ~pset->rt_pending_spill_cpu_mask;
 	}
 
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+	/* Realtime threads (touch, audio, CoreAnimation) on a fast core when one is free. */
+	cpumap_t fast_map = cpu_map & sweet_fast_map;
+	int rotid = lsb_first(fast_map != 0 ? fast_map : cpu_map);
+#else
 	int rotid = lsb_first(cpu_map);
+#endif
 	if (rotid >= 0) {
 		return processor_array[rotid];
 	}
