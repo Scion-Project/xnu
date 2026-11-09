@@ -71,6 +71,11 @@ const char * gIOKernelConfigTables =
     "     'IOMatchCategory' = IOCoreSurfaceRoot;"
     "   },"
     "   {"
+    "     'IOClass'         = IOSurfaceRoot;"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = IOSurfaceRoot;"
+    "   },"
+    "   {"
     "     'IOClass'         = AppleCLCD;"
     "     'IOProviderClass' = IOPlatformDevice;"
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
