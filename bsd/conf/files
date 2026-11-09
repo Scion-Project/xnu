@@ -122,6 +122,7 @@ bsd/dev/hakios.exynos_cpufreq.c	standard
 bsd/dev/hakios.exynos_tmu.c		standard
 bsd/dev/hakios.scion_gov.c		standard
 bsd/dev/hakios.exynos_pcie.c		standard
+bsd/dev/hakios.exynos_dpu.c		standard
 bsd/dev/herolte_battery.c		standard
 bsd/dev/herolte_gpu.c			standard
 bsd/dev/a5xelte_keys.c			standard

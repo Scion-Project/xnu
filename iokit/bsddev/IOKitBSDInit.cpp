@@ -822,6 +822,9 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		/* Boot-arg wifi_pcie=N (1-5): Scion's Wi-Fi stage 1, PCIe channel 0 to the BCM4361 (bsd/dev/hakios.exynos_pcie.c). */
 		extern void hakios_exynos_pcie_init(void);
 		hakios_exynos_pcie_init();
+		/* Boot-arg dpu_probe=1: Scion's DPU scan-out service, its read-only probe (bsd/dev/hakios.exynos_dpu.c). */
+		extern void hakios_exynos_dpu_boot_probe(void);
+		hakios_exynos_dpu_boot_probe();
 		extern void starlte_smp_probe(void);   /* boot-arg starsmpprobe=1 */
 		starlte_smp_probe();
 		/* Mali-G72 read-only probe (bsd/dev/starlte_gpu.c), boot-arg stargpu=0 off. */
