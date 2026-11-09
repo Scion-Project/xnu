@@ -1042,6 +1042,19 @@ sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subc
 	if (ss == NULL || !is_saved_state64(ss)) {
 		return;
 	}
+	{
+		/* sweetcrashterse=1: one line per crash (pc, lr), so a crash loop does not flush the
+		 * 16 KiB pmsg ring that carries the log to TWRP */
+		static int terse = -1;
+		if (terse < 0) {
+			terse = 0;
+			PE_parse_boot_argn("sweetcrashterse", &terse, sizeof(terse));
+		}
+		if (terse) {
+			printf("CRASH %s pc 0x%llx lr 0x%llx\n", name, get_saved_state_pc(ss), get_saved_state_lr(ss));
+			return;
+		}
+	}
 	uint64_t fp = get_saved_state_fp(ss);
 	printf("CRASH %s pc 0x%llx lr 0x%llx sp 0x%llx fp 0x%llx far 0x%llx\n", name,
 	    get_saved_state_pc(ss), get_saved_state_lr(ss), get_saved_state_sp(ss), fp,
