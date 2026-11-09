@@ -814,6 +814,9 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		starlte_touch_probe();
 		extern void starlte_smp_probe(void);   /* boot-arg starsmpprobe=1 */
 		starlte_smp_probe();
+		/* Mali-G72 read-only probe (bsd/dev/starlte_gpu.c), boot-arg stargpu=0 off. */
+		extern void starlte_gpu_probe(void);
+		starlte_gpu_probe();
 	}
 	{
 	uint32_t ufsprobe = 0;
