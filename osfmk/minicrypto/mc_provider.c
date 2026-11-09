@@ -468,4 +468,13 @@ minicrypto_init(void)
 	register_and_init_prng((struct cckprng_ctx *)(void *)&mc_prng, &mc_prng_funcs);
 	printf("minicrypto: registered (md5, sha1, sha2, hmac, aes-ecb/cbc/ctr, hmac-drbg prng); no xts/gcm, no RSA; the ARMv8 crypto instructions %s\n", mc_ce_on ? "in use" : "not in use");
 }
+#if !defined(ARM64_BOARD_CONFIG_VMAPPLE)
 STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, minicrypto_init);
+#elif SCION_NATIVE_PAC
+/*
+ * xnu-12377 (VMAPPLE; patches/xnu-12377/0100): only in a kernel for a VM without Apple's hypervisor, and a stage
+ * earlier, because this base runs EARLY_BOOT after PE_init_iokit, whose platform UUID already takes a SHA-1:
+ * the last of SYSCTL is the last stage kernel_bootstrap_thread runs before it.
+ */
+STARTUP(SYSCTL, STARTUP_RANK_LAST, minicrypto_init);
+#endif
