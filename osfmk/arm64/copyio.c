@@ -515,6 +515,46 @@ copyin_atomic64(const user_addr_t user_addr, uint64_t *kernel_addr)
 	           _copyin_atomic64(guarded_user_addr, kernel_addr));
 }
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+extern int _sweet_cas64(user_addr_t addr, uint64_t expected, uint64_t desired, uint64_t *old);
+extern int _sweet_cas128(user_addr_t addr, uint64_t exp_lo, uint64_t exp_hi, uint64_t new_lo,
+    uint64_t new_hi, uint64_t old[2]);
+int sweet_copy_cas64(user_addr_t user_addr, uint64_t expected, uint64_t desired, uint64_t *old);
+int sweet_copy_cas128(user_addr_t user_addr, const uint64_t expected[2], const uint64_t desired[2],
+    uint64_t old[2]);
+
+/* sweet: user-memory compare-and-swap for the M3's LSE emulation (sweet_a64e.c); *old = the value seen */
+int
+sweet_copy_cas64(user_addr_t user_addr, uint64_t expected, uint64_t desired, uint64_t *old)
+{
+	vm_map_t map = current_thread()->map;
+	int result = copy_validate(map, user_addr, (uintptr_t)old, 8, COPYIO_IN | COPYIO_ATOMIC);
+	if (__improbable(result)) {
+		return result;
+	}
+	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+	return WRAP_COPYIO(USER_ACCESS_WRITE, map,
+	           _sweet_cas64(guarded_user_addr, expected, desired, old));
+}
+
+int
+sweet_copy_cas128(user_addr_t user_addr, const uint64_t expected[2], const uint64_t desired[2],
+    uint64_t old[2])
+{
+	vm_map_t map = current_thread()->map;
+	if (user_addr & 15) {
+		return EINVAL;
+	}
+	int result = copy_validate(map, user_addr, (uintptr_t)old, 16, COPYIO_IN);
+	if (__improbable(result)) {
+		return result;
+	}
+	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+	return WRAP_COPYIO(USER_ACCESS_WRITE, map,
+	           _sweet_cas128(guarded_user_addr, expected[0], expected[1], desired[0], desired[1], old));
+}
+#endif
+
 int
 copyout_atomic32(uint32_t value, user_addr_t user_addr)
 {

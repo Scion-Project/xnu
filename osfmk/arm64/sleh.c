@@ -1320,6 +1320,22 @@ handle_uncategorized(arm_saved_state_t *state)
 		if (sweet_a64e_emulate(state, instr)) {
 			return;
 		}
+		/*
+		 * Any other instruction the Mongoose M3 lacks (FP16, DotProd, RDM ...; Samsung MIDR
+		 * implementer 0x53): pin the thread to one of the A55s (logical CPUs 0-3) and run the
+		 * instruction again there, instead of a SIGILL.
+		 */
+		if ((__builtin_arm_rsr64("MIDR_EL1") >> 24) == 0x53) {
+			extern uint64_t sweet_m3_pins;
+			int cpu = (int)(thread_tid(current_thread()) % 4);
+			processor_t little = cpu_to_processor(cpu);
+			if (little != PROCESSOR_NULL) {
+				sweet_m3_pins++;
+				thread_bind(little);
+				thread_block(THREAD_CONTINUE_NULL);
+				return;
+			}
+		}
 	}
 #endif
 
