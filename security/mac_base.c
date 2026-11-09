@@ -1614,6 +1614,17 @@ __mac_syscall(proc_t p, struct __mac_syscall_args *uap, int *retv __unused)
 	}
 
 done:
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (error == ENOPOLICY) {
+		/* which MAC policy a new userland asks for that is not here (first 40) */
+		static int left = 40;
+		if (left > 0) {
+			left--;
+			printf("STARBITE MAC: %s[%d] __mac_syscall(\"%s\", %d): no such policy\n", p->p_comm,
+			    proc_getpid(p), target, uap->call);
+		}
+	}
+#endif
 	return error;
 }
 
