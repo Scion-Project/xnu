@@ -49,6 +49,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <libkern/c++/OSString.h>
 #include <sys/proc.h>
+#include "SweetKeyStorePasscode.h"
 
 /* libaks selectors (AppleKeyStore.framework, iOS 16.7). */
 enum {
@@ -111,14 +112,43 @@ static const uint8_t sweet_aks_wrap_tag[8] = { 'S', '9', 'A', 'K', 'S', 'W', '0'
 
 extern "C" uint32_t sweet_speed_flags(void);    /* boot-arg sweetspeed (osfmk/arm64/sweet_a64e.c) */
 
+/* Boot-arg sweetspeed&0x800000: a passcode that gates the screen (SweetKeyStorePasscode.cpp). */
+static bool
+sweet_aks_passcode(void)
+{
+	return (sweet_speed_flags() & SWEET_SPEED_AKS_PASSCODE) != 0;
+}
+
+/* With the passcode on, what its module does not answer is answered as for a device with no passcode. */
 static bool
 sweet_aks_nopasscode(void)
 {
-	return (sweet_speed_flags() & SWEET_SPEED_AKS_NOPASSCODE) != 0;
+	return (sweet_speed_flags() & (SWEET_SPEED_AKS_NOPASSCODE | SWEET_SPEED_AKS_PASSCODE)) != 0;
 }
 
 static uint32_t sweet_aks_grace_period;         /* "gp", as set by selector 30; kept for this boot */
 static bool sweet_aks_notify_state;             /* selector 102 was called */
+static IOService *sweet_aks_service;            /* the AppleKeyStore object, for messageClients */
+
+bool
+sweet_aks_notify_state_get(void)
+{
+	return sweet_aks_notify_state;
+}
+
+void
+sweet_aks_notify_state_set(void)
+{
+	sweet_aks_notify_state = true;
+}
+
+void
+sweet_aks_message_clients(uint32_t message)
+{
+	if (sweet_aks_service != NULL) {
+		sweet_aks_service->messageClients(message);
+	}
+}
 
 class AppleKeyStore : public IOService {
 	OSDeclareDefaultStructors(AppleKeyStore);
@@ -136,6 +166,10 @@ AppleKeyStore::start(IOService *provider)
 		return false;
 	}
 	setProperty(kIOUserClientClassKey, "AppleKeyStoreUserClient");
+	sweet_aks_service = this;
+	if (sweet_aks_passcode()) {
+		sweet_aks_passcode_init();
+	}
 	registerService();
 	IOLog("SWEET AKS: AppleKeyStore registered (no passcode, unlocked%s)\n",
 	    sweet_aks_nopasscode() ? "; lock state 3, sweetspeed&0x400000" : "");
@@ -176,7 +210,7 @@ AppleKeyStoreUserClient::registerNotificationPort(mach_port_t port, UInt32 type,
 }
 
 /* Copy len bytes to the caller's output structure (inband or descriptor). */
-static IOReturn
+IOReturn
 sweet_aks_struct_out(IOExternalMethodArguments *args, const void *buf, uint32_t len)
 {
 	if (args->structureOutputDescriptor != NULL) {
@@ -272,7 +306,7 @@ sweet_aks_configuration(IOExternalMethodArguments *args)
 }
 
 /* Structure input (inband or descriptor) into buf; its length, or -1 if larger than max. */
-static int32_t
+int32_t
 sweet_aks_struct_in(IOExternalMethodArguments *args, uint8_t *buf, uint32_t max)
 {
 	if (args->structureInputDescriptor != NULL) {
@@ -389,6 +423,11 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 	uint32_t out_struct = sweet_aks_struct_out_size(args);
 	uint64_t arg0 = in_scalars > 0 ? args->scalarInput[0] : 0;
 	bool nopasscode = sweet_aks_nopasscode();
+
+	/* a passcode (sweetspeed&0x800000): its module answers first; what it leaves goes on below */
+	if (sweet_aks_passcode() && sweet_aks_passcode_external(selector, args, &ret)) {
+		goto done;
+	}
 
 	/* the full contract of a device with no passcode (sweetspeed&0x400000): what the switch below does not answer, or answers otherwise */
 	if (nopasscode) {
