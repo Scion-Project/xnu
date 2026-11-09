@@ -28,6 +28,9 @@
 
 #pragma once
 
+/* sweet: MPIDR_CORETYPE_* come from here; Apple SoC headers include it first, generic boards do not. */
+#include <pexpert/arm64/apple_arm64_regs.h>
+
 #if !defined(__ASSEMBLER__)
 
 #include <stdbool.h>
