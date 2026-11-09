@@ -913,7 +913,14 @@ bsd_init(void)
 	init_rootvnode = NULLVP;  /* use rootvnode after this point */
 
 
-	if (!bsd_rooted_ramdisk()) {
+	/*
+	 * A virtio disk root (rd=rvblkN, bsd/dev/hakios.virtio_blk.c) is an image the host serves,
+	 * like a RAM disk: nothing here can verify a seal on it.
+	 */
+	char rd_virtio[16] = "";
+	bool rooted_virtio = PE_parse_boot_argn("rd", rd_virtio, sizeof(rd_virtio)) && strncmp(rd_virtio, "rvblk", 5) == 0;
+
+	if (!bsd_rooted_ramdisk() && !rooted_virtio) {
 		boolean_t require_rootauth = FALSE;
 
 #if XNU_TARGET_OS_OSX && defined(__arm64__)

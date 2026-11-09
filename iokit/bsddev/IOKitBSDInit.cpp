@@ -686,7 +686,8 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 	// A memory-device root needs no filesystem kext, so do not sit out the timeout for one
 	char rdEarly[kMaxBootVar];
 	uint64_t bsdWait = 30ULL * kSecondScale;
-	if (PE_parse_boot_argn("rd", rdEarly, sizeof(rdEarly)) && rdEarly[0] == 'm' && rdEarly[1] == 'd') {
+	if (PE_parse_boot_argn("rd", rdEarly, sizeof(rdEarly)) &&
+	    ((rdEarly[0] == 'm' && rdEarly[1] == 'd') || strncmp(rdEarly, "rvblk", 5) == 0)) {
 		bsdWait = kSecondScale / 10;
 	}
 
@@ -782,6 +783,23 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 			}
 			regEntry->release();                                                            /* Toss the entry */
 		}
+	}
+
+//
+//	A virtio disk (bsd/dev/hakios.virtio_blk.c): rd=rvblk0 roots on the first one
+//
+	if (strncmp(rdBootVar, "rvblk", 5) == 0) {
+		extern int hakios_virtio_blk_rootdev(const char *name, dev_t *dev);
+		int vblk_error;
+
+		OSSafeReleaseNULL(matching);
+		if ((vblk_error = hakios_virtio_blk_rootdev(rdBootVar, root)) != 0) {
+			panic("IOFindBSDRoot: virtio root %s unavailable: %d", rdBootVar, vblk_error);
+		}
+		strlcpy(rootName, rdBootVar, rootNameSize);
+		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
+		*oflags = 0;
+		goto iofrootx;
 	}
 
 //
