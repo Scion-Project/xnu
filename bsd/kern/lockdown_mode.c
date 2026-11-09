@@ -39,6 +39,10 @@ int lockdown_mode_state = 0;
 
 SYSCTL_DECL(_security_mac);
 SYSCTL_INT(_security_mac, OID_AUTO, lockdown_mode_state, CTLFLAG_RD | CTLFLAG_LOCKED, &lockdown_mode_state, 0, "Lockdown Mode state");
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+/* iOS 27 on STARLTE: Darwin 27 libsystem_darwin (os_lockdown_mode_enabled) reads this name and aborts without it */
+SYSCTL_INT(_security_mac, OID_AUTO, lockdown_mode_state_public, CTLFLAG_RD | CTLFLAG_LOCKED, &lockdown_mode_state, 0, "Lockdown Mode state");
+#endif
 
 __startup_func
 void

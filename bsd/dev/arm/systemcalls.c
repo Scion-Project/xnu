@@ -44,6 +44,75 @@ extern void dtrace_systrace_syscall_return(unsigned short, int, int *);
 extern void
 unix_syscall(struct arm_saved_state * regs, thread_t thread_act, struct proc * proc);
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/* Remaining trace lines (boot-arg sweettrace, default 0 = off). */
+int sweet_trace_left(void);
+int
+sweet_trace_left(void)
+{
+	static int left = -1;
+	if (left < 0) {
+		int n = 0;
+		PE_parse_boot_argn("sweettrace", &n, sizeof(n));
+		left = n;
+	}
+	return left > 0 ? left-- : 0;
+}
+
+/*
+ * Which process the trace follows: pid 1, or every process whose p_comm
+ * matches boot-arg sweettracename=<name> (first MAXCOMLEN characters).
+ */
+bool sweet_trace_match(const char *comm, int pid);
+bool
+sweet_trace_match(const char *comm, int pid)
+{
+	static char name[MAXCOMLEN + 1];
+	static int state = -1;
+
+	if (state < 0) {
+		state = PE_parse_boot_argn("sweettracename", name, sizeof(name)) ? 1 : 0;
+	}
+	if (state == 0) {
+		return pid == 1;
+	}
+	return strncmp(comm, name, MAXCOMLEN) == 0;
+}
+
+/* Failing syscalls of the traced process are always logged (capped). */
+static int
+sweet_trace_err_left(void)
+{
+	static int left = 3000;
+	return left > 0 ? left-- : 0;
+}
+
+/* The path argument of a failing filesystem syscall, if it has one. */
+static user_addr_t
+sweet_trace_path_arg(int code, const uint64_t *arg)
+{
+	switch (code) {
+	case SYS_open: case SYS_unlink: case SYS_chmod: case SYS_chown:
+	case SYS_access: case SYS_symlink: case SYS_readlink: case SYS_rename:
+	case SYS_mkdir: case SYS_rmdir: case SYS_getattrlist: case SYS_setattrlist:
+	case SYS_getxattr: case SYS_setxattr: case SYS_listxattr: case SYS_fsctl:
+	case SYS_stat64: case SYS_lstat64: case SYS_statfs64:
+	case 398:       /* open_nocancel (libc's opendir, CFBundle) */
+		return (user_addr_t)arg[0];
+	case 464:       /* openat_nocancel */
+		return (user_addr_t)arg[1];
+	case 202:       /* sysctl: a two-level name is sysctlbyname's {0, 3} lookup, the name string in newp */
+		return arg[1] == 2 ? (user_addr_t)arg[4] : 0;
+	case SYS_openat: case SYS_renameat: case SYS_faccessat: case SYS_fchmodat:
+	case SYS_fchownat: case SYS_fstatat64: case SYS_unlinkat: case SYS_readlinkat:
+	case SYS_mkdirat: case SYS_getattrlistat:
+		return (user_addr_t)arg[1];
+	default:
+		return 0;
+	}
+}
+#endif
+
 static int      arm_get_syscall_args(uthread_t, struct arm_saved_state *, const struct sysent *);
 static int      arm_get_u32_syscall_args(uthread_t, arm_saved_state32_t *, const struct sysent *);
 static void     arm_prepare_u32_syscall_return(const struct sysent *, arm_saved_state_t *, uthread_t, int);
@@ -180,6 +249,58 @@ unix_syscall(
 	AUDIT_SYSCALL_ENTER(code, proc, uthread);
 	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
 	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* sweet (0309): boot-arg sweettrace=N logs pid 1's first N syscalls and
+	 * Mach traps (bsd_arm64.c), with arguments and results. */
+	{
+		extern int sweet_trace_left(void);
+		extern bool sweet_trace_match(const char *, int);
+		extern const char *syscallnames[];
+		/* iOS 27 on STARLTE: boot-arg sweeteacces=1: every process's filesystem calls failing with
+		 * EACCES or EPERM, with the path (first 300) */
+		{
+			static int eacces_on = -1, eacces_left = 300;
+			if (eacces_on < 0) {
+				int v = 0;
+				PE_parse_boot_argn("sweeteacces", &v, sizeof(v));
+				eacces_on = v;
+			}
+			if (__improbable(eacces_on > 0 && (error == EACCES || error == EPERM) && eacces_left > 0)) {
+				user_addr_t pa = sweet_trace_path_arg(code, uthread->uu_arg);
+				if (pa != 0) {
+					char path[200];
+					size_t done;
+					if (copyinstr(pa, path, sizeof(path), &done) == 0) {
+						eacces_left--;
+						printf("SWEET EACCES: %s[%d] %s(%d) = %d uid %d: %s\n", proc->p_comm, pid,
+						    code < nsysent ? syscallnames[code] : "?", code, error,
+						    kauth_cred_getuid(kauth_cred_get()), path);
+					}
+				}
+			}
+		}
+		/* persona(494) calls are logged from every process: user sessions depend on them */
+		if (__improbable(sweet_trace_match(proc->p_comm, pid))) {
+			bool failed = error != 0 && error != EJUSTRETURN && error != ERESTART;
+			if (sweet_trace_left() > 0 || (failed && sweet_trace_err_left() > 0)) {
+				char path[160] = "";
+				user_addr_t pa = failed ? sweet_trace_path_arg(code, uthread->uu_arg) : 0;
+				if (pa != 0) {
+					size_t done;
+					path[0] = ' ';
+					if (copyinstr(pa, path + 1, sizeof(path) - 1, &done) != 0) {
+						path[0] = '\0';
+					}
+				}
+				printf("SYS %s[%d] %s(%d)(0x%llx, 0x%llx, 0x%llx, 0x%llx) = %d / 0x%llx%s\n",
+				    proc->p_comm, pid,
+				    code < nsysent ? syscallnames[code] : "?", code,
+				    uthread->uu_arg[0], uthread->uu_arg[1], uthread->uu_arg[2], uthread->uu_arg[3],
+				    error, *(uint64_t *)(void *)&uthread->uu_rval[0], path);   /* full 64-bit result (mmap) */
+			}
+		}
+	}
+#endif
 
 #if CONFIG_MACF
 skip_syscall:

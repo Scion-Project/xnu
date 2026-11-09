@@ -3043,6 +3043,17 @@ kmem_add_extra_claims(struct mach_vm_range km_range)
 			sp_i.kc_size, /* known_last */ false);
 	}
 	assert((total_claims & PAGE_MASK) == 0);
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+	/* 2 GiB of RAM failed in kmem_range_init: record what is claimed. */
+	printf("HEROLTE KMEM: kernel_map %#llx-%#llx free %#llx claims %#llx (%u) mem %#llx\n",
+	    (uint64_t)kernel_map->min_offset, (uint64_t)kernel_map->max_offset,
+	    (uint64_t)free_size, (uint64_t)total_claims, kmem_claim_count,
+	    (uint64_t)sane_size);
+	for (uint32_t i = 0; i < kmem_claim_count; i++) {
+		printf("HEROLTE KMEM: claim %s %#llx\n", kmem_claims[i].kc_name,
+		    (uint64_t)kmem_claims[i].kc_size);
+	}
+#endif
 
 
 	free_size -= total_claims;

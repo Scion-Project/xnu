@@ -275,9 +275,40 @@ _cnputc(char c, bool poll)
  *             waiting for an interrupt when the hardware device isn't ready
  * @param size The number of characters to print to the console.
  */
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+extern void sweet_log_append(const char *c, int size);  /* bsd/dev/sweet_ufs.c */
+#endif
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+extern void a5xelte_log_append(const char *c, int size); /* bsd/dev/a5xelte_emmc.c */
+#endif
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * Set by AppleCLCD (boot-arg sweetfb_noconsole=1) once the GUI presents:
+ * console text still goes to the persistent log, but is not drawn over
+ * the GUI. A panic draws again.
+ */
+int sweet_console_muted;
+#endif
+
+#endif
 static inline void
 _cnputs(char *c, int size, bool poll)
 {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_log_append(c, size);
+#endif
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+	a5xelte_log_append(c, size);
+#endif
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	if (sweet_console_muted && !panic_active()) {
+		return;
+	}
+#endif
+
+#endif
 	if (disableConsoleOutput) {
 		return;
 	}

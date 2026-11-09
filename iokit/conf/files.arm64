@@ -6,3 +6,21 @@ iokit/Kernel/IOPMrootDomain.cpp    					optional iokitcpp
 # SMP
 iokit/Kernel/arm/AppleARMSMP.cpp    					optional iokitcpp
 
+# SWEET device-tree platform (empty translation unit on other boards)
+iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitcpp scion_generic_arm64
+
+iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/SweetEntitlements.cpp                           optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/SweetKeyStore.cpp                               optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/SweetWatchdog.cpp                               optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/SweetSurface.cpp                                optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/StarbiteMali.cpp                                optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/A5XELTEGPU.cpp                                 optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/StarbiteAccelerator.cpp                         optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp             optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/hid/SweetHIDSystem.cpp                          optional iokitcpp scion_generic_arm64

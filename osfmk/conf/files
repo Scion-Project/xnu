@@ -374,10 +374,10 @@ osfmk/kern/bootprofile.c		optional config_telemetry
 
 # Scion: minicrypto, the crypto provider in place of Apple's corecrypto kext (patches/xnu-8796/0280); on this base
 # it registers only in a SCION_NATIVE_PAC kernel (mc_provider.c). The key store's parts (mc_keywrap.c, third_party/) are not built here.
-osfmk/minicrypto/mc_digests.c	standard
-osfmk/minicrypto/mc_provider.c	standard
-osfmk/minicrypto/mc_aes.c	standard
-osfmk/minicrypto/mc_ce.c	standard
+osfmk/minicrypto/mc_digests.c	optional scion_vmapple
+osfmk/minicrypto/mc_provider.c	optional scion_vmapple
+osfmk/minicrypto/mc_aes.c	optional scion_vmapple
+osfmk/minicrypto/mc_ce.c	optional scion_vmapple
 
 # Built-in corecrypto for early_random():
 osfmk/corecrypto/cc_clear.c	standard

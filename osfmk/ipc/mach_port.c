@@ -2970,9 +2970,35 @@ mach_port_is_connection_for_service(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/*
+	 * sweet: message-filter callbacks come from the Sandbox kext, which
+	 * this kernel does not have, so this returned KERN_NOT_SUPPORTED and
+	 * iPadOS 18's libxpc rejected every new peer connection whose server
+	 * asked (containermanagerd, usermanagerd: clients saw their reply
+	 * ports die, lsd aborted).  With no sandbox there is nothing to
+	 * check: validate the names and answer "no filter policy".
+	 */
+	if (!mach_msg_filter_at_least(MACH_MSG_FILTER_CALLBACKS_VERSION_1)) {
+		ret = ipc_port_translate_receive(space, service_port_name, &service_port);
+		if (ret) {
+			return ret;
+		}
+		ip_mq_unlock(service_port);
+		*filter_policy_id = 0;
+		return KERN_SUCCESS;
+	}
+#else
 	if (!mach_msg_filter_at_least(MACH_MSG_FILTER_CALLBACKS_VERSION_1)) {
 		return KERN_NOT_SUPPORTED;
 	}
+#endif
+#else
+	if (!mach_msg_filter_at_least(MACH_MSG_FILTER_CALLBACKS_VERSION_1)) {
+		return KERN_NOT_SUPPORTED;
+	}
+#endif
 
 	ret = ipc_port_translate_receive(space, service_port_name, &service_port);
 	if (ret) {

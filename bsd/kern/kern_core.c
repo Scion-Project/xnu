@@ -34,6 +34,9 @@
  */
 #if CONFIG_COREDUMP || CONFIG_UCOREDUMP
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#include <pexpert/arm64/board_config.h>
+#endif
 #include <mach/vm_param.h>
 #include <mach/thread_status.h>
 #include <sys/content_protection.h>
@@ -86,11 +89,24 @@ kern_return_t thread_getstatus(thread_t act, int flavor,
     thread_state_t tstate, mach_msg_type_number_t *count);
 void task_act_iterate_wth_args(task_t, void (*)(thread_t, void *), void *);
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(SECURE_KERNEL) || defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * iOS donor boards: off by default (sysctl kern.coredump=1 enables it). A crashing iOS
+ * daemon maps the whole shared region, so one core is gigabytes on the root
+ * volume and takes minutes on phone storage.
+ */
+__XNU_PRIVATE_EXTERN int do_coredump = 0;       /* default: don't dump cores */
+#else
+__XNU_PRIVATE_EXTERN int do_coredump = 1;       /* default: dump cores */
+#endif /* SECURE_KERNEL */
+#else
 #ifdef SECURE_KERNEL
 __XNU_PRIVATE_EXTERN int do_coredump = 0;       /* default: don't dump cores */
 #else
 __XNU_PRIVATE_EXTERN int do_coredump = 1;       /* default: dump cores */
 #endif /* SECURE_KERNEL */
+#endif
 __XNU_PRIVATE_EXTERN int sugid_coredump = 0; /* default: but not SGUID binaries */
 
 #if CONFIG_UCOREDUMP

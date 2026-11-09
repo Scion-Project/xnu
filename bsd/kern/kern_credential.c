@@ -3119,7 +3119,11 @@ kauth_cred_ismember_gid(kauth_cred_t cred, gid_t gid, int *resultp)
  *					0	Is not member
  */
 int
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+kauth_cred_ismember_guid(kauth_cred_t cred, guid_t *guidp, int *resultp)
+#else
 kauth_cred_ismember_guid(__unused kauth_cred_t cred, guid_t *guidp, int *resultp)
+#endif
 {
 	int error = 0;
 
@@ -3133,6 +3137,38 @@ kauth_cred_ismember_guid(__unused kauth_cred_t cred, guid_t *guidp, int *resultp
 	default:
 	{
 		gid_t gid;
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+		/*
+		 * iOS 27 on STARLTE: this kernel is built with CONFIG_EXT_RESOLVER (macOS config)
+		 * but iOS runs no identity resolver, so ACL entries naming a group by its compat GUID
+		 * (ABCDEFAB-CDEF-ABCD-EFAB-CDEF<gid>, e.g. systemusers 299 on the SystemGroup containers)
+		 * never matched: EACCES for every uid-501 daemon. Translate that form directly.
+		 */
+		{
+			static const uint8_t grp_prefix[12] = {0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef};
+			if (memcmp(guidp, grp_prefix, sizeof(grp_prefix)) == 0) {
+				uint32_t g;
+				memcpy(&g, (const uint8_t *)guidp + 12, sizeof(g));
+				gid = (gid_t)ntohl(g);
+				if (kauth_cred_ismember_gid(cred, gid, resultp) != 0) {
+					*resultp = 0;
+				}
+				if (*resultp == 0 && gid == 299) {
+					/* systemusers (299): /etc/group lists mobile and ~20 daemon users, but the
+					 * credentials here do not carry it (no initgroups through a resolver).
+					 * Permissive like the sandbox stand-in: everyone is in it. */
+					static int said;
+					if (!said) {
+						said = 1;
+						printf("SWEET KAUTH: uid %d not in systemusers by its groups (%d of them); granted\n",
+						    kauth_cred_getuid(cred), posix_cred_get(cred)->cr_ngroups);
+					}
+					*resultp = 1;
+				}
+				return 0;
+			}
+		}
+#endif
 #if CONFIG_EXT_RESOLVER
 		struct kauth_identity ki;
 

@@ -34,6 +34,92 @@
 
 const char * gIOKernelConfigTables =
     "("
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+    "   {"
+    "     'IOClass'         = SweetPlatformExpert;"
+    "     'IOProviderClass' = IOPlatformExpertDevice;"
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+    "     'IONameMatch'     = 'samsung,a5xelte';"
+#else
+    "     'IONameMatch'     = 'xiaomi,sweet';"
+#endif
+    "     'IOProbeScore'    = 10000:32;"
+    "   },"
+    "   {"
+    "     'IOClass'         = SweetCPU;"
+    "     'IOProviderClass' = IOPlatformDevice;"
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+    "     'IONameMatch'     = 'arm,cortex-a53';"
+#else
+    "     'IONameMatch'     = 'qcom,kryo470';"
+#endif
+    "     'IOProbeScore'    = 10000:32;"
+    "   },"
+    "   {"
+    "     'IOClass'         = AppleKeyStore;"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = AppleKeyStore;"
+    "   },"
+    "   {"
+    "     'IOClass'         = IOWatchdog;"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = IOWatchdog;"
+    "   },"
+    "   {"
+    "     'IOClass'         = IOCoreSurfaceRoot;"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = IOCoreSurfaceRoot;"
+    "   },"
+    "   {"
+    "     'IOClass'         = IOSurfaceRoot;"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = IOSurfaceRoot;"
+    "   },"
+    "   {"
+    "     'IOClass'         = AppleCLCD;"
+    "     'IOProviderClass' = IOPlatformDevice;"
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+    "     'IONameMatch'     = 'samsung,a5xelte-display';"
+#else
+    "     'IONameMatch'     = 'sweet,display';"
+#endif
+    "   },"
+    "   {"
+    "     'IOClass'         = SweetHIDButtons;"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = SweetHIDButtons;"
+    "   },"
+    "   {"
+    "     'IOClass'         = SweetHIDTouch;"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = SweetHIDTouch;"
+    "   },"
+    "   {"
+    "     'IOClass'         = IOHIDSystem;"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = IOHIDSystem;"
+    "   },"
+#if !defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_HEROLTE)
+    "   {"
+    "     'IOClass'         = SweetBattery;"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = SweetBattery;"
+    "   },"
+    "   {"
+    "     'IOClass'         = StarbiteAccelerator;"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = StarbiteAccelerator;"
+    "   },"
+#endif
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+    "   {"
+    "     'IOClass'         = A5XELTEGPU;"
+    "     'IOProviderClass' = IOPlatformDevice;"
+    "     'IONameMatch'     = 'samsung,exynos7580-mali';"
+    "     'IOProbeScore'    = 10000:32;"
+    "   },"
+#endif
+#endif
     "   {"
     "     'IOClass'         = IOPanicPlatform;"
     "     'IOProviderClass' = IOPlatformExpertDevice;"

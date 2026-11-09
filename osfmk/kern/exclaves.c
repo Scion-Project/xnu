@@ -3328,6 +3328,27 @@ STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, exclaves_requirement_startup);
 
 #endif /* CONFIG_EXCLAVES */
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+/* sweet: the generic boards do not link Apple's closed libTightbeam (0009). */
+#if __has_include(<Tightbeam/tightbeam.h>) && \
+    !defined(ARM64_BOARD_CONFIG_SWEET) && !defined(ARM64_BOARD_CONFIG_A5XELTE)
+
+#include <Tightbeam/tightbeam.h>
+
+/*
+ * Tightbeam needs to initialize for kernel transports (xnu and AFK).
+ * Only the XNU transport is specific to exclaves - AFK is not.
+ */
+__startup_func
+static void
+tightbeam_startup(void)
+{
+	tb_transport_startup();
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, tightbeam_startup);
+
+#endif /* __has_include(<Tightbeam/tightbeam.h> */
+#else
 #if __has_include(<Tightbeam/tightbeam.h>)
 
 #include <Tightbeam/tightbeam.h>
@@ -3345,6 +3366,7 @@ tightbeam_startup(void)
 STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, tightbeam_startup);
 
 #endif /* __has_include(<Tightbeam/tightbeam.h> */
+#endif
 
 #if CONFIG_EXCLAVES
 __attribute__((noreturn))

@@ -136,6 +136,39 @@
 struct sched_statistics PERCPU_DATA(sched_stats);
 bool sched_stats_active;
 
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+/*
+ * From syncmodz/ios-s9 (Galaxy S9). Galaxy S7 (Exynos 8890): XNU sees the
+ * eight cores as one homogeneous cluster, but cpus 4-7 are Mongoose M1 at
+ * 2.6 GHz, roughly twice as fast as the Cortex-A53s at 1.59 GHz (cpus 0-3,
+ * mkadt_herolte.py). Stock XNU takes the lowest numbered idle CPU, so CoreAnimation's
+ * single render thread in backboardd, the UI threads and every realtime
+ * thread kept landing on slow cores while the fast ones idled. Boot-arg
+ * sweetfast=MASK names the fast cores (default 0xf0, 0 = stock behaviour):
+ * realtime threads and threads at BASEPRI_DEFAULT or above take an idle fast
+ * core first and may preempt a background thread there; threads below take
+ * an idle slow core first, keeping the fast ones free.
+ */
+/* Not static: sched_rt.c picks realtime CPUs with it too. */
+cpumap_t sweet_fast_map = 0xf0;
+
+static inline bool
+sweet_wants_fast(thread_t thread)
+{
+	return thread->sched_pri >= BASEPRI_DEFAULT;
+}
+
+/* Idle CPU from idle_map in the thread's preferred class, else any; -1 if none. */
+static int
+sweet_pick_idle(cpumap_t idle_map, thread_t thread)
+{
+	cpumap_t fast = idle_map & sweet_fast_map;
+	cpumap_t slow = idle_map & ~sweet_fast_map;
+	cpumap_t first = sweet_wants_fast(thread) ? fast : slow;
+	return lsb_first(first ? first : idle_map);
+}
+#endif /* ARM64_BOARD_CONFIG_HEROLTE */
+
 TUNABLE(bool, cpulimit_affects_quantum, "cpulimit_affects_quantum", true);
 
 TUNABLE(uint32_t, nonurgent_preemption_timer_us, "nonurgent_preemption_timer", 50); /* microseconds */
@@ -530,6 +563,10 @@ sched_init(void)
 	if (PE_parse_boot_argn("direct_handoff", &direct_handoff, sizeof(direct_handoff))) {
 		allow_direct_handoff = direct_handoff;
 	}
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+	PE_parse_boot_argn("sweetfast", &sweet_fast_map, sizeof(sweet_fast_map));
+	kprintf("Scheduler: SWEET fast cores 0x%llx\n", (unsigned long long)sweet_fast_map);
+#endif
 
 #if DEVELOPMENT || DEBUG
 	if (PE_parse_boot_argn("enable_skstsct", &enable_task_set_cluster_type, sizeof(enable_task_set_cluster_type))) {
@@ -3820,6 +3857,10 @@ thread_dispatch(
 			 * CPU is not running.
 			 */
 			kperf_running_setup(processor, processor->last_dispatch);
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+			extern void sweet_prof_running_setup(processor_t, uint64_t);
+			sweet_prof_running_setup(processor, processor->last_dispatch);
+#endif
 		}
 		running_timers_activate(processor);
 		processor->first_timeslice = TRUE;
@@ -5136,6 +5177,19 @@ choose_processor(
 				 * idle processor. The platform layer had an opportunity to provide
 				 * the "least cost idle" processor above.
 				 */
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+				/* ...unless it is of the wrong speed class and the right one has an idle CPU. */
+				if (sweet_fast_map != 0) {
+					/* No SMT here: every CPU is primary (primary_map is CONFIG_SCHED_SMT only). */
+					cpumap_t idle = pset->cpu_state_map[PROCESSOR_IDLE] & pset->recommended_bitmask;
+					bool fast = bit_test(sweet_fast_map, processor->cpu_id);
+					bool want = thread->sched_pri >= BASEPRI_RTQUEUES || sweet_wants_fast(thread);
+					if (fast != want && (idle & (want ? sweet_fast_map : ~sweet_fast_map)) != 0) {
+						processor = PROCESSOR_NULL;
+						break;
+					}
+				}
+#endif
 				if ((thread->sched_pri < BASEPRI_RTQUEUES) || processor_is_fast_track_candidate_for_realtime_thread(pset, processor)) {
 					uint64_t idle_map = (pset->cpu_state_map[PROCESSOR_IDLE] & pset->recommended_bitmask);
 					uint64_t non_avoided_idle_map = idle_map & ~pset->perfcontrol_cpu_migration_bitmask;
@@ -5248,7 +5302,37 @@ choose_processor(
 		/*
 		 * Fall back to any remaining idle cores if none of the preferred ones and non-avoided ones are available.
 		 */
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+		cpuid = sweet_fast_map != 0 ? sweet_pick_idle(idle_map, thread) : lsb_first(idle_map);
+		if (cpuid >= 0 && sweet_fast_map != 0 && sweet_wants_fast(thread) &&
+		    !bit_test(sweet_fast_map, cpuid)) {
+			/*
+			 * Only slow cores are idle: rather take a fast core from a
+			 * background (below utility) thread, which then moves to the
+			 * idle slow core when it is put back on the run queue.
+			 */
+			cpumap_t busy_fast = (pset->cpu_state_map[PROCESSOR_RUNNING] & sweet_fast_map &
+			    pset->recommended_bitmask &
+			    ~pset->pending_AST_URGENT_cpu_mask & ~pset->pending_AST_PREEMPT_cpu_mask);
+			processor_t victim = PROCESSOR_NULL;
+			for (int id = lsb_first(busy_fast); id >= 0; id = lsb_next(busy_fast, id)) {
+				processor_t p = processor_array[id];
+				if (p->current_pri < BASEPRI_UTILITY && p->current_pri < thread->sched_pri &&
+				    (victim == PROCESSOR_NULL || p->current_pri < victim->current_pri)) {
+					victim = p;
+				}
+			}
+			if (victim != PROCESSOR_NULL) {
+				return victim;
+			}
+		}
+#else
 		cpuid = lsb_first(idle_map);
+#endif
+#else
+		cpuid = lsb_first(idle_map);
+#endif
 		if (cpuid >= 0) {
 			processor = processor_array[cpuid];
 			return processor;

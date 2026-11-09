@@ -304,6 +304,29 @@
 
 
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#ifdef ARM64_BOARD_CONFIG_SWEET
+#include <pexpert/arm64/SWEET.h>
+
+#define MAX_L2_CLINE                   6
+#define MAX_CPUS                       8
+#define MAX_CPU_CLUSTERS               1
+
+#define CORE_NCTRS                     8 /* Placeholder; KPC is not enabled for this target */
+
+#endif  /* ARM64_BOARD_CONFIG_SWEET */
+
+#ifdef ARM64_BOARD_CONFIG_A5XELTE
+#include <pexpert/arm64/A5XELTE.h>
+
+#define MAX_L2_CLINE                   6
+#define MAX_CPUS                       8
+#define MAX_CPU_CLUSTERS               1
+
+#define CORE_NCTRS                     8
+#endif  /* ARM64_BOARD_CONFIG_A5XELTE */
+
+#endif
 #ifdef ARM64_BOARD_CONFIG_VMAPPLE
 #include <pexpert/arm64/VMAPPLE.h>
 
@@ -314,8 +337,10 @@
 #define USE_APPLEARMSMP                1
 
 #define NO_XNU_PLATFORM_ERROR_HANDLER  1
+#if !defined(ARM64_BOARD_CONFIG_A5XELTE) && !defined(ARM64_BOARD_CONFIG_SWEET)
 /* Scion: CPU_OVRD's name comes from Apple's private register header, not in the open source; a VM has no such register */
 #define NO_CPU_OVRD                    1
+#endif
 
 
 #endif  /* ARM64_BOARD_CONFIG_VMAPPLE */

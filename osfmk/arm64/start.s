@@ -143,10 +143,26 @@ LEXT(reset_vector)
 	adrp	x19, EXT(ResetHandlerData)@page			// Get address of the reset handler data
 	add		x19, x19, EXT(ResetHandlerData)@pageoff
 	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if HAS_CLUSTER || defined(SWEET)
+	and		x0, x15, #0xFFFF					// Full Aff1:Aff0 (SWEET: core in Aff1)
+#if defined(STARLTE)
+	/* The Mongoose M3 cores have no MT bit: MPIDR 0x80000100..0x80000103,
+	 * the same Aff1:Aff0 as A55 core 1 (0x81000100). Their ADT reg carries
+	 * bit 16 (0x10100..0x10103, mkadt_starlte.py --big). */
+	tbnz	x15, #24, 1f
+	orr		x0, x0, #0x10000
+1:
+#endif
+#else
+	and		x0, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
+#endif
+#else
 #if HAS_CLUSTER
 	and		x0, x15, #0xFFFF					// CPU number in Affinity0, cluster ID in Affinity1
 #else
 	and		x0, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
+#endif
 #endif
 	ldr		x1, [x19, CPU_DATA_ENTRIES]			// Load start of data entries
 	add		x3, x1, MAX_CPUS * 16				// end addr of data entries = start + (16 * MAX_CPUS)
@@ -207,10 +223,18 @@ Lskip_cpu_reset_handler:
 	.align 3
 	.global EXT(LowResetVectorEnd)
 LEXT(LowResetVectorEnd)
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if WITH_CLASSIC_S2R
+	.global	EXT(SleepToken)
+LEXT(SleepToken)
+	.space	(stSize_NUM),0
+#endif
+#else
 	.global	EXT(SleepToken)
 #if WITH_CLASSIC_S2R
 LEXT(SleepToken)
 	.space	(stSize_NUM),0
+#endif
 #endif
 
 	.section __DATA_CONST,__const
@@ -289,6 +313,59 @@ LEXT(LowExceptionVectorBase)
 LEXT(bootstrap_instructions)
 
 #endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) || defined(KERNEL_INTEGRITY_PV_CTRR) */
+#if defined(SWEET)
+/* PSCI CPU_ON entry (physical): x0=context_id, no stack, MMU/caches off.
+ * Keep this separate from __start (which requires x0=boot_args PA).
+ * Firmware may return at EL1 or EL2; check before accessing EL1 state.
+ * The EL2 path assumes no resident hypervisor and CNTVOFF_EL2=0 on boot.
+ */
+	.align 2
+	.globl EXT(sweet_secondary_entry)
+LEXT(sweet_secondary_entry)
+	msr		DAIFSet, #0xf
+	mrs		x1, CurrentEL
+	cmp		x1, #0x4
+	b.eq	Lsweet_secondary_el1
+	cmp		x1, #0x8
+	b.ne	Lsweet_secondary_bad_el
+	adrp	x1, EXT(LowExceptionVectorBase)@page
+	add		x1, x1, EXT(LowExceptionVectorBase)@pageoff
+	msr		VBAR_EL2, x1
+	/* No stage 2, AArch64 EL1, no EL2 interrupt or FP/debug traps. */
+	mov		x1, #(1 << 31)
+	msr		HCR_EL2, x1
+	msr		VTTBR_EL2, xzr
+	msr		CPTR_EL2, xzr
+	msr		MDCR_EL2, xzr
+	mov		x1, #3
+	msr		CNTHCTL_EL2, x1
+	msr		CNTVOFF_EL2, xzr
+	/* GICv2 on A5XELTE/HEROLTE has no ICC_SRE system-register interface. */
+#if !defined(A5XELTE)
+	/* Permit ICC_SRE_EL1 and GIC CPU interface system-register access. */
+	mrs		x1, ICC_SRE_EL2
+	orr		x1, x1, #1
+	orr		x1, x1, #8
+	msr		ICC_SRE_EL2, x1
+#endif
+	/* Known Armv8 SCTLR RES1 bits, M/C/I off, little endian. */
+	MOV64	x1, 0x30d00800
+	msr		SCTLR_EL1, x1
+	isb
+	adrp	x1, Lsweet_secondary_el1@page
+	add		x1, x1, Lsweet_secondary_el1@pageoff
+	msr		ELR_EL2, x1
+	mov		x1, #0x3c5			// DAIF masked, AArch64 EL1h
+	msr		SPSR_EL2, x1
+	eret
+Lsweet_secondary_bad_el:
+	b		.
+Lsweet_secondary_el1:
+	/* x0 is deliberately unused; reset_vector selects CPU data by MPIDR. */
+	msr		SPSel, #1
+	b		EXT(LowResetVectorBase)
+#endif /* SWEET */
+
 	.align 2
 	.globl EXT(resume_idle_cpu)
 LEXT(resume_idle_cpu)
@@ -474,6 +551,56 @@ LEXT(start_first_cpu)
 	mov		x20, x0
 	mov		x21, #0
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(A5XELTE)
+	/* Earliest XNU-owned physical marker in preserved Samsung log RAM. */
+	MOV64	x10, A5XELTE_MARKER_PA
+	MOV64	x11, 0x3145544c45554e58
+	str		x11, [x10]
+	dsb		sy
+	/* XNU-owned green entry block on the Exynos DECON scanout buffer. */
+	MOV64	x10, (A5XELTE_CONSOLE_PA+88*A5XELTE_FB_STRIDE+960)
+	MOV64	x11, 0xff00ff00
+	mov		x12, #21
+	mov		x15, #A5XELTE_FB_STRIDE
+La5_entry_row:
+	mov		x14, x10
+	mov		x13, #36
+La5_entry_pixel:
+	str		w11, [x14], #4
+	subs	x13, x13, #1
+	b.ne	La5_entry_pixel
+	add		x10, x10, x15
+	subs	x12, x12, #1
+	b.ne	La5_entry_row
+	dsb		sy
+	/* This is XNU text, drawn before stack setup or any C runtime. */
+	adr	x0, La5_text_entry
+	mov	x1, #24
+	mov	x2, #256
+	bl	La5_draw_text
+#endif
+
+#if defined(SWEET) && !defined(A5XELTE)
+	/* Stage 0: white 64x32 band, no stack or page tables needed. */
+	MOV64	x0, (0x9c000000 + 2368 * 4320)
+	mov		w1, #-1
+	mov		x2, #32
+	mov		x4, #4320
+Lsweet_mark_row:
+	mov		x3, #64
+	mov		x5, x0
+Lsweet_mark_pixel:
+	str		w1, [x5], #4
+	subs	x3, x3, #1
+	b.ne	Lsweet_mark_pixel
+	add		x0, x0, x4
+	subs	x2, x2, #1
+	b.ne	Lsweet_mark_row
+	dsb		sy
+#endif
+
+#endif
 	// Set low reset vector before attempting any loads
 	adrp	x0, EXT(LowExceptionVectorBase)@page
 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
@@ -620,6 +747,47 @@ Lkernelcache_base_found:
 	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
 	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(A5XELTE)
+	/* A5XELTE_FB_BLOCKS 2 MiB blocks map the scanout buffer VA=PA.
+	 * Its L1 index differs from isolated XNU RAM, so this uses one extra
+	 * bootstrap L2 page. Mark it write-combined for DECON DMA visibility. */
+	MOV64	x0, A5XELTE_FB_PA
+	mov		x4, x0
+	mov		x5, #A5XELTE_FB_BLOCKS
+	create_bootstrap_mapping x0, x4, x5, x1, x2, x6, x10, x11, x12, x13
+	MOV64	x10, A5XELTE_FB_PA
+	and		x11, x10, #(ARM_TT_L2_INDEX_MASK)
+	lsr		x11, x11, #(ARM_TT_L2_SHIFT)
+	add		x12, x2, x11, lsl #TTE_SHIFT
+	mov		x13, #A5XELTE_FB_BLOCKS
+La5_fb_attr:
+	ldr		x11, [x12]
+	bic		x11, x11, #(ARM_TTE_BLOCK_ATTRINDXMASK)
+	orr		x11, x11, #(ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB))
+	str		x11, [x12], #(1 << TTE_SHIFT)
+	subs	x13, x13, #1
+	b.ne	La5_fb_attr
+#endif
+
+#if defined(SWEET) && !defined(A5XELTE)
+	/*
+	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
+	 * L2 table. Both framebuffer and RAM use L1 index 0; another call to
+	 * create_bootstrap_mapping would replace the RAM L2 table.
+	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
+	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
+	 */
+	MOV64	x10, 0x9c000000
+	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
+	orr		x11, x11, x10
+	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
+	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
+	add		x13, x25, #(2 * PGBYTES)
+	str		x11, [x13, x12, lsl #TTE_SHIFT]
+#endif
+
+#endif
 	/* Ensure TTEs are visible */
 	dsb		ish
 
@@ -714,6 +882,12 @@ common_start:
 	ic		iallu
 #endif
 
+#if defined(SWEET)
+	/* Complete local TLB/I-cache invalidation before enabling the MMU. */
+	dsb		sy
+	isb
+#endif
+
 	/* If x21 is not 0, then this is either the start_cpu path or
 	 * the resume_idle_cpu path.  cpu_ttep should already be
 	 * populated, so just switch to the kernel_pmap now.
@@ -751,13 +925,60 @@ common_start:
 	MOV64   x0, SCTLR_EL1_DEFAULT
 	MSR_SCTLR_EL1_X0
 	isb		sy
+#if defined(STARLTE)
+	/* Cortex-A55: PSTATE.PAN off (SCTLR.SPAN keeps it off from here). The
+	 * A53-targeted assembler has no PAN name: msr PAN, #0 = 0xd500409f.
+	 * The Mongoose M3s (ARMv8.0) have no PAN, the msr would be undefined
+	 * there: only when ID_AA64MMFR1_EL1.PAN (S3_0_C0_C7_1 [23:20]) != 0. */
+	mrs		x0, S3_0_C0_C7_1
+	ubfx	x0, x0, #20, #4
+	cbz		x0, 1f
+	.long	0xd500409f
+1:
+	isb		sy
+#endif
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(A5XELTE)
+	/* Blue block: the 4 KiB MMU is active and the framebuffer alias works. */
+	MOV64	x10, (A5XELTE_CONSOLE_PA+120*A5XELTE_FB_STRIDE+960)
+	MOV64	x11, 0xff0000ff
+	mov		x12, #21
+	mov		x15, #A5XELTE_FB_STRIDE
+La5_mmu_row:
+	mov		x14, x10
+	mov		x13, #36
+La5_mmu_pixel:
+	str		w11, [x14], #4
+	subs	x13, x13, #1
+	b.ne	La5_mmu_pixel
+	add		x10, x10, x15
+	subs	x12, x12, #1
+	b.ne	La5_mmu_row
+	dsb		sy
+	/* Preserve the arm_init KVA return address across the text routine. */
+	mov	x17, lr
+	adr	x0, La5_text_mmu
+	mov	x1, #24
+	mov	x2, #288
+	bl	La5_draw_text
+	mov	lr, x17
+#endif
+
+#if !VMAPPLE && !defined(SWEET)
+	MOV64	x1, SCTLR_EL1_DEFAULT
+	cmp		x0, x1
+	bne		.
+#endif /* !VMAPPLE && !SWEET */
+#else
 #if !VMAPPLE
 	MOV64	x1, SCTLR_EL1_DEFAULT
 	cmp		x0, x1
 	bne		.
 #endif /* !VMAPPLE */
+#endif
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
 #if (!CONFIG_KERNEL_INTEGRITY || (CONFIG_KERNEL_INTEGRITY && !defined(KERNEL_INTEGRITY_WT)))
 	/* Watchtower
 	 *
@@ -768,6 +989,38 @@ common_start:
 	// Enable NEON
 	mov		x0, #(CPACR_FPEN_ENABLE)
 	msr		CPACR_EL1, x0
+#endif
+
+#if defined(A5XELTE)
+	/* fp_enabled: write directly to the DECON scanout alias. */
+	MOV64	x10, (A5XELTE_CONSOLE_PA+152*A5XELTE_FB_STRIDE+960)
+	MOV64	x11, 0xff00ffff
+	mov	x12, #21
+	mov	x15, #A5XELTE_FB_STRIDE
+La5_fp_enabled_row:
+	mov	x14, x10
+	mov	x13, #36
+La5_fp_enabled_pixel:
+	str	w11, [x14], #4
+	subs	x13, x13, #1
+	b.ne	La5_fp_enabled_pixel
+	add	x10, x10, x15
+	subs	x12, x12, #1
+	b.ne	La5_fp_enabled_row
+	dsb	sy
+#endif
+#else
+#if (!CONFIG_KERNEL_INTEGRITY || (CONFIG_KERNEL_INTEGRITY && !defined(KERNEL_INTEGRITY_WT)))
+	/* Watchtower
+	 *
+	 * If we have a Watchtower monitor it will setup CPACR_EL1 for us, touching
+	 * it here would trap to EL3.
+	 */
+
+	// Enable NEON
+	mov		x0, #(CPACR_FPEN_ENABLE)
+	msr		CPACR_EL1, x0
+#endif
 #endif
 
 	// Clear thread pointer
@@ -786,6 +1039,25 @@ common_start:
 
 	APPLY_TUNABLES x12, x13, x14
 
+#if defined(A5XELTE)
+	/* tunables_done: write directly to the DECON scanout alias. */
+	MOV64	x10, (A5XELTE_CONSOLE_PA+184*A5XELTE_FB_STRIDE+960)
+	MOV64	x11, 0xffff00ff
+	mov	x12, #21
+	mov	x15, #A5XELTE_FB_STRIDE
+La5_tunables_done_row:
+	mov	x14, x10
+	mov	x13, #36
+La5_tunables_done_pixel:
+	str	w11, [x14], #4
+	subs	x13, x13, #1
+	b.ne	La5_tunables_done_pixel
+	add	x10, x10, x15
+	subs	x12, x12, #1
+	b.ne	La5_tunables_done_row
+	dsb	sy
+#endif
+
 #if HAS_CLUSTER && !NO_CPU_OVRD
 	// Unmask external IRQs if we're restarting from non-retention WFI
 	mrs		x9, CPU_OVRD
@@ -800,6 +1072,7 @@ common_start:
 	add		x0, x20, x22
 	sub		x0, x0, x23
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
 #if KASAN
 	mov	x20, x0
 	mov	x21, lr
@@ -811,6 +1084,39 @@ common_start:
 
 	mov	x0, x20
 	mov	lr, x21
+#endif
+
+#if defined(A5XELTE)
+	/* arm_init_jump: write directly to the DECON scanout alias. */
+	MOV64	x10, (A5XELTE_CONSOLE_PA+216*A5XELTE_FB_STRIDE+960)
+	MOV64	x11, 0xffffff00
+	mov	x12, #21
+	mov	x15, #A5XELTE_FB_STRIDE
+La5_arm_init_jump_row:
+	mov	x14, x10
+	mov	x13, #36
+La5_arm_init_jump_pixel:
+	str	w11, [x14], #4
+	subs	x13, x13, #1
+	b.ne	La5_arm_init_jump_pixel
+	add	x10, x10, x15
+	subs	x12, x12, #1
+	b.ne	La5_arm_init_jump_row
+	dsb	sy
+#endif
+#else
+#if KASAN
+	mov	x20, x0
+	mov	x21, lr
+
+	// x0: boot args
+	// x1: KVA page table phys base
+	mrs	x1, TTBR1_EL1
+	bl	EXT(kasan_bootstrap)
+
+	mov	x0, x20
+	mov	lr, x21
+#endif
 #endif
 
 	// Return to arm_init()
@@ -873,6 +1179,58 @@ arm_init_tramp:
 
 	/* Return to arm_init() */
 	ret
+
+#if defined(A5XELTE)
+/* Physical DECON framebuffer text using XNU's built-in 8x16 iso_font.
+ * x0: NUL-terminated string, x1: x pixel, x2: y pixel. No stack.
+ * Caller-saved x0-x14 only; lr is untouched until ret. */
+	.align 2
+La5_draw_text:
+	adrp	x3, EXT(iso_font)@page
+	add	x3, x3, EXT(iso_font)@pageoff
+	MOV64	x4, A5XELTE_CONSOLE_PA
+	mov	x5, #A5XELTE_FB_STRIDE
+	madd	x4, x2, x5, x4
+	add	x4, x4, x1, lsl #2
+La5_text_next_char:
+	ldrb	w6, [x0], #1
+	cbz	w6, La5_text_done
+	add	x7, x3, x6, lsl #4
+	mov	x8, #0
+La5_text_row:
+	ldrb	w9, [x7, x8]
+	mov	x10, #0
+La5_text_column:
+	mov	w11, #1
+	lsl	w11, w11, w10
+	tst	w9, w11
+	b.eq	La5_text_skip_pixel
+	mov	x13, #(2*A5XELTE_FB_STRIDE)
+	madd	x12, x8, x13, x4
+	add	x12, x12, x10, lsl #3
+	mov	w14, #-1
+	str	w14, [x12]
+	str	w14, [x12, #4]
+	add	x12, x12, x5
+	str	w14, [x12]
+	str	w14, [x12, #4]
+La5_text_skip_pixel:
+	add	x10, x10, #1
+	cmp	x10, #8
+	b.ne	La5_text_column
+	add	x8, x8, #1
+	cmp	x8, #16
+	b.ne	La5_text_row
+	add	x4, x4, #64
+	b	La5_text_next_char
+La5_text_done:
+	dsb	sy
+	ret
+La5_text_entry:
+	.asciz "XNU ENTRY"
+La5_text_mmu:
+	.asciz "XNU MMU ON"
+#endif
 
 //#include	"globals_asm.h"
 

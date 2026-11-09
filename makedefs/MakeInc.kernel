@@ -173,7 +173,11 @@ endif
 $(TARGET)/$(KERNEL_FILE_NAME).dSYM: $(TARGET)/$(KERNEL_FILE_NAME).unstripped.noctf
 ifeq ($(BUILD_DSYM),1)
 	@$(LOG_DSYMUTIL) "$(@F)"
+ifneq ($(FAKEROOT_DIR),)
+	$(_v)$(DSYMUTIL) $(DSYMUTIL_FLAGS) $< -o $@ $(_vstdout) $(_vstderr)
+else
 	$(_v)$(BASH) -c "$(DSYMUTIL) $(DSYMUTIL_FLAGS) $< -o $@ $(_vstdout) 2> >(grep -v '^warning:.*could not find object file symbol for symbol' 1>&2)"
+endif
 	$(_v)$(MV) $@/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME).unstripped.noctf $@/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME)
 else
 	$(_v)$(MKDIR) $@

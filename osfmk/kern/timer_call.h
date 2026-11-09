@@ -215,6 +215,9 @@ enum running_timer {
 	RUNNING_TIMER_KPERF,
 #endif /* KPERF */
 	RUNNING_TIMER_PERFCONTROL,
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	RUNNING_TIMER_SWEETPROF,        /* osfmk/arm64/sweet_prof.c (sweetspeed&16384) */
+#endif
 	RUNNING_TIMER_MAX,
 };
 

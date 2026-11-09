@@ -32,6 +32,9 @@
 #include <arm/misc_protos.h>
 #include <arm/thread.h>
 #include <arm/rtclock.h>
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#include <arm/machine_cpu.h>
+#endif
 #include <arm/trap_internal.h> /* for IS_ARM_GDB_TRAP() et al */
 #include <arm64/proc_reg.h>
 #include <arm64/machine_machdep.h>
@@ -44,6 +47,10 @@
 #include <kern/socd_client.h>
 #include <kern/task.h>
 #include <kern/thread.h>
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#include <kern/thread_call.h>
+#include <kern/startup.h>
+#endif
 #include <kern/zalloc_internal.h>
 #include <mach/exception.h>
 #include <mach/arm/traps.h>
@@ -597,6 +604,30 @@ kernel_integrity_error_handler(uint64_t esr, vm_offset_t far)
 #pragma clang diagnostic pop
 #endif
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+#define SWEET_PLATFORM_ERRORS 8
+static char sweet_platform_error_text[SWEET_PLATFORM_ERRORS][240];
+static volatile uint32_t sweet_platform_error_head, sweet_platform_error_tail;
+static thread_call_data_t sweet_platform_error_call;
+
+static void
+sweet_platform_error_print(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+{
+	while (sweet_platform_error_tail != sweet_platform_error_head) {
+		printf("%s", sweet_platform_error_text[sweet_platform_error_tail % SWEET_PLATFORM_ERRORS]);
+		sweet_platform_error_tail++;
+	}
+}
+
+__startup_func
+static void
+sweet_platform_error_init(void)
+{
+	thread_call_setup(&sweet_platform_error_call, sweet_platform_error_print, NULL);
+}
+STARTUP(THREAD_CALL, STARTUP_RANK_LAST, sweet_platform_error_init);
+#endif
+
 static void
 arm64_platform_error(arm_saved_state_t *state, uint64_t esr, vm_offset_t far, platform_error_source_t source)
 {
@@ -607,6 +638,38 @@ arm64_platform_error(arm_saved_state_t *state, uint64_t esr, vm_offset_t far, pl
 	(void)source;
 	cpu_data_t *cdp = getCpuDatap();
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/*
+	 * sweet: a bus error from user code (a mapping whose physical side answers with an
+	 * error: GPU memory, a wrapped IOSurface...) crashes that process, not the phone.
+	 * The details are kept and printed by a thread call (no console output here: this
+	 * runs with interrupts off), then the thread returns to an address in __PAGEZERO
+	 * and takes an ordinary instruction abort, which the CRASH logger reports.
+	 */
+	if (PSR64_IS_USER(get_saved_state_cpsr(state))) {
+		extern int proc_selfpid(void);
+		extern void proc_selfname(char *buf, int size);
+		uint32_t n = sweet_platform_error_head;
+		if (n - sweet_platform_error_tail < SWEET_PLATFORM_ERRORS) {
+			char name[32] = "";
+			uint64_t par = 0;
+			proc_selfname(name, sizeof(name));
+			if (source == PLAT_ERR_SRC_SYNC) {
+				/* what the user mapping translates to: PA (bits 47:12) and attributes (63:56) */
+				__asm__ volatile ("at s1e0r, %1\n isb\n mrs %0, par_el1" : "=r"(par) : "r"(far));
+			}
+			snprintf(sweet_platform_error_text[n % SWEET_PLATFORM_ERRORS], sizeof(sweet_platform_error_text[0]),
+			    "SWEET PLATFORM ERROR: %s in %s[%d]: esr %#llx far %#llx par %#llx pc %#llx lr %#llx sp %#llx\n",
+			    source == PLAT_ERR_SRC_SYNC ? "synchronous abort" : "serror", name, proc_selfpid(),
+			    esr, (unsigned long long)far, par, get_saved_state_pc(state), get_saved_state_lr(state),
+			    get_saved_state_sp(state));
+			sweet_platform_error_head = n + 1;
+			thread_call_enter(&sweet_platform_error_call);
+		}
+		set_saved_state_pc(state, 0xdead0000ULL);
+		return;
+	}
+#endif
 	if (PE_handle_platform_error(far)) {
 		return;
 	} else if (cdp->platform_error_handler != NULL) {
@@ -936,6 +999,14 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 		thread->machine.el0_synchronous_trap = true;
 	}
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* sweet: soft M3 pins (sweetm3unpin=N ms, sweet_a64e.c): release a pinned thread N ms later */
+	if (is_user && __improbable(thread->bound_processor != PROCESSOR_NULL)) {
+		extern void sweet_m3_unpin_check(thread_t);
+		sweet_m3_unpin_check(thread);
+	}
+#endif
+
 	switch (class) {
 	case ESR_EC_SVC_64:
 		if (!is_saved_state64(state) || !is_user) {
@@ -1253,6 +1324,64 @@ handle_uncategorized(arm_saved_state_t *state)
 			panic("Undefined kernel instruction: pc=%p instr=%x", (void*)get_saved_state_pc(state), instr);
 		}
 	}
+
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* arm64e (ARMv8.3+) instructions these cores lack: sweet_a64e.c. */
+	if (PSR64_IS_USER64(get_saved_state_cpsr(state))) {
+		extern bool sweet_a64e_emulate(arm_saved_state_t *, uint32_t);
+		if (sweet_a64e_emulate(state, instr)) {
+			return;
+		}
+		/*
+		 * Any other instruction the Mongoose M3 lacks (FP16, DotProd, RDM ...; Samsung MIDR
+		 * implementer 0x53): pin the thread to one of the A55s (logical CPUs 0-3) and run the
+		 * instruction again there, instead of a SIGILL.
+		 */
+		if ((__builtin_arm_rsr64("MIDR_EL1") >> 24) == 0x53) {
+			extern uint64_t sweet_m3_pins;
+			int cpu = (int)(thread_tid(current_thread()) % 4);
+			processor_t little = cpu_to_processor(cpu);
+			if (little != PROCESSOR_NULL) {
+				sweet_m3_pins++;
+				thread_bind(little);
+				extern void sweet_m3_pin_note(thread_t);
+				sweet_m3_pin_note(current_thread());
+				/*
+				 * Pin diagnostics (boot-arg sweetspeed&16): one line per pin for the first 64, then at most one per
+				 * 10 s (racy on purpose: an extra line now and then is harmless). Preemptible user trap context,
+				 * about to thread_block: printf is fine, nothing is allocated.
+				 */
+				extern uint32_t sweet_speed_flags(void);
+				if (sweet_speed_flags() & 16) {
+					static uint32_t pin_lines;
+					static uint64_t pin_line_last;
+					uint64_t now = mach_absolute_time(), gap;
+					nanoseconds_to_absolutetime(10ULL * NSEC_PER_SEC, &gap);
+					if (pin_lines < 64 || now - pin_line_last >= gap) {
+						extern void proc_selfname(char *, int);
+						extern int proc_selfpid(void);
+						char comm[17];
+						thread_t pth = current_thread();
+						pin_lines++;
+						pin_line_last = now;
+						proc_selfname(comm, sizeof(comm));
+						printf("STARLTE PIN: %s[%d] tid %llu pri %d pc 0x%llx insn %08x\n", comm,
+						    proc_selfpid(), thread_tid(pth), (int)pth->sched_pri,
+						    (uint64_t)get_saved_state_pc(state), instr);
+					}
+				}
+				thread_block(THREAD_CONTINUE_NULL);
+				return;
+			}
+		} else {
+			/* trapped on an M3, migrated to an A55 before the checks above: run it again here */
+			extern bool sweet_a55_retry_ok(uint32_t, thread_t, uint64_t);
+			if (sweet_a55_retry_ok(instr, current_thread(), get_saved_state_pc(state))) {
+				return;
+			}
+		}
+	}
+#endif
 
 	/*
 	 * Check for GDB breakpoint via illegal opcode.
@@ -2692,6 +2821,23 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
 			}
 		}
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+		/* 12377 port: why copyio faults on user memory fail (launchd, boot h/i). */
+		if (recover && (fault_addr & TTBR_SELECTOR) == 0) {
+			static int sweet_copyio_fault_logs;
+			if (sweet_copyio_fault_logs++ < 8) {
+				printf("SWEET COPYIO FAULT: addr 0x%llx type %d code 0x%x result %d map pgshift %d voids %d\n",
+				    (uint64_t)fault_addr, fault_type, fault_code, result,
+				    VM_MAP_PAGE_SHIFT(map),
+#if CONFIG_MAP_RANGES
+				    (int)vm_map_in_user_range_voids(map, fault_addr, 1)
+#else
+				    -1
+#endif
+				    );
+			}
+		}
+#endif
 		if (recover) {
 			/*
 			 *  Handle guard object faults during copyio() routines
@@ -3008,6 +3154,60 @@ sleh_irq(arm_saved_state_t *state)
 #endif
 
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(A5XELTE) || defined(SWEET)
+	/*
+	 * The non-secure timer and IPIs arrive as Group 1 IRQs.
+	 */
+	uint64_t iar;
+#if defined(A5XELTE)
+	extern uint32_t a5xelte_irq_ack(void);
+	extern void a5xelte_irq_eoi(uint32_t);
+	iar = a5xelte_irq_ack();
+	#define A5_IRQ_EOI(value) a5xelte_irq_eoi((uint32_t)(value))
+	const uint32_t timer_intid = A5XELTE_VTIMER_INTID;
+#else
+	iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
+	#define A5_IRQ_EOI(value) __builtin_arm_wsr64("ICC_EOIR1_EL1", (value))
+	const uint32_t timer_intid = sweet_vtimer_intid;
+#endif
+#if defined(A5XELTE)
+	/* GICv2 IAR bits [12:10] identify the SGI source CPU.  Only the
+	 * low ten bits are the INTID: CPU1's self-SGI1 reads as 0x401. */
+	uint32_t intid = (uint32_t)(iar & 0x3FF);
+#else
+	uint32_t intid = (uint32_t)(iar & 0xFFFFFF);
+#endif
+
+	if (intid >= 1020 && intid <= 1023) {
+		return; /* spurious */
+	}
+	if (intid == timer_intid) {
+		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_TIMER);
+		cdp->cpu_decrementer = -1; /* Large */
+		ml_interrupt_masked_debug_start(rtclock_intr, DBG_INTR_TYPE_TIMER);
+		rtclock_intr(TRUE);
+		ml_interrupt_masked_debug_end();
+		A5_IRQ_EOI(iar);
+	} else if (intid < 16) {
+		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_IPI);
+		/* Ack before handling so an IPI raised meanwhile is not lost */
+		A5_IRQ_EOI(iar);
+		__builtin_arm_isb(ISB_SY);
+		cpu_signal_handler();
+	} else {
+		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
+		if (cdp->interrupt_handler) {
+			cdp->interrupt_handler(cdp->interrupt_target,
+			    cdp->interrupt_refCon,
+			    cdp->interrupt_nub,
+			    intid);
+		}
+		A5_IRQ_EOI(iar);
+	}
+	#undef A5_IRQ_EOI
+	__builtin_arm_isb(ISB_SY);
+#else
 	sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
 
 #if USE_APPLEARMSMP
@@ -3018,6 +3218,20 @@ sleh_irq(arm_saved_state_t *state)
 	    cdp->interrupt_refCon,
 	    cdp->interrupt_nub,
 	    cdp->interrupt_source);
+#endif
+#endif /* SWEET */
+#else
+	sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
+
+#if USE_APPLEARMSMP
+	PE_handle_ext_interrupt();
+#else
+	/* Run the registered interrupt handler. */
+	cdp->interrupt_handler(cdp->interrupt_target,
+	    cdp->interrupt_refCon,
+	    cdp->interrupt_nub,
+	    cdp->interrupt_source);
+#endif
 #endif
 
 	entropy_collect();

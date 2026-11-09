@@ -465,7 +465,9 @@ LEXT(mmu_kvtop_wpreflight)
 	mrs		x2, DAIF									// Load current DAIF
 	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)		// Disable all asynchronous exceptions
 	at		s1e1w, x0									// Translation Stage 1 EL1
+#if !defined(ARM64_BOARD_CONFIG_A5XELTE) && !defined(ARM64_BOARD_CONFIG_SWEET)
 	isb		sy											// PAR_EL1 holds the result only after a context synchronization, as in mmu_kvtop
+#endif
 	mrs		x1, PAR_EL1									// Read result
 	msr		DAIF, x2									// Restore interrupt state
 	tbnz	x1, #0, L_mmu_kvtop_wpreflight_invalid		// Test Translation not valid
@@ -845,6 +847,68 @@ Lcopyin_atomic64_common:
 	 */
 	POP_FRAME
 	ARM64_STACK_EPILOG EXT(_copyin_atomic64)
+
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * sweet: compare-and-swap on user memory for the LSE emulation of the Mongoose M3 cores
+ * (sweet_a64e.c), with full barriers; a fault becomes EFAULT (copyio recovery).
+ *
+ * int _sweet_cas64(user_addr_t addr, uint64_t expected, uint64_t desired, uint64_t *old)
+ */
+	.text
+	.align 2
+	.globl EXT(_sweet_cas64)
+LEXT(_sweet_cas64)
+	COPYIO_STACK_PROLOG
+	PUSH_FRAME
+	dmb		ish
+	COPYIO_RECOVER_RANGE 3f
+1:
+	ldxr		x8, [x0]
+	cmp		x8, x1
+	b.ne		2f
+	stxr		w9, x2, [x0]
+	cbnz		w9, 1b
+	b		3f
+2:
+	clrex
+3:
+	dmb		ish
+	str		x8, [x3]
+	mov		x0, #0
+	POP_FRAME
+	ARM64_STACK_EPILOG EXT(_sweet_cas64)
+
+/*
+ * int _sweet_cas128(user_addr_t addr, uint64_t exp_lo, uint64_t exp_hi, uint64_t new_lo,
+ *     uint64_t new_hi, uint64_t old[2])
+ */
+	.text
+	.align 2
+	.globl EXT(_sweet_cas128)
+LEXT(_sweet_cas128)
+	COPYIO_STACK_PROLOG
+	PUSH_FRAME
+	dmb		ish
+	COPYIO_RECOVER_RANGE 3f
+1:
+	ldxp		x8, x9, [x0]
+	cmp		x8, x1
+	ccmp		x9, x2, #0, eq
+	b.ne		2f
+	stxp		w10, x3, x4, [x0]
+	cbnz		w10, 1b
+	b		3f
+2:
+	stxp		w10, x8, x9, [x0]	/* a pair read is only single-copy atomic once written back */
+	cbnz		w10, 1b
+3:
+	dmb		ish
+	stp		x8, x9, [x5]
+	mov		x0, #0
+	POP_FRAME
+	ARM64_STACK_EPILOG EXT(_sweet_cas128)
+#endif
 
 
 /*
@@ -1664,7 +1728,7 @@ Lwfi_inst:
 	dsb		sy
 	isb		sy
 	wfi
-#if NO_CPU_OVRD && !SCION_NO_APPLE_IMPDEF_REGS
+#if (defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)) ? (NO_CPU_OVRD) : (NO_CPU_OVRD && !SCION_NO_APPLE_IMPDEF_REGS)
 	// Clear any spurious IPIs received during CPU shutdown
 	mov     x9, #0x1
 	msr     S3_5_C15_C1_1, x9

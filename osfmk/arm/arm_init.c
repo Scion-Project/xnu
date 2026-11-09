@@ -58,6 +58,9 @@
 #include <pexpert/arm/consistent_debug.h>
 #include <pexpert/device_tree.h>
 #include <arm64/proc_reg.h>
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#include <arm64/sweet_early.h>
+#endif
 #include <arm/pmap.h>
 #include <arm/caches_internal.h>
 #include <arm/cpu_internal.h>
@@ -472,6 +475,10 @@ arm_init(
 	DTEntry chosen = NULL;
 	unsigned int dt_entry_size = 0;
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_early_mark(1, "arm_init entered (MMU on)");
+
+#endif
 	arm_slide_rebase_and_sign_image();
 
 	arm_static_if_init(args);
@@ -485,6 +492,13 @@ arm_init(
 #endif /* APPLEVIRTUALPLATFORM */
 
 	cpu_data_init(&BootCpuData);
+#if defined(A5XELTE)
+	/* Samsung firmware can leave CNTVCT_EL0 at an arbitrary epoch.  XNU
+	 * reserves its top bit for processor-idle accounting, so start the
+	 * boot CPU's Mach time at one tick without changing the hardware timer. */
+	rtclock_base_abstime = 1 - ml_get_hwclock();
+	BootCpuData.cpu_base_timebase = rtclock_base_abstime;
+#endif
 #if defined(HAS_APPLE_PAC)
 	/* bootstrap cpu process dependent key for kernel has been loaded by start.s */
 	BootCpuData.rop_key = ml_default_rop_pid();
@@ -492,6 +506,9 @@ arm_init(
 #endif /* defined(HAS_APPLE_PAC) */
 
 	PE_init_platform(FALSE, args); /* Get platform expert set up */
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_early_mark(2, "PE_init_platform done");
+#endif
 
 #if __arm64__
 	configure_timer_apple_regs();
@@ -541,7 +558,23 @@ arm_init(
 		/*
 		 * Select the advertised kernel page size.
 		 */
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+		/*
+		 * sweet: keep the 4 KiB hardware page size at any RAM size. Above
+		 * 1 GiB stock XNU switches to 16 KiB VM pages over 4 KiB hardware
+		 * pages (TEST_PAGE_RATIO_4, last used on A7/A8), which panics
+		 * intermittently here ("unaligned pmap_enter", S7 and S9 at
+		 * 1.5 GiB); every iOS 18 fix in this series was made and tested
+		 * with 4 KiB kernel pages under 16 KiB user maps.
+		 */
+		if (false) {
+#else
 		if (args->memSize > 1ULL * 1024 * 1024 * 1024) {
+#endif
+#else
+		if (args->memSize > 1ULL * 1024 * 1024 * 1024) {
+#endif
 			/*
 			 * arm64 device with > 1GB of RAM:
 			 * kernel uses 16KB pages.
@@ -575,6 +608,9 @@ arm_init(
 #endif
 
 	ml_parse_cpu_topology();
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_early_mark(3, "ml_parse_cpu_topology done");
+#endif
 
 
 	boot_cpu_id = ml_get_boot_cpu_number();
@@ -606,11 +642,17 @@ arm_init(
 	 */
 	thread->machine.preemption_count = 0;
 	cpu_bootstrap();
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_early_mark(4, "cpu_bootstrap done");
+#endif
 
 	rtclock_early_init();
 
 	kernel_debug_string_early("kernel_startup_bootstrap");
 	kernel_startup_bootstrap();
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_early_mark(5, "kernel_startup_bootstrap done");
+#endif
 
 	/*
 	 * Initialize the timer callout world
@@ -619,6 +661,9 @@ arm_init(
 
 	cpu_init();
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_early_mark(6, "cpu_init done");
+#endif
 	processor_bootstrap();
 
 	if (PE_parse_boot_argn("maxmem", &maxmem, sizeof(maxmem))) {
@@ -685,7 +730,13 @@ arm_init(
 	gDramSize = *dram_size;
 	pmap_first_pnum = (ppnum_t)atop(gDramBase);
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_early_mark(7, "entering arm_vm_init");
+#endif
 	arm_vm_init(xmaxmem, args);
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_early_mark(15, "arm_vm_init returned");
+#endif
 
 	if (debug_boot_arg) {
 		patch_low_glo();
@@ -698,9 +749,21 @@ arm_init(
 	PE_consistent_debug_inherit();
 
 	/* Setup debugging output. */
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_early_mark(16, "calling serial_init");
+#endif
 	const unsigned int serial_exists = serial_init();
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_early_mark(19, "serial_init returned");
+#endif
 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
 	kprintf("kprintf initialized\n");
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_early_mark(20, "kprintf startup complete");
+	if (serial_exists) {
+		sweet_early_disable();
+	}
+#endif
 
 	serialmode = 0;
 	if (PE_parse_boot_argn("serial", &serialmode, sizeof(serialmode))) {

@@ -542,6 +542,58 @@ sysctl_hw_generic(__unused struct sysctl_oid *oidp, void *arg1,
 		 * Deprecated variables.  We still support these for
 		 * backwards compatibility purposes only.
 		 */
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if XNU_TARGET_OS_OSX && defined(__arm64__) && !defined(ARM64_BOARD_CONFIG_SWEET)
+	/* SWEET: the macOS config runs the iOS userland, which wants the
+	 * device-tree names (hw.machine iPhone10,3, hw.model D22AP). */
+	/* The following two are kludged for backward
+	 * compatibility. Use hw.product/hw.target for something
+	 * consistent instead. */
+
+	case HW_MACHINE:
+		bzero(dummy, sizeof(dummy));
+		if (proc_platform(req->p) == PLATFORM_IOS) {
+			/* iOS-on-Mac processes don't expect the macOS kind of
+			 * hw.machine, e.g. "arm64", but are used to seeing
+			 * a product string on iOS, which we here hardcode
+			 * to return as "iPad8,6" for compatibility.
+			 *
+			 * Another reason why hw.machine and hw.model are
+			 * trouble and hw.target+hw.product should be used
+			 * instead.
+			 */
+
+			strlcpy(dummy, "iPad8,6", sizeof(dummy));
+		}
+		else {
+			strlcpy(dummy, "arm64", sizeof(dummy));
+		}
+		dummy[64] = 0;
+		return SYSCTL_OUT(req, dummy, strlen(dummy) + 1);
+	case HW_MODEL:
+		bzero(dummy, sizeof(dummy));
+		if (!PEGetProductName(dummy, 64)) {
+			return EINVAL;
+		}
+		dummy[64] = 0;
+		return SYSCTL_OUT(req, dummy, strlen(dummy) + 1);
+#else
+	case HW_MACHINE:
+		bzero(dummy, sizeof(dummy));
+		if (!PEGetMachineName(dummy, 64)) {
+			return EINVAL;
+		}
+		dummy[64] = 0;
+		return SYSCTL_OUT(req, dummy, strlen(dummy) + 1);
+	case HW_MODEL:
+		bzero(dummy, sizeof(dummy));
+		if (!PEGetModelName(dummy, 64)) {
+			return EINVAL;
+		}
+		dummy[64] = 0;
+		return SYSCTL_OUT(req, dummy, strlen(dummy) + 1);
+#endif
+#else
 #if XNU_TARGET_OS_OSX && defined(__arm64__)
 	/* The following two are kludged for backward
 	 * compatibility. Use hw.product/hw.target for something
@@ -589,6 +641,7 @@ sysctl_hw_generic(__unused struct sysctl_oid *oidp, void *arg1,
 		}
 		dummy[64] = 0;
 		return SYSCTL_OUT(req, dummy, strlen(dummy) + 1);
+#endif
 #endif
 	case HW_USERMEM:
 	{

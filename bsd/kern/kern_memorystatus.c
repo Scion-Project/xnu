@@ -3269,6 +3269,30 @@ memstat_set_memlimits_locked(proc_t p, int32_t active_limit,
 	if (default_inactive_limit && inactive_limit == default_inactive_limit) {
 		options |= MEMLIMIT_INACTIVE_FATAL;
 	}
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/*
+	 * sweet: boot-arg sweetmemscale=N multiplies every per-process limit
+	 * (capped at 2 GiB). The limits are tuned for devices that render and
+	 * decode images on the GPU; with CoreAnimation's CPU renderer daemons
+	 * such as iconservicesagent (6 MB) were jetsam-killed in a loop.
+	 */
+	{
+		static int32_t sweet_memscale = -1;
+		if (sweet_memscale < 0) {
+			int32_t v = 1;
+			PE_parse_boot_argn("sweetmemscale", &v, sizeof(v));
+			sweet_memscale = (v >= 1 && v <= 16) ? v : 1;
+		}
+		if (sweet_memscale > 1) {
+			if (active_limit > 0) {
+				active_limit = MIN(active_limit * sweet_memscale, 2048);
+			}
+			if (inactive_limit > 0) {
+				inactive_limit = MIN(inactive_limit * sweet_memscale, 2048);
+			}
+		}
+	}
+#endif
 
 	memorystatus_log_debug(
 		"memorystatus: setting memlimit for %s [%d], "
@@ -3305,6 +3329,40 @@ memstat_set_memlimits_locked(proc_t p, int32_t active_limit,
 
 	return err;
 }
+
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * sweet: a process that opens the GPU (StarbiteMali) gets at least 64 MB limits before
+ * sweetmemscale: a Metal device (PanVK, the metal2vulkan runtime) costs some 50 MB of footprint,
+ * which killed iconservicesagent (15 MB x 4) in a loop.
+ */
+void sweet_memstat_gpu_client(proc_t p);
+void
+sweet_memstat_gpu_client(proc_t p)
+{
+	proc_list_lock();
+	int32_t active = p->p_memstat_memlimit_active, inactive = p->p_memstat_memlimit_inactive;
+	if ((active > 0 && active < 256) || (inactive > 0 && inactive < 256)) {
+		memlimit_options_t options = 0;
+		if (p->p_memstat_state & P_MEMSTAT_MEMLIMIT_ACTIVE_FATAL) {
+			options |= MEMLIMIT_ACTIVE_FATAL;
+		}
+		if (p->p_memstat_state & P_MEMSTAT_MEMLIMIT_INACTIVE_FATAL) {
+			options |= MEMLIMIT_INACTIVE_FATAL;
+		}
+		/* the limits are stored scaled; set_memlimits scales again (sweetmemscale): raise, never lower */
+		int32_t scale = 1;
+		PE_parse_boot_argn("sweetmemscale", &scale, sizeof(scale));
+		scale = (scale >= 1 && scale <= 16) ? scale : 1;
+		int32_t new_active = active > 0 ? MAX(active / scale, 64) : active;
+		int32_t new_inactive = inactive > 0 ? MAX(inactive / scale, 64) : inactive;
+		(void)memstat_set_memlimits_locked(p, new_active, new_inactive, options);
+		printf("sweet: %s [%d] opened the GPU: memory limits %d/%d MB -> %d/%d MB\n", proc_best_name(p),
+		    proc_getpid(p), active, inactive, p->p_memstat_memlimit_active, p->p_memstat_memlimit_inactive);
+	}
+	proc_list_unlock();
+}
+#endif
 
 int
 memorystatus_set_memlimits(proc_t p, int32_t active_limit,

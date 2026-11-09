@@ -101,6 +101,11 @@
 #include <sys/codesign.h>
 
 #include <kern/startup.h>
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(__arm64__)
+#include <pexpert/arm64/board_config.h>
+#endif
+#endif
 #include <kern/thread.h>
 #include <kern/task.h>
 #include <kern/ast.h>
@@ -182,7 +187,9 @@
 
 #if CONFIG_NETBOOT
 #include <sys/netboot.h>
+#if !defined(ARM64_BOARD_CONFIG_A5XELTE) && !defined(ARM64_BOARD_CONFIG_SWEET)
 #include <sys/hakios.version.h>	/* Scion: drivers/core/hakios.version.c */
+#endif
 #endif
 
 #if CONFIG_IMAGEBOOT
@@ -482,6 +489,66 @@ bsd_rooted_ramdisk(void)
  * of the tro_ucred field so that the uthread structure can be
  * used like any other.
  */
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/*
+ * Boot-arg sweetspeed&128: read the big dylibs outside the shared cache that backboardd and SpringBoard load (the GL
+ * stack: libOSMesa is 16 MB) into the page cache as soon as the root is mounted. On a cold boot backboardd spent more
+ * than 10 s in dyld fix-ups of them (docs/ios27/NIGHT.md).
+ */
+static void
+sweet_prewarm_thread(__unused void *arg, __unused wait_result_t wr)
+{
+	static const char *const files[] = {
+		"/usr/local/starbite/lib/libOSMesa.8.dylib", "/usr/local/starbite/lib/libsbgl.dylib",
+		"/usr/lib/s.dylib", "/usr/lib/m.dylib", "/usr/libexec/backboardd",
+		"/System/Library/CoreServices/SpringBoard.app/SpringBoard",
+	};
+	const int chunk = 1024 * 1024;
+	char *buf = kalloc_data(chunk, Z_WAITOK);
+	if (buf == NULL) {
+		return;
+	}
+	uint64_t t0 = mach_absolute_time(), total = 0, ns = 0;
+	unsigned found = 0;
+	for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+		vnode_t vp = NULLVP;
+		if (vnode_lookup(files[i], 0, &vp, vfs_context_kernel()) != 0) {
+			continue;
+		}
+		found++;
+		for (off_t off = 0;; off += chunk) {
+			int resid = 0;
+			if (vn_rdwr(UIO_READ, vp, buf, chunk, off, UIO_SYSSPACE, IO_NOAUTH,
+			    vfs_context_ucred(vfs_context_kernel()), &resid, kernproc) != 0) {
+				break;
+			}
+			total += (uint64_t)(chunk - resid);
+			if (resid != 0) {
+				break;
+			}
+		}
+		vnode_put(vp);
+	}
+	kfree_data(buf, chunk);
+	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+	printf("SWEET PREWARM: %u files, %llu KiB read into the page cache in %llu ms\n", found, total >> 10,
+	    ns / 1000000);
+}
+
+static void
+sweet_prewarm_start(void)
+{
+	extern uint32_t sweet_speed_flags(void);
+	thread_t th;
+	if ((sweet_speed_flags() & 128) == 0) {
+		return;
+	}
+	if (kernel_thread_start(sweet_prewarm_thread, NULL, &th) == KERN_SUCCESS) {
+		thread_deallocate(th);
+	}
+}
+#endif
+
 void
 bsd_init(void)
 {
@@ -501,10 +568,23 @@ bsd_init(void)
 
 #define DEBUG_BSDINIT 0
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if DEBUG_BSDINIT
+#define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
+#elif defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/* sweet: boot timing on the console (boot-arg sweetspeed&8, osfmk/arm64/sweet_a64e.c) */
+#define bsd_init_kprintf(x, ...) do { extern uint32_t sweet_speed_flags(void); if (sweet_speed_flags() & 8) { uint64_t ns_ = 0; \
+	absolutetime_to_nanoseconds(mach_absolute_time(), &ns_); \
+	printf("SBBOOT %llu ms: bsd_init: " x, ns_ / 1000000, ## __VA_ARGS__); } } while (0)
+#else
+#define bsd_init_kprintf(x, ...)
+#endif
+#else
 #if DEBUG_BSDINIT
 #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
 #else
 #define bsd_init_kprintf(x, ...)
+#endif
 #endif
 
 	throttle_init();
@@ -701,6 +781,20 @@ bsd_init(void)
 	/* Initialize the file systems. */
 	bsd_init_kprintf("calling vfsinit\n");
 	vfsinit();
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* AMFI's MAC policy is built in (bsd/kern/sweet_amfi.c). */
+	extern void sweet_amfi_policy_register(void);
+	sweet_amfi_policy_register();
+#endif
+
+#if SWEET_HFS
+	/* HFS is built in on SWEET: register it like its kext would, before mounting root. */
+	extern void sweet_hfs_register(void);
+	sweet_hfs_register();
+#endif
+#endif
 
 #if CONFIG_PROC_UUID_POLICY
 	/* Initial proc_uuid_policy subsystem */
@@ -917,6 +1011,20 @@ bsd_init(void)
 	IOSecureBSDRoot(rootdevice);
 
 	mountlist.tqh_first->mnt_flag |= MNT_ROOTFS;
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* iOS 27 on STARLTE: boot-arg sweetacl=1: ACLs evaluated on the root (iOS's container dirs are
+	 * mode 000 + an ACL; HFS only honours ACLs with extended security on the mount) */
+	{
+		int acl = 0;
+		if (PE_parse_boot_argn("sweetacl", &acl, sizeof(acl)) && acl) {
+			extern void vfs_setextendedsecurity(mount_t mp);
+			extern int vfs_extendedsecurity(mount_t mp);
+			int before = vfs_extendedsecurity(mountlist.tqh_first);
+			vfs_setextendedsecurity(mountlist.tqh_first);
+			printf("SWEET ACL: root extended security %d -> %d\n", before, vfs_extendedsecurity(mountlist.tqh_first));
+		}
+	}
+#endif
 
 	bsd_init_kprintf("calling VFS_ROOT\n");
 	/* Get the vnode for '/'.  Set fdp->fd_fd.fd_cdir to reference it. */
@@ -948,9 +1056,31 @@ bsd_init(void)
 		if (require_rootauth) {
 			/* enforce sealedness */
 			int autherr = VNOP_IOCTL(rootvnode, FSIOC_KERNEL_ROOTAUTH, NULL, 0, vfs_context_kernel());
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+			/* The lab phone has no Image4/AMFI chain for this HFS+ root. */
+			if (autherr) {
+				printf("A5XELTE: root volume is not authenticated (error %d); continuing unsealed\n", autherr);
+			}
+#elif defined(ARM64_BOARD_CONFIG_SWEET)
+			/*
+			 * SWEET has no chain of trust to extend: the kernel itself is
+			 * booted unsigned and there is no Image4/AMFI, and its HFS root
+			 * cannot be a sealed volume. Report it instead of panicking.
+			 */
+			if (autherr) {
+				printf("SWEET: root volume is not authenticated (error %d); continuing unsealed\n", autherr);
+			}
+#else
 			if (autherr) {
 				panic("rootvp not authenticated after mounting");
 			}
+#endif
+#else
+			if (autherr) {
+				panic("rootvp not authenticated after mounting");
+			}
+#endif
 		}
 	}
 
@@ -1003,7 +1133,9 @@ bsd_init(void)
 
 		bsd_init_kprintf("calling devfs_kernel_mount\n");
 		devfs_kernel_mount(mounthere);
+#if !defined(ARM64_BOARD_CONFIG_A5XELTE) && !defined(ARM64_BOARD_CONFIG_SWEET)
 		hakios_version_init();         /* Scion: kern.hakios.version, and the version in the boot log */
+#endif
 	}
 #endif /* DEVFS */
 
@@ -1061,6 +1193,9 @@ bsd_init(void)
 		mountroot_post_hook();
 	}
 #endif
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	sweet_prewarm_start();
+#endif
 
 #if 0 /* not yet */
 	consider_zone_gc(FALSE);
@@ -1106,6 +1241,15 @@ bsdinit_task(void)
 #endif
 
 	bsd_init_kprintf("bsd_do_post - done");
+
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* Starbite iOS overlay from the OS store, before launchd reads anything
+	 * (bsd/dev/starlte_overlay.c). */
+	{
+		extern void starlte_overlay_install(void);
+		starlte_overlay_install();
+	}
+#endif
 
 	load_init_program(p);
 	lock_trace = 1;

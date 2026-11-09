@@ -2005,6 +2005,20 @@ proc_handle_critical_exit(proc_t p, int rv)
 		prefix_str = prefix_str_buf;
 	}
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* sweet: proc_prepareexit's crash log comes after this panic; print it
+	 * for the critical process here, then save the console to flash. */
+	if (p == current_proc()) {
+		struct uthread *ut = current_uthread();
+		extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
+		sweet_crash_log(p->p_comm, proc_getpid(p), WTERMSIG(rv),
+		    ((uint64_t)ut->uu_exception << 32) | (uint32_t)ut->uu_code, ut->uu_subcode);
+	}
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+	extern void herolte_log_flush_now(void);
+	herolte_log_flush_now();
+#endif
+#endif
 	proc_crash_coredump(p);
 
 	sync(p, (void *)NULL, (int *)NULL);
@@ -2040,7 +2054,42 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 	if (p->p_crash_behavior != 0 || p == initproc) {
 		proc_handle_critical_exit(p, rv);
 	}
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	{
+		/* how the traced process (sweettracename=) ended: status and exit reason (first 30) */
+		extern bool sweet_trace_match(const char *, int);
+		static int left = 30;
+		if (left > 0 && p != initproc && sweet_trace_match(p->p_comm, proc_getpid(p))) {
+			left--;
+			char *d = exit_reason_get_string_desc(p->p_exit_reason);
+			printf("STARBITE EXIT: %s[%d] signal %d exit %d reason ns %d code 0x%llx: %s\n", p->p_comm,
+			    proc_getpid(p), WTERMSIG(rv), WEXITSTATUS(rv),
+			    p->p_exit_reason ? (int)p->p_exit_reason->osr_namespace : -1,
+			    p->p_exit_reason ? p->p_exit_reason->osr_code : 0ULL, d ? d : "-");
+			if (WEXITSTATUS(rv) != 0 && current_proc() == p) {
+				/* where exit() was called from: the crash logger's user backtrace */
+				extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
+				sweet_crash_log(p->p_comm, proc_getpid(p), 0, (uint64_t)rv, 0);
+			}
+		}
+	}
+#endif
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	{
+		/* how every process ends (boot-arg sweetspeed&32) */
+		extern int sweet_exitlog_on(void);
+		static int eleft = 400;
+		if (eleft > 0 && p != initproc && sweet_exitlog_on()) {
+			eleft--;
+			char *d = exit_reason_get_string_desc(p->p_exit_reason);
+			printf("SWEET EXIT: %s[%d] signal %d exit %d reason ns %d code 0x%llx: %s\n", p->p_comm,
+			    proc_getpid(p), WTERMSIG(rv), WEXITSTATUS(rv),
+			    p->p_exit_reason ? (int)p->p_exit_reason->osr_namespace : -1,
+			    p->p_exit_reason ? p->p_exit_reason->osr_code : 0ULL, d ? d : "-");
+		}
+	}
+#endif
 	if (task) {
 		corpse_source = vm_map_is_corpse_source(get_task_map(task));
 	}
@@ -2084,6 +2133,20 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 		subcode = ut->uu_subcode;
 		etype = ut->uu_exception;
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+		if (p == current_proc()) {
+			extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
+			sweet_crash_log(p->p_comm, proc_getpid(p), WTERMSIG(rv),
+			    ((uint64_t)ut->uu_exception << 32) | (uint32_t)ut->uu_code, ut->uu_subcode);
+			/* abort_with_payload messages (_objc_fatal, os_crash_fmt, ...) */
+			if (PROC_HAS_EXITREASON(p)) {
+				char *desc = exit_reason_get_string_desc(p->p_exit_reason);
+				printf("CRASH %s reason ns %u code 0x%llx: %s\n", p->p_comm,
+				    p->p_exit_reason->osr_namespace, p->p_exit_reason->osr_code,
+				    desc != NULL ? desc : "(none)");
+			}
+		}
+#endif
 		/* Defualt to EXC_CRASH if the exception is not an EXC_RESOURCE or EXC_GUARD */
 		if (etype != EXC_RESOURCE && etype != EXC_GUARD) {
 			etype = EXC_CRASH;

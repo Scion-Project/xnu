@@ -35,16 +35,18 @@ osfmk/arm64/WKdmCompress_4k.s	standard
 osfmk/arm64/WKdmData.s		standard
 osfmk/arm64/lz4_decode_arm64.s  standard
 osfmk/arm64/lz4_encode_arm64.s  standard
-# Scion: the read-only region's code (amcc_rorgn_*.c) is not in the open source; amcc_rorgn_scion.c stands in for it
-#osfmk/arm64/amcc_rorgn_ppl.c optional nos_arm_asm config_pmap_ppl
-#osfmk/arm64/amcc_rorgn_ppl_amcc.c optional nos_arm_asm config_pmap_ppl
-#osfmk/arm64/amcc_rorgn_common.c optional nos_arm_asm
-#osfmk/arm64/amcc_rorgn_pv_ctrr.c optional nos_arm_asm
-osfmk/arm64/amcc_rorgn_scion.c optional nos_arm_asm
+# The read-only region's code (amcc_rorgn_*.c) is not in the open source. Two stand-ins, one per kind of machine:
+# the generic ARMv8 boards (STARLTE ...) build osfmk/arm64/amcc_rorgn_{ppl,ppl_amcc,common,pv_ctrr}.c (ppl_ctrr3 is
+# included by them); the VMAPPLE board builds the one file osfmk/arm64/amcc_rorgn_scion.c.
+osfmk/arm64/amcc_rorgn_ppl.c optional nos_arm_asm config_pmap_ppl scion_generic_arm64
+osfmk/arm64/amcc_rorgn_ppl_amcc.c optional nos_arm_asm config_pmap_ppl scion_generic_arm64
+osfmk/arm64/amcc_rorgn_common.c optional nos_arm_asm scion_generic_arm64
+osfmk/arm64/amcc_rorgn_pv_ctrr.c optional nos_arm_asm scion_generic_arm64
+osfmk/arm64/amcc_rorgn_scion.c optional nos_arm_asm scion_vmapple
 # Scion: what else of the machine layer Apple links from its KDK's binary support library
-osfmk/arm64/machine_routines_scion.c optional nos_arm_asm
+osfmk/arm64/machine_routines_scion.c optional nos_arm_asm scion_vmapple
 # Scion: __chkstk_darwin with a BTI landing pad (SCION_NATIVE_PAC only; empty otherwise)
-osfmk/arm64/scion_chkstk.s optional nos_arm_asm
+osfmk/arm64/scion_chkstk.s optional nos_arm_asm scion_vmapple
 osfmk/arm64/bcopy.s standard
 osfmk/arm64/bzero.s standard
 osfmk/arm/caches.c		standard
@@ -58,6 +60,10 @@ osfmk/arm64/dbgwrap.c		standard
 osfmk/arm/arm_timer.c		standard
 osfmk/arm/arm_init.c	optional config_pmap_ppl
 osfmk/arm64/arm_vm_init.c	optional config_pmap_ppl
+osfmk/arm64/sweet_early.c	optional scion_generic_arm64
+osfmk/arm64/sweet_a64e.c	optional scion_generic_arm64
+osfmk/arm64/sweet_prof.c	optional scion_generic_arm64
+osfmk/arm64/sweet_a64e_fp.s	optional scion_generic_arm64
 osfmk/arm64/arm64_hypercall.c	standard
 osfmk/arm/io_map.c		standard
 osfmk/arm64/loose_ends.c	standard

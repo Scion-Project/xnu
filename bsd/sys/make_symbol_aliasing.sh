@@ -34,7 +34,11 @@ fi
 SDKROOT="$1"
 OUTPUT="$2"
 
-AVAILABILITY_PL="${SDKROOT}/${DRIVERKITROOT}/usr/local/libexec/availability.pl"
+if [ -n "${FAKEROOT_DIR}" ]; then
+	AVAILABILITY_PL="${FAKEROOT_DIR}/usr/local/libexec/availability.pl"
+else
+	AVAILABILITY_PL="${SDKROOT}/${DRIVERKITROOT}/usr/local/libexec/availability.pl"
+fi
 
 if [ ! -x "${AVAILABILITY_PL}" ] ; then
     echo "Unable to locate ${AVAILABILITY_PL} (or not executable)" >&2

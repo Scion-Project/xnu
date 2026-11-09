@@ -34,37 +34,123 @@
 
 #if defined(CRYPTO_SHA2)
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * SWEET has no corecrypto kext, so g_crypto_funcs stays NULL. SHA-256 uses
+ * XNU's built-in implementation directly, as the SWEET PRNG does; this also
+ * serves code-signing page hashes. SHA-384/512 use BearSSL's portable
+ * implementation (libkern/crypto/sweet_sha2big.c), its context stored in
+ * the caller's SHA384_CTX/SHA512_CTX.
+ */
+#include <corecrypto/ccsha2.h>
+#define SHA256_DI()                     (&ccsha256_ltc_di)
+#define SHA256_INIT(di, ctx)            ccdigest_init(di, ctx)
+#define SHA256_UPDATE(di, ctx, len, d)  ccdigest_update(di, ctx, len, d)
+#else
+#define SHA256_DI()                     (g_crypto_funcs->ccsha256_di)
+#define SHA256_INIT(di, ctx)            g_crypto_funcs->ccdigest_init_fn(di, ctx)
+#define SHA256_UPDATE(di, ctx, len, d)  g_crypto_funcs->ccdigest_update_fn(di, ctx, len, d)
+#endif
+
+#endif
 void
 SHA256_Init(SHA256_CTX *ctx)
 {
 	const struct ccdigest_info *di;
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	di = SHA256_DI();
+#else
 	di = g_crypto_funcs->ccsha256_di;
+#endif
 
 	/* Make sure the context size for the digest info fits in the one we have */
 	if (ccdigest_di_size(di) > sizeof(SHA256_CTX)) {
 		panic("%s: inconsistent size for SHA256 context", __FUNCTION__);
 	}
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	SHA256_INIT(di, ctx->ctx);
+#else
 	g_crypto_funcs->ccdigest_init_fn(di, ctx->ctx);
+#endif
 }
 
 void
 SHA256_Update(SHA256_CTX *ctx, const void *data, size_t len)
 {
 	const struct ccdigest_info *di;
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	di = SHA256_DI();
+#else
 	di = g_crypto_funcs->ccsha256_di;
+#endif
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	SHA256_UPDATE(di, ctx->ctx, len, data);
+#else
 	g_crypto_funcs->ccdigest_update_fn(di, ctx->ctx, len, data);
+#endif
 }
 
 void
 SHA256_Final(void *digest, SHA256_CTX *ctx)
 {
 	const struct ccdigest_info *di;
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	di = SHA256_DI();
+#else
 	di = g_crypto_funcs->ccsha256_di;
+#endif
 
 	ccdigest_final(di, ctx->ctx, digest);
 }
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+#include "sweet_bearssl/inc/bearssl_hash.h"
+
+_Static_assert(sizeof(br_sha384_context) <= sizeof(SHA512_CTX),
+    "BearSSL SHA-384/512 context must fit in SHA512_CTX");
+#define BR_CTX(ctx) ((br_sha384_context *)(void *)(ctx))
+
+void
+SHA384_Init(SHA384_CTX *ctx)
+{
+	br_sha384_init(BR_CTX(ctx));
+}
+
+void
+SHA384_Update(SHA384_CTX *ctx, const void *data, size_t len)
+{
+	br_sha384_update(BR_CTX(ctx), data, len);
+}
+
+void
+SHA384_Final(void *digest, SHA384_CTX *ctx)
+{
+	br_sha384_out(BR_CTX(ctx), digest);
+}
+
+void
+SHA512_Init(SHA512_CTX *ctx)
+{
+	br_sha512_init(BR_CTX(ctx));
+}
+
+void
+SHA512_Update(SHA512_CTX *ctx, const void *data, size_t len)
+{
+	br_sha512_update(BR_CTX(ctx), data, len);
+}
+
+void
+SHA512_Final(void *digest, SHA512_CTX *ctx)
+{
+	br_sha512_out(BR_CTX(ctx), digest);
+}
+
+#else /* !ARM64_BOARD_CONFIG_SWEET */
 
 void
 SHA384_Init(SHA384_CTX *ctx)
@@ -131,6 +217,76 @@ SHA512_Final(void *digest, SHA512_CTX *ctx)
 	ccdigest_final(di, ctx->ctx, digest);
 }
 
+#endif /* !ARM64_BOARD_CONFIG_SWEET */
+
+#else
+
+void
+SHA384_Init(SHA384_CTX *ctx)
+{
+	const struct ccdigest_info *di;
+	di = g_crypto_funcs->ccsha384_di;
+
+	/* Make sure the context size for the digest info fits in the one we have */
+	if (ccdigest_di_size(di) > sizeof(SHA384_CTX)) {
+		panic("%s: inconsistent size for SHA384 context", __FUNCTION__);
+	}
+
+	g_crypto_funcs->ccdigest_init_fn(di, ctx->ctx);
+}
+
+void
+SHA384_Update(SHA384_CTX *ctx, const void *data, size_t len)
+{
+	const struct ccdigest_info *di;
+	di = g_crypto_funcs->ccsha384_di;
+
+	g_crypto_funcs->ccdigest_update_fn(di, ctx->ctx, len, data);
+}
+
+
+void
+SHA384_Final(void *digest, SHA384_CTX *ctx)
+{
+	const struct ccdigest_info *di;
+	di = g_crypto_funcs->ccsha384_di;
+
+	ccdigest_final(di, ctx->ctx, digest);
+}
+
+void
+SHA512_Init(SHA512_CTX *ctx)
+{
+	const struct ccdigest_info *di;
+	di = g_crypto_funcs->ccsha512_di;
+
+	/* Make sure the context size for the digest info fits in the one we have */
+	if (ccdigest_di_size(di) > sizeof(SHA512_CTX)) {
+		panic("%s: inconsistent size for SHA512 context", __FUNCTION__);
+	}
+
+	g_crypto_funcs->ccdigest_init_fn(di, ctx->ctx);
+}
+
+void
+SHA512_Update(SHA512_CTX *ctx, const void *data, size_t len)
+{
+	const struct ccdigest_info *di;
+	di = g_crypto_funcs->ccsha512_di;
+
+	g_crypto_funcs->ccdigest_update_fn(di, ctx->ctx, len, data);
+}
+
+void
+SHA512_Final(void *digest, SHA512_CTX *ctx)
+{
+	const struct ccdigest_info *di;
+	di = g_crypto_funcs->ccsha512_di;
+
+	ccdigest_final(di, ctx->ctx, digest);
+}
+
+#endif
 #else
 
 /* As these are part of the KPI, we need to stub them out for any kernel configuration that does not support SHA2. */

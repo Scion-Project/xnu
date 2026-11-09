@@ -852,6 +852,20 @@ log_unnest_badness(
 	    vm_map_offset_t, s,
 	    vm_map_offset_t, e,
 	    vm_map_offset_t, lowest_unnestable_addr);
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	{
+		/* sweetquiet=1: macOS processes unnest on every exec here (the trap-emulated arm64e
+		 * code); the line fills the 16 KiB pmsg ring that carries the panic log to TWRP */
+		static int quiet = -1;
+		if (quiet < 0) {
+			quiet = 0;
+			PE_parse_boot_argn("sweetquiet", &quiet, sizeof(quiet));
+		}
+		if (quiet) {
+			return;
+		}
+	}
+#endif
 #if defined(__x86_64__)
 	printf("%s[%d] triggered unnest of range 0x%qx->0x%qx of DYLD shared region in VM map %p. While not abnormal for debuggers, this increases system memory footprint until the target exits.\n", current_proc()->p_comm, proc_getpid(current_proc()), (uint64_t)s, (uint64_t)e, (void *) VM_KERNEL_ADDRPERM(m));
 #else
@@ -2483,7 +2497,16 @@ map_with_linking_np(
 	}
 
 	/* some older devs have s/w page size > h/w page size, no need to support them */
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* sweet: 4 KiB kernel pages, 16 KiB fixup pages; vm_dyld_pager.c handles both. */
+	if (info_hdr->mwli_page_size != PAGE_SIZE && info_hdr->mwli_page_size != 0x4000) {
+#else
 	if (info_hdr->mwli_page_size != PAGE_SIZE) {
+#endif
+#else
+	if (info_hdr->mwli_page_size != PAGE_SIZE) {
+#endif
 		/* no printf, since this is expected on some devices */
 		kr = KERN_INVALID_ARGUMENT;
 		goto done;
@@ -3156,6 +3179,9 @@ SYSCTL_PROC(_vm_reclaim, OID_AUTO, sampling_period_critical_ns,
 
 #include <kern/thread.h>
 #include <sys/user.h>
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#include <pexpert/pexpert.h>
+#endif
 
 void vm_pageout_io_throttle(void);
 

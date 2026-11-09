@@ -70,6 +70,11 @@ extern int mdevgetrange(int devid, uint64_t *base, uint64_t *size);
 extern void di_root_ramfile(IORegistryEntry * entry);
 extern int IODTGetDefault(const char *key, void *infoAddr, unsigned int infoSize);
 extern boolean_t cpuid_vmm_present(void);
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+extern void a5xelte_emmc_probe(void);
+extern void a5xelte_keys_init(void);
+extern void a5xelte_touch_probe(void);
+#endif
 
 #define ROUNDUP(a, b) (((a) + ((b) - 1)) & (~((b) - 1)))
 
@@ -794,6 +799,162 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 			regEntry->release();                                                            /* Toss the entry */
 		}
 	}
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* Exynos 9810: GPIO keys with S9 pins (a5xelte_keys.c) and the
+	 * S6SY761 touch driver (starlte_touch.c); no S7 PMIC/GPU code.
+	 * Boot-arg ufsprobe=1: read-only UFS host state and LUN 0 GPT. */
+	{
+		extern void starlte_brand_banner(bool full);
+		starlte_brand_banner(true);
+	}
+	a5xelte_keys_init();
+	{
+		extern void starlte_touch_probe(void);
+		starlte_touch_probe();
+		/* Boot-arg tmu=1|2: the TMU's temperatures, read only (bsd/dev/hakios.exynos_tmu.c), before the
+		 * governor that reads them; off: nothing mapped, nothing read. */
+		extern void hakios_exynos_tmu_start(void);
+		hakios_exynos_tmu_start();
+		/* Boot-arg cpufreq_gov=1: the CPU governor (bsd/dev/hakios.exynos_cpufreq.c); off: nothing. */
+		extern bool hakios_exynos_cpufreq_gov_start(void);
+		(void)hakios_exynos_cpufreq_gov_start();
+		/* Boot-arg wifi_pcie=N (1-5): Scion's Wi-Fi stage 1, PCIe channel 0 to the BCM4361 (bsd/dev/hakios.exynos_pcie.c). */
+		/* Boot-arg extra_ram_canary=1 (with extra_ram=1): the extra RAM's canary pages checked every 10 s (arm_vm_init.c). */
+		extern void hakios_extra_ram_canary_start(void);
+		hakios_extra_ram_canary_start();
+		extern void hakios_exynos_pcie_init(void);
+		hakios_exynos_pcie_init();
+		/* Boot-arg dpu_probe=1: Scion's DPU scan-out service, its read-only probe (bsd/dev/hakios.exynos_dpu.c). */
+		extern void hakios_exynos_dpu_boot_probe(void);
+		hakios_exynos_dpu_boot_probe();
+		extern void starlte_smp_probe(void);   /* boot-arg starsmpprobe=1 */
+		starlte_smp_probe();
+		/* Mali-G72 read-only probe (bsd/dev/starlte_gpu.c), boot-arg stargpu=0 off. */
+		extern void starlte_gpu_probe(void);
+		starlte_gpu_probe();
+	}
+	{
+	/* Boot-arg sdprobe=1: read-only microSD probe (bsd/dev/starlte_sd.c):
+	 * card, MBR, p1/p2 heads, sdroot= range; sdprobe=2 ends in a panic. */
+	uint32_t sdprobe = 0;
+	PE_parse_boot_argn("sdprobe", &sdprobe, sizeof(sdprobe));
+	if (sdprobe) {
+		extern void starlte_sd_probe(void);
+		starlte_sd_probe();
+	}
+	}
+	{
+	uint32_t ufsprobe = 0;
+	PE_parse_boot_argn("ufsprobe", &ufsprobe, sizeof(ufsprobe));
+	if (ufsprobe == 1) {
+		extern void herolte_ufs_probe(void);
+		herolte_ufs_probe();
+	}
+	}
+	/* rd=sdroot0: the sdroot= range of the microSD card (pN or lba:START,COUNT,
+	 * no default), read-only; UFS is never brought up. */
+	if (strcmp(rdBootVar, "sdroot0") == 0) {
+		extern int starlte_sd_rootdev(dev_t *dev);
+		OSSafeReleaseNULL(matching);
+		int sd_error = starlte_sd_rootdev(root);
+		if (sd_error) {
+			panic("IOFindBSDRoot: STARLTE microSD root %s unavailable: %d", rdBootVar, sd_error);
+		}
+		strlcpy(rootName, rdBootVar, rootNameSize);
+		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
+		*oflags = 0;
+		goto iofrootx;
+	}
+	/* rd=ufsroot0: the ufsroot= partition (default USERDATA), read-only. */
+	if (strcmp(rdBootVar, "ufsroot0") == 0) {
+		extern int herolte_ufs_rootdev(dev_t *dev);
+		OSSafeReleaseNULL(matching);
+		int ufs_error = herolte_ufs_rootdev(root);
+		if (ufs_error) {
+			panic("IOFindBSDRoot: STARLTE UFS root %s unavailable: %d", rdBootVar, ufs_error);
+		}
+		strlcpy(rootName, rdBootVar, rootNameSize);
+		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
+		*oflags = 0;
+		goto iofrootx;
+	}
+#elif defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* GPIO keys: Exynos 7580 or, on HEROLTE, the Exynos 8890 ALIVE pins. */
+	a5xelte_keys_init();
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+	/* sec_ts on the Exynos 8890 HSI2C (bsd/dev/herolte_touch.c). */
+	extern void herolte_touch_probe(void);
+	herolte_touch_probe();
+	/* Mali-T880 read-only probe (bsd/dev/herolte_gpu.c). */
+	extern void herolte_gpu_probe(void);
+	herolte_gpu_probe();
+#else
+	/* Exynos 7580 I2C touch. */
+	a5xelte_touch_probe();
+#endif
+	{
+	uint32_t emmcprobe = 0;
+	PE_parse_boot_argn("emmcprobe", &emmcprobe, sizeof(emmcprobe));
+	if (emmcprobe == 1) {
+		a5xelte_emmc_probe();
+	}
+	}
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+	{
+	uint32_t ufsprobe = 0;
+	PE_parse_boot_argn("ufsprobe", &ufsprobe, sizeof(ufsprobe));
+	if (ufsprobe == 1) {
+		extern void herolte_ufs_probe(void);
+		herolte_ufs_probe();
+	}
+	}
+	if (strcmp(rdBootVar, "ufsroot0") == 0) {
+		extern int herolte_ufs_rootdev(dev_t *dev);
+		OSSafeReleaseNULL(matching);
+		int ufs_error = herolte_ufs_rootdev(root);
+		if (ufs_error) {
+			panic("IOFindBSDRoot: HEROLTE UFS root %s unavailable: %d", rdBootVar, ufs_error);
+		}
+		strlcpy(rootName, rdBootVar, rootNameSize);
+		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
+		*oflags = 0;
+		goto iofrootx;
+	}
+#endif
+	if (strcmp(rdBootVar, "emmcroot0") == 0) {
+		extern int a5xelte_emmc_rootdev(dev_t *dev);
+		OSSafeReleaseNULL(matching);
+		int emmc_error = a5xelte_emmc_rootdev(root);
+		if (emmc_error) {
+			panic("IOFindBSDRoot: A5XELTE eMMC root unavailable: %d", emmc_error);
+		}
+		strlcpy(rootName, rdBootVar, rootNameSize);
+		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
+		*oflags = 0;
+		goto iofrootx;
+	}
+#endif
+
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+//
+//	SWEET: root on a GPT partition of the internal UFS (bsd/dev/sweet_ufs.c)
+//
+	if (strcmp(rdBootVar, "ufsroot0") == 0) {
+		extern int sweet_ufs_rootdev(dev_t *dev);
+		OSSafeReleaseNULL(matching);
+		int ufs_error = sweet_ufs_rootdev(root);
+		if (ufs_error) {
+			panic("IOFindBSDRoot: SWEET UFS root %s unavailable: %d", rdBootVar, ufs_error);
+		}
+		strlcpy(rootName, rdBootVar, rootNameSize);
+		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
+		*oflags = 0;
+		goto iofrootx;
+	}
+#endif
+#endif
 
 //
 //	Now check if we are trying to root on a memory device

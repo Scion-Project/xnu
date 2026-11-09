@@ -1250,6 +1250,19 @@ vfs_mountroot(void)
 
 		mp = vfs_rootmountalloc_internal(vfsp, "root_device");
 		mp->mnt_devvp = rootvp;
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_STARLTE)
+		/*
+		 * SWEET has no data volume: /private/var lives on the root, so
+		 * boot-arg rootrw=1 mounts it read-write from the start. STARLTE
+		 * too, and its overlay installer writes before launchd starts.
+		 */
+		{
+			uint32_t rootrw = 0;
+			if (PE_parse_boot_argn("rootrw", &rootrw, sizeof(rootrw)) && rootrw) {
+				mp->mnt_flag &= ~MNT_RDONLY;
+			}
+		}
+#endif
 
 		if (vfsp->vfc_mountroot) {
 			error = (*vfsp->vfc_mountroot)(mp, rootvp, ctx);

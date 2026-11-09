@@ -221,8 +221,19 @@ pe_arm_map_interrupt_controller(void)
 		kprintf("pe_arm_map_interrupt_controller: gTimerBase: 0x%lx\n", (unsigned long)gTimerBase);
 	}
 	if (gTimerBase == 0) {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(A5XELTE)
+		/* CNTV is an architectural timer. It has no MMIO timer base in
+		 * the Exynos7580 device tree; virtual timer PPI 27 is in the GIC. */
+		return 1;
+#else
 		kprintf("pe_arm_map_interrupt_controller: failed to find the timer.\n");
 		return 0;
+#endif
+#else
+		kprintf("pe_arm_map_interrupt_controller: failed to find the timer.\n");
+		return 0;
+#endif
 	}
 
 	return 1;

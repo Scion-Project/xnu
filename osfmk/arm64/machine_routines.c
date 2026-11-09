@@ -64,6 +64,28 @@
 #include <pexpert/device_tree.h>
 #include <pexpert/arm64/board_config.h>
 #include <kern/smr.h>
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#include <kern/recount.h>
+#include <kern/processor.h>
+
+/*
+ * How long processor cpu_id has been idle since it started, in mach_absolute_time() units: the CPU governor's load
+ * (bsd/dev/hakios.exynos_cpufreq.c). From HakiOS/Scion (scion-kernel osfmk/arm64/machine_routines.c).
+ */
+bool ml_cpu_idle_time(int cpu_id, uint64_t *idle);
+
+bool
+ml_cpu_idle_time(int cpu_id, uint64_t *idle)
+{
+	struct recount_usage usage = { 0 };
+
+	if (cpu_id < 0 || cpu_id >= MAX_CPUS || processor_array[cpu_id] == PROCESSOR_NULL) {
+		return false;
+	}
+	recount_processor_usage(&processor_array[cpu_id]->pr_recount, &usage, idle);
+	return true;
+}
+#endif
 
 #include <IOKit/IOPlatformExpert.h>
 #if HIBERNATION
@@ -1154,6 +1176,16 @@ ml_parse_cpu_topology(void)
 	const boolean_t cpus_boot_arg_present = PE_parse_boot_argn("cpus", &cpu_boot_arg, sizeof(cpu_boot_arg));
 	const boolean_t cpumask_boot_arg_present = PE_parse_boot_argn("cpumask", &cpumask_boot_arg, sizeof(cpumask_boot_arg));
 
+#if defined(SWEET)
+	/* Opt in to SMP: cpus=N (N <= SWEET_SMP_MAX_CPUS; cores 6-7 are the A76s). */
+	if (!cpus_boot_arg_present || cpu_boot_arg == 0) {
+		cpu_boot_arg = 1;
+	}
+	if (cpu_boot_arg > SWEET_SMP_MAX_CPUS) {
+		cpu_boot_arg = SWEET_SMP_MAX_CPUS;
+	}
+#endif
+
 	// The cpus=N and cpumask=N boot args cannot be used simultaneously. Flag this
 	// so that we trigger a panic later in the boot process, once serial is enabled.
 	if (cpus_boot_arg_present && cpumask_boot_arg_present) {
@@ -1289,10 +1321,27 @@ ml_parse_cpu_topology(void)
 		}
 #endif
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(SWEET)
+		/* Aff1 encodes the core on SM7150, not an Apple cluster ID. */
+		cpu->die_cluster_id = (int)ml_readprop(child, "die-cluster-id", 0);
+#else
 		cpu->die_cluster_id = (int)ml_readprop(child, "die-cluster-id", MPIDR_CLUSTER_ID(cpu->phys_id));
+#endif
+#else
+		cpu->die_cluster_id = (int)ml_readprop(child, "die-cluster-id", MPIDR_CLUSTER_ID(cpu->phys_id));
+#endif
 		cluster->die_cluster_id = cpu->die_cluster_id;
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(SWEET)
+		cpu->cluster_core_id = (int)ml_readprop(child, "cluster-core-id", cpu->phys_id >> 8);
+#else
 		cpu->cluster_core_id = (int)ml_readprop(child, "cluster-core-id", MPIDR_CPU_ID(cpu->phys_id));
+#endif
+#else
+		cpu->cluster_core_id = (int)ml_readprop(child, "cluster-core-id", MPIDR_CPU_ID(cpu->phys_id));
+#endif
 
 		cpu->cpu_pset_id = PSET_ID_INVALID; /* initialized by ml_bootstrap_processors() */
 
@@ -1414,7 +1463,23 @@ ml_get_boot_cluster_type(void)
 int
 ml_get_cpu_number(uint32_t phys_id)
 {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(STARLTE)
+	/* Callers pass an ADT reg (bit 31 clear) or a raw MPIDR (bit 31 RES1).
+	 * The Mongoose M3s' MPIDR has no MT bit and the same Aff1:Aff0 as A55
+	 * core 1; their reg carries bit 16 instead, as start.s does. */
+	if (phys_id & (1U << 31)) {
+		phys_id = (phys_id & (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK)) |
+		    ((phys_id & (1U << 24)) ? 0 : 0x10000);
+	} else {
+		phys_id &= 0x10000 | MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
+	}
+#else
 	phys_id &= MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
+#endif
+#else
+	phys_id &= MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
+#endif
 
 	for (unsigned i = 0; i < topology_info.num_cpus; i++) {
 		if (topology_info.cpus[i].phys_id == phys_id) {
@@ -1758,8 +1823,13 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 
 	os_atomic_or(&this_cpu_datap->cpu_flags, InitState, relaxed);
 
-#if !USE_APPLEARMSMP
+#if (defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)) ? (!USE_APPLEARMSMP && !defined(ARM64_BOARD_CONFIG_SWEET) && !defined(ARM64_BOARD_CONFIG_A5XELTE)) : (!USE_APPLEARMSMP)
 	/*
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	 * sweet: SweetCPU::startAll boots the CPUs itself, once all are
+	 * registered and in logical order (as AppleARMSMP does).
+	 *
+#endif
 	 * AppleARMCPU's external processor_start call is now a no-op, so
 	 * boot the processor directly when it's registered.
 	 *
@@ -2144,6 +2214,41 @@ ml_release_deferred_pages(void)
 {
 	vm_page_free_list(ml_static_mfree_pre_slide_list.vmpl_head, false);
 	ml_static_mfree_queue_up = false;
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+}
+
+/*
+ * HakiOS (patch 1512, xnu-12377): the boot loader's extra RAM [first, end) to the VM, each page made as ml_static_mfree()
+ * makes its own (canonical: found by vm_page_find_canonical() through the radix tree below vm_pages_first_pnum), queued
+ * with them until the physical aperture is final, then released by ml_release_deferred_pages(). vm_page_bootstrap()
+ * counted every page of max_mem not free then as wired, these with them: they are taken off again, as ml_static_mfree()
+ * does for its pages.
+ */
+void hakios_extra_ram_give(ppnum_t first, ppnum_t end);
+extern unsigned int hakios_extra_ram_canary_stride;     /* arm_vm_init.c: pages kept out as canaries, one in this many */
+void
+hakios_extra_ram_give(ppnum_t first, ppnum_t end)
+{
+	unsigned int kept = 0;
+
+	for (ppnum_t ppn = first; ppn < end; ppn++) {
+		if (hakios_extra_ram_canary_stride != 0 && (ppn - first) % hakios_extra_ram_canary_stride == 0) {
+			kept++;         /* a canary: not the VM's (extra_ram_canary=1) */
+			continue;
+		}
+		if (__probable(!ml_static_mfree_queue_up)) {
+			vm_page_create_canonical(ppn);
+		} else {
+			vm_page_t m = vm_page_create(ppn, true, Z_WAITOK);
+
+			vm_page_list_push(&ml_static_mfree_pre_slide_list, m);
+		}
+	}
+	vm_page_lockspin_queues();
+	vm_page_wire_count -= (unsigned int)(end - first) - kept;
+	vm_page_wire_count_initial -= (unsigned int)(end - first) - kept;
+	vm_page_unlock_queues();
+#endif
 }
 
 /*
@@ -2621,6 +2726,18 @@ ml_get_decrementer(void)
 
 	return dec;
 }
+
+#if defined(SWEET)
+/*
+ * sweet: arm_vm_init() calls this unconditionally; Apple's definition (it
+ * enters the PPL/monitor) ships only in the closed per-SoC library. There is
+ * no monitor on SWEET.
+ */
+void
+ml_enable_monitor(void)
+{
+}
+#endif /* SWEET */
 
 boolean_t
 ml_get_timer_pending(void)
@@ -3395,6 +3512,13 @@ ml_unsafe_kernel_text_init(void)
 		_unsafe_kernel_text_initialized = true;
 		_unsafe_kernel_text = (0 == *(const int *)value);
 	}
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* sweet: no iBoot property and no CTRR here; kernel text is not locked. */
+	if (!_unsafe_kernel_text_initialized) {
+		_unsafe_kernel_text_initialized = true;
+		_unsafe_kernel_text = true;
+	}
+#endif
 }
 STARTUP(TUNABLES, STARTUP_RANK_FIRST, ml_unsafe_kernel_text_init);
 
@@ -3406,3 +3530,15 @@ ml_unsafe_kernel_text(void)
 	return false;
 }
 #endif /* DEVELOPMENT || DEBUG || CONFIG_DTRACE || CONFIG_CSR_FROM_DT */
+
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * sweet: Apple's closed per-SoC library reads the fuses for this. Answer as a
+ * retail (production-fused) device, so kern.eng_sample_dev_fused stays 0.
+ */
+boolean_t
+ml_device_is_prod_fused(void)
+{
+	return TRUE;
+}
+#endif

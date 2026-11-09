@@ -29,6 +29,9 @@
 #include <stdlib.h>
 #include <mach_assert.h>
 #include <mach_ldebug.h>
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#include <kern/backtrace.h>
+#endif
 
 #include <mach/shared_region.h>
 #include <mach/vm_param.h>
@@ -1544,7 +1547,11 @@ pmap_set_xprr_perm(
 {
 	pvh_assert_locked(pai);
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	const vm_offset_t kva = phystokv(pai_to_pa(pai));   /* (HakiOS, patch 1512) */
+#else
 	const vm_offset_t kva = phystokv(vm_first_phys + (pmap_paddr_t)ptoa(pai));
+#endif
 	pt_entry_t * const ptep = pmap_pte(kernel_pmap, kva);
 
 	pmap_set_pte_xprr_perm(ptep, expected_perm, new_perm);
@@ -1911,6 +1918,21 @@ pmap_construct_io_pte(pmap_paddr_t paddr, pt_entry_t tmplate)
 }
 #endif /* XNU_MONITOR */
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+/*
+ * sweet (12377 port): 12377 maps write-combined / RT pages that lie outside
+ * the kernel-managed DRAM as Device-GRE. On the Exynos boards the
+ * framebuffer, the panic region (/pram) and the Mali buffers are ordinary
+ * RAM outside that range; as device memory, DC ZVA (bzero) takes an
+ * alignment fault. Keep them Normal Non-Cacheable, as xnu-11417 did.
+ */
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+#define pmap_wcomb_normal(pa) ((void)(pa), true)
+#else
+#define pmap_wcomb_normal(pa) is_dram_addr(pa)
+#endif
+
+#endif
 vm_map_address_t
 pmap_map_bd_with_options(
 	vm_map_address_t virt,
@@ -1943,7 +1965,11 @@ pmap_map_bd_with_options(
 
 	switch (options & PMAP_MAP_BD_MASK) {
 	case PMAP_MAP_BD_WCOMB:
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+		if (pmap_wcomb_normal(start)) {
+#else
 		if (is_dram_addr(start)) {
+#endif
 			mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
 		} else {
 #if HAS_FEAT_XS
@@ -2819,7 +2845,12 @@ pmap_init(
 	 *	structures for pages we allocate to be page tables in
 	 *	pmap_expand().
 	 */
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	/* (HakiOS, patch 1512: page-table pages are kept at ptoa(pa_index(pa)), the extra RAM's after the window's) */
+	_vm_object_allocate(mem_size + ptoa((vm_object_size_t)hakios_extra_ram_pages), pmap_object, VM_MAP_SERIAL_SPECIAL);
+#else
 	_vm_object_allocate(mem_size, pmap_object, VM_MAP_SERIAL_SPECIAL);
+#endif
 	pmap_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 
 	/*
@@ -4120,7 +4151,11 @@ pmap_set_ptov_ap(unsigned int pai __unused, unsigned int ap __unused, boolean_t 
 {
 #if __ARM_PTE_PHYSMAP__
 	pvh_assert_locked(pai);
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	vm_offset_t kva = phystokv(pai_to_pa(pai));   /* (HakiOS, patch 1512) */
+#else
 	vm_offset_t kva = phystokv(vm_first_phys + (pmap_paddr_t)ptoa(pai));
+#endif
 	pt_entry_t *pte_p = pmap_pte(kernel_pmap, kva);
 
 	pt_entry_t tmplate = *pte_p;
@@ -4952,6 +4987,11 @@ pmap_page_protect_options_with_flush_range(
 			}
 #endif
 			if (remove && (options & PMAP_OPTIONS_COMPRESSOR)) {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+				/* ptep_get_iommu() only exists in Apple's PPL builds: report the raw PV entry */
+				panic("pmap_page_protect: attempt to compress ppnum 0x%x owned by iommu pte %p, pve_p=%p",
+				    ppnum, pte_p, pve_p);
+#else
 #if XNU_MONITOR
 				panic("pmap_page_protect: attempt to compress ppnum 0x%x owned by iommu %p, pve_p=%p",
 				    ppnum, ptep_get_iommu(pte_p), pve_p);
@@ -4959,6 +4999,7 @@ pmap_page_protect_options_with_flush_range(
 				/* Scion: ptep_get_iommu() comes with the monitor's IOMMU code, which the open source lacks */
 				panic("pmap_page_protect: attempt to compress ppnum 0x%x owned by an iommu (pte %p), pve_p=%p",
 				    ppnum, pte_p, pve_p);
+#endif
 #endif
 			}
 			goto protect_skip_pve_pass1;
@@ -5914,6 +5955,17 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
 		 * As a result we require the exclusive pmap lock.
 		 */
 		pmap_assert_locked(pmap, PMAP_LOCK_EXCLUSIVE);
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+		/* RAM in the second bank (>= 1.5 GiB) sometimes hits the unaligned
+		 * PTE panic in write_pte_fast: name the VA and the callers. */
+		if (((uintptr_t)pte_p) & 0x1f) {
+			uintptr_t bt[8] = { 0 };
+			(void)backtrace(bt, 8, NULL, NULL);
+			panic("HEROLTE: unaligned pmap_enter va=%#llx pte_p=%p pte=%#llx kernel=%d "
+			    "bt %#lx %#lx %#lx %#lx %#lx %#lx %#lx", (uint64_t)v, pte_p, (uint64_t)new_pte,
+			    pmap == kernel_pmap, bt[1], bt[2], bt[3], bt[4], bt[5], bt[6], bt[7]);
+		}
+#endif
 		*old_pte = *pte_p;
 		if (*old_pte == new_pte) {
 			/* Another thread completed this operation. Nothing to do here. */
@@ -5994,7 +6046,11 @@ wimg_to_pte(unsigned int wimg, pmap_paddr_t pa)
 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
 		break;
 	case VM_WIMG_RT:
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+		if (pmap_wcomb_normal(pa)) {
+#else
 		if (is_dram_addr(pa)) {
+#endif
 			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_RT);
 		} else {
 #if HAS_FEAT_XS
@@ -6034,7 +6090,11 @@ wimg_to_pte(unsigned int wimg, pmap_paddr_t pa)
 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
 		break;
 	case VM_WIMG_WCOMB:
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+		if (pmap_wcomb_normal(pa)) {
+#else
 		if (is_dram_addr(pa)) {
+#endif
 			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
 		} else {
 #if HAS_FEAT_XS
@@ -6185,10 +6245,17 @@ pmap_construct_pte(
 	pte |= ARM_PTE_AF;
 	return pte;
 }
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
 
+/* defined further down; used by pmap_enter_options_internal() */
+MARK_AS_PMAP_TEXT static void pmap_phys_write_disable(vm_address_t va);
+#endif
+
+#if !defined(ARM64_BOARD_CONFIG_A5XELTE) && !defined(ARM64_BOARD_CONFIG_SWEET)
 /* Scion: defined further down, and called before that */
 MARK_AS_PMAP_TEXT static void pmap_phys_write_disable(vm_address_t va);
 
+#endif
 MARK_AS_PMAP_TEXT kern_return_t
 pmap_enter_options_internal(
 	pmap_t pmap,
@@ -7244,9 +7311,13 @@ void
 pmap_sync_page_attributes_phys(
 	ppnum_t pp)
 {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	flush_dcache((vm_offset_t) ptoa(pp), PAGE_SIZE, TRUE);
+#else
 	/* ptoa() widens before the shift: pp << PAGE_SHIFT is a 32-bit shift and drops the high bits of physical
 	 * addresses at or above 4 GiB (all of DRAM on boards whose memory starts there), which phystokv() then rejects. */
 	flush_dcache((vm_offset_t) ptoa(pp), PAGE_SIZE, TRUE);
+#endif
 }
 
 #if CONFIG_COREDUMP
@@ -7815,6 +7886,14 @@ pmap_disconnect(
 boolean_t
 pmap_has_managed_page(ppnum_t first, ppnum_t last)
 {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	/* HakiOS (patch 1512): the boot loader's extra RAM, below or above the window, is managed too */
+	for (unsigned int i = 0; i < hakios_extra_ram_count; i++) {
+		if ((ptoa(first) < hakios_extra_ram[i].end) && (ptoa(last) >= hakios_extra_ram[i].pa)) {
+			return TRUE;
+		}
+	}
+#endif
 	if (ptoa(first) >= vm_last_phys) {
 		return FALSE;
 	}
@@ -12254,8 +12333,13 @@ pmap_cs_lockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
 #if XNU_MONITOR
 	pmap_ppl_lockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
 #else
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	/* No PPL: nothing can lock pages down (pmap_ppl_lockdown_pages is PPL-only) */
+#pragma unused(kva, size, ppl_writable)
+#else
 	/* Scion: without a monitor there is nothing to lock the pages against; Apple's helper for it is not open source */
 #pragma unused(kva, size, ppl_writable)
+#endif
 #endif
 }
 
@@ -12265,8 +12349,12 @@ pmap_cs_unlockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
 #if XNU_MONITOR
 	pmap_ppl_unlockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
 #else
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#pragma unused(kva, size, ppl_writable)
+#else
 	/* Scion: likewise (pmap_cs_lockdown_pages) */
 #pragma unused(kva, size, ppl_writable)
+#endif
 #endif
 }
 

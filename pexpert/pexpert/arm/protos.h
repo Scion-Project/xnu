@@ -37,6 +37,9 @@ void uart_putc_options(char, bool);
 int uart_getc(void);
 
 void pe_init_fiq(void);
+#if defined(ARM64_BOARD_CONFIG_SWEET)
+extern uint32_t sweet_vtimer_intid;
+#endif
 
 #ifdef PRIVATE
 /**
@@ -47,7 +50,12 @@ typedef enum serial_device {
 	SERIAL_APPLE_UART=0x1,
 	SERIAL_DOCKCHANNEL=0x2,
 	SERIAL_PL011_UART=0x4,
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	SERIAL_DCC_UART=0x8,
+	SERIAL_SWEET_FBCON=0x10
+#else
 	SERIAL_DCC_UART=0x8
+#endif
 } serial_device_t;
 
 kern_return_t serial_irq_enable(serial_device_t device);

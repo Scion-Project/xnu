@@ -126,6 +126,9 @@
 #include <string.h>
 
 #include <sys/kdebug.h>
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#include <pexpert/pexpert.h>
+#endif
 
 #include <ptrauth.h>
 #if __has_feature(ptrauth_calls)
@@ -4736,6 +4739,112 @@ ipc_kmsg_deflate(
  *		MACH_RCV_INVALID_DATA    Couldn't copy to user message.
  *		the incoming "mr"        Copied data out of message buffer.
  */
+
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * sweet: boot-arg sweetmsg=1 prints the printable runs of every Mach
+ * message the traced process (sweettracename=) sends or receives, so XPC
+ * dictionaries (keys, strings, error descriptions) can be read off the
+ * console without os_log.
+ */
+extern bool sweet_trace_match(const char *, int);
+extern int proc_selfpid(void);
+extern void proc_selfname(char *, int);
+
+void sweet_msg_dump(const char *dir, mach_vm_address_t uaddr, mach_msg_size_t size);
+
+/* Append the printable runs (>= 5 chars) of buf[0..n) to out; returns new o. */
+static size_t
+sweet_msg_scan(const char *buf, size_t n, char *out, size_t o, size_t osz)
+{
+	size_t i, run;
+	for (i = 0; i < n; ) {
+		for (run = 0; i + run < n && buf[i + run] >= 0x20 && buf[i + run] < 0x7f; run++) {
+		}
+		if (run >= 5) {
+			if (o + run + 3 >= osz) {
+				break;
+			}
+			if (o) {
+				out[o++] = ' '; out[o++] = '|'; out[o++] = ' ';
+			}
+			memcpy(out + o, buf + i, run);
+			o += run;
+		}
+		i += run ? run : 1;
+	}
+	out[o] = '\0';
+	return o;
+}
+
+void
+sweet_msg_dump(const char *dir, mach_vm_address_t uaddr, mach_msg_size_t size)
+{
+	static int enabled = -1;
+	char comm[17];
+	char buf[1536];
+	char out[480];
+	size_t n, o;
+	uint32_t bits, dcount, off;
+
+	if (enabled < 0) {
+		int v = 0;
+		PE_parse_boot_argn("sweetmsg", &v, sizeof(v));
+		enabled = v;
+	}
+	if (!enabled || size < 24) {
+		return;
+	}
+	proc_selfname(comm, sizeof(comm));
+	if (!sweet_trace_match(comm, proc_selfpid())) {
+		return;
+	}
+	n = MIN(size, sizeof(buf));
+	if (copyin(uaddr, buf, n) != 0) {
+		return;
+	}
+	memcpy(&bits, buf, 4);
+	o = sweet_msg_scan(buf, n, out, 0, sizeof(out));
+	printf("MSG%s %s[%d] %u bytes id %u bits 0x%x: %s\n", dir, comm, proc_selfpid(), size,
+	    *(uint32_t *)(void *)(buf + 20), bits, out);
+	if (o == 0 && n >= 48) {
+		/* no text: the header and the first body words in hex */
+		uint32_t *w = (uint32_t *)(void *)buf;
+		printf("MSG%s   hex %08x %08x %08x %08x %08x %08x | %08x %08x %08x %08x %08x %08x\n", dir,
+		    w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11]);
+	}
+	if (!(bits & MACH_MSGH_BITS_COMPLEX) || n < 28) {
+		return;
+	}
+	/* follow out-of-line memory descriptors (user 64-bit layout) */
+	memcpy(&dcount, buf + 24, 4);
+	off = 28;
+	for (uint32_t d = 0; d < dcount && d < 8 && off + 12 <= n; d++) {
+		uint8_t type = (uint8_t)buf[off + 11];
+		if (type == MACH_MSG_OOL_DESCRIPTOR || type == MACH_MSG_OOL_VOLATILE_DESCRIPTOR) {
+			uint64_t addr; uint32_t osize;
+			if (off + 16 > n) {
+				break;
+			}
+			memcpy(&addr, buf + off, 8);
+			memcpy(&osize, buf + off + 12, 4);
+			size_t on = MIN(osize, sizeof(buf));
+			if (on >= 8 && copyin((user_addr_t)addr, buf, on) == 0) {
+				sweet_msg_scan(buf, on, out, 0, sizeof(out));
+				printf("MSG%s   OOL %u bytes: %s\n", dir, osize, out);
+			} else {
+				printf("MSG%s   OOL %u bytes at 0x%llx: unreadable\n", dir, osize, addr);
+			}
+			off += 16;
+		} else if (type == MACH_MSG_PORT_DESCRIPTOR) {
+			off += 12;
+		} else {
+			off += 16;
+		}
+	}
+}
+#endif
+
 mach_msg_return_t
 ipc_kmsg_put_to_user(
 	ipc_kmsg_t              kmsg,     /* scalar or vector */
@@ -4855,6 +4964,9 @@ ipc_kmsg_put_to_user(
 		mr = MACH_RCV_INVALID_DATA;
 		goto out;
 	}
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	sweet_msg_dump("<", msg_rcv_addr, usize);
+#endif
 
 out:
 	if (mr == MACH_RCV_INVALID_DATA) {

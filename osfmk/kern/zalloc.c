@@ -167,12 +167,27 @@ ZONE_DEFINE_TYPE(percpu_u64_zone, "percpu.64", uint64_t,
 #define ZONE_MAX_CHUNK_ALLOC_NUM        (10)
 #endif /* ZSECURITY_CONFIG(SAD_FENG_SHUI) */
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+/* The A5XELTE 4 KiB kernel uses the compact 48 GiB heap VA layout even
+ * though the development build selects MacOSX platform facilities. */
+#if defined(A5XELTE)
+#define ZONE_MAP_MAX            (8ULL << 30)
+#define ZONE_MAP_VA_SIZE        (24ULL << 30)
+#elif XNU_PLATFORM_MacOSX
+#define ZONE_MAP_MAX            (32ULL << 30)
+#define ZONE_MAP_VA_SIZE        (128ULL << 30)
+#else
+#define ZONE_MAP_MAX            (8ULL << 30)
+#define ZONE_MAP_VA_SIZE        (24ULL << 30)
+#endif
+#else
 #if   XNU_PLATFORM_MacOSX
 #define ZONE_MAP_MAX            (32ULL << 30)
 #define ZONE_MAP_VA_SIZE        (128ULL << 30)
 #else
 #define ZONE_MAP_MAX            (8ULL << 30)
 #define ZONE_MAP_VA_SIZE        (24ULL << 30)
+#endif
 #endif
 
 __enum_closed_decl(zm_len_t, uint16_t, {
@@ -1447,9 +1462,35 @@ zone_id_require_aligned(zone_id_t zid, void *addr)
 	vm_offset_t elem, offs;
 
 	elem = (vm_offset_t)addr;
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if CONFIG_PROB_GZALLOC
+	/*
+	 * sweet: with 4K kernel pages the ipc port zone uses multi-page
+	 * chunks, so an element in a secondary page is not element-aligned
+	 * relative to its own page.  A PGZ-protected element keeps only the
+	 * page offset, and its PGZ metadata has no page index, so the check
+	 * below panicked ("chunk len greater than max") on every PGZ-sampled
+	 * port.  Resolve back to the original element first, like
+	 * zone_element_bounds_check() does.
+	 */
+	if (__improbable(pgz_owned(elem))) {
+		struct zone_page_metadata *pmeta = zone_meta_from_addr(elem);
+
+		if (pmeta->zm_chunk_len == ZM_PGZ_ALLOCATED &&
+		    zid == pmeta->zm_index) {
+			elem = trunc_page(pmeta->zm_pgz_orig_addr) +
+			    (elem & PAGE_MASK);
+		}
+	}
+#endif /* CONFIG_PROB_GZALLOC */
+#endif
 	offs = (elem & PAGE_MASK) - zone_elem_inner_offs(zone);
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	if (from_zone_map(elem, 1)) {
+#else
 	if (from_zone_map(addr, 1)) {
+#endif
 		struct zone_page_metadata *meta;
 
 		meta = zone_meta_from_addr(elem);

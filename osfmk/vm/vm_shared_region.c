@@ -849,6 +849,12 @@ vm_shared_region_create(
 		goto done;
 	}
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* Lab bring-up: the 16 KiB-signed iOS cache runs on 4 KiB VM pages. */
+	vm_map_cs_enforcement_set(sub_map, false);
+	vm_map_cs_enforcement_set(config_map, false);
+#else
 	/* shared regions should always enforce code-signing */
 	vm_map_cs_enforcement_set(sub_map, true);
 	assert(vm_map_cs_enforcement(sub_map));
@@ -856,6 +862,16 @@ vm_shared_region_create(
 	vm_map_cs_enforcement_set(config_map, true);
 	assert(vm_map_cs_enforcement(config_map));
 	assert(pmap_get_vm_map_cs_enforced(vm_map_pmap(config_map)));
+#endif
+#else
+	/* shared regions should always enforce code-signing */
+	vm_map_cs_enforcement_set(sub_map, true);
+	assert(vm_map_cs_enforcement(sub_map));
+	assert(pmap_get_vm_map_cs_enforced(vm_map_pmap(sub_map)));
+	vm_map_cs_enforcement_set(config_map, true);
+	assert(vm_map_cs_enforcement(config_map));
+	assert(pmap_get_vm_map_cs_enforced(vm_map_pmap(config_map)));
+#endif
 
 	assert(!sub_map->disable_vmentry_reuse);
 	sub_map->is_nested_map = TRUE;
@@ -3302,10 +3318,17 @@ vm_shared_region_slide_page_v3(
 
 		bool isBind = (value & (1ULL << 62)) != 0;
 		if (isBind) {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if CONFIG_SPTM && __has_feature(ptrauth_calls)
+			pmap_batch_sign_user_ptr(NULL, NULL, 0, 0, 0);
+			assert(preemption_enabled());
+#endif /* CONFIG_SPTM && __has_feature(ptrauth_calls) */
+#else
 #if CONFIG_SPTM
 			pmap_batch_sign_user_ptr(NULL, NULL, 0, 0, 0);
 			assert(preemption_enabled());
 #endif /* CONFIG_SPTM */
+#endif
 			return KERN_FAILURE;
 		}
 
@@ -3323,6 +3346,34 @@ vm_shared_region_slide_page_v3(
 			const uint64_t value_add = s_info->value_add;
 			value += value_add;
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if __has_feature(ptrauth_calls)
+			uint64_t discriminator = diversity_data;
+			if (hasAddressDiversity) {
+				// First calculate a new discriminator using the address of where we are trying to store the value
+				uintptr_t pageOffset = rebaseLocation - page_content;
+				discriminator = __builtin_ptrauth_blend_discriminator((void*)(((uintptr_t)uservaddr) + pageOffset), discriminator);
+			}
+
+			if (jop_key != 0 && si->si_ptrauth && !arm_user_jop_disabled()) {
+#if CONFIG_SPTM
+				pmap_batch_sign_user_ptr(rebaseLocation, (void *)value, key, discriminator, jop_key);
+#else /* CONFIG_SPTM */
+				/*
+				 * these pointers are used in user mode. disable the kernel key diversification
+				 * so we can sign them for use in user mode.
+				 */
+				value = (uintptr_t)pmap_sign_user_ptr((void *)value, key, discriminator, jop_key);
+				memcpy(rebaseLocation, &value, sizeof(value));
+#endif /* CONFIG_SPTM */
+			} else {
+				memcpy(rebaseLocation, &value, sizeof(value));
+			}
+#else /* __has_feature(ptrauth_calls) */
+			/* no pointer authentication: store the plain rebased pointer */
+			memcpy(rebaseLocation, &value, sizeof(value));
+#endif /* __has_feature(ptrauth_calls) */
+#else
 #if __has_feature(ptrauth_calls)
 			uint64_t discriminator = diversity_data;
 			if (hasAddressDiversity) {
@@ -3346,6 +3397,7 @@ vm_shared_region_slide_page_v3(
 				memcpy(rebaseLocation, &value, sizeof(value));
 			}
 #endif /* __has_feature(ptrauth_calls) */
+#endif
 		} else {
 			// The new value for a rebase is the low 51-bits of the threaded value plus the slide.
 			// Regular pointer which needs to fit in 51-bits of value.
@@ -3359,11 +3411,19 @@ vm_shared_region_slide_page_v3(
 		}
 	} while (delta != 0);
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if CONFIG_SPTM && __has_feature(ptrauth_calls)
+	/* Sign the leftovers if there's any. */
+	pmap_batch_sign_user_ptr(NULL, NULL, 0, 0, 0);
+	assert(preemption_enabled());
+#endif /* CONFIG_SPTM && __has_feature(ptrauth_calls) */
+#else
 #if CONFIG_SPTM
 	/* Sign the leftovers if there's any. */
 	pmap_batch_sign_user_ptr(NULL, NULL, 0, 0, 0);
 	assert(preemption_enabled());
 #endif /* CONFIG_SPTM */
+#endif
 
 	return KERN_SUCCESS;
 }
@@ -3542,6 +3602,34 @@ vm_shared_region_slide_page_v5(
 		// The new value for a rebase is the low 34-bits of the threaded value plus the base plus slide.
 		value = (value & 0x3FFFFFFFFULL) + value_add + slide_amount;
 		if (isAuthenticated) {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if __has_feature(ptrauth_calls)
+			uint64_t discriminator = diversity;
+			if (addrDiv) {
+				// First calculate a new discriminator using the address of where we are trying to store the value
+				uintptr_t pageOffset = rebaseLocation - page_content;
+				discriminator = __builtin_ptrauth_blend_discriminator((void*)(((uintptr_t)uservaddr) + pageOffset), discriminator);
+			}
+
+			if (jop_key != 0 && si->si_ptrauth && !arm_user_jop_disabled()) {
+#if CONFIG_SPTM
+				pmap_batch_sign_user_ptr(rebaseLocation, (void *)value, key, discriminator, jop_key);
+#else /* CONFIG_SPTM */
+				/*
+				 * these pointers are used in user mode. disable the kernel key diversification
+				 * so we can sign them for use in user mode.
+				 */
+				value = (uintptr_t)pmap_sign_user_ptr((void *)value, key, discriminator, jop_key);
+				memcpy(rebaseLocation, &value, sizeof(value));
+#endif /* CONFIG_SPTM */
+			} else {
+				memcpy(rebaseLocation, &value, sizeof(value));
+			}
+#else /* __has_feature(ptrauth_calls) */
+			/* no pointer authentication: store the plain rebased pointer */
+			memcpy(rebaseLocation, &value, sizeof(value));
+#endif /* __has_feature(ptrauth_calls) */
+#else
 #if __has_feature(ptrauth_calls)
 			uint64_t discriminator = diversity;
 			if (addrDiv) {
@@ -3565,6 +3653,7 @@ vm_shared_region_slide_page_v5(
 				memcpy(rebaseLocation, &value, sizeof(value));
 			}
 #endif /* __has_feature(ptrauth_calls) */
+#endif
 		} else {
 			// the value already has the correct low bits, so just add in the high8 if it exists
 			value += high8;
@@ -3572,11 +3661,19 @@ vm_shared_region_slide_page_v5(
 		}
 	} while (delta != 0);
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if CONFIG_SPTM && __has_feature(ptrauth_calls)
+	/* Sign the leftovers if there's any. */
+	pmap_batch_sign_user_ptr(NULL, NULL, 0, 0, 0);
+	assert(preemption_enabled());
+#endif /* CONFIG_SPTM && __has_feature(ptrauth_calls) */
+#else
 #if CONFIG_SPTM
 	/* Sign the leftovers if there's any. */
 	pmap_batch_sign_user_ptr(NULL, NULL, 0, 0, 0);
 	assert(preemption_enabled());
 #endif /* CONFIG_SPTM */
+#endif
 
 	return KERN_SUCCESS;
 }

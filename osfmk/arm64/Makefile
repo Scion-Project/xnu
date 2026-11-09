@@ -53,6 +53,7 @@ EXPORT_MD_LIST = \
 	machine_remote_time.h \
 	monotonic.h \
 	proc_reg.h \
+	sweet_early.h \
 	asm.h \
 	speculation.h \
 	static_if.h \

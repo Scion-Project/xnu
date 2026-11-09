@@ -8662,6 +8662,13 @@ SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_MACH_PORTS(task_t task, uint32_t
 	 * Only kernel_task and launchd may be allowed to
 	 * have really large ipc space.
 	 */
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	extern uint32_t sweet_speed_flags(void);
+	if (sweet_speed_flags() & 32) {
+		printf("SWEET RLIMIT: %s[%d] too many mach_ports: %u (soft %u hard %u)\n", procname, pid,
+		    (unsigned)current_size, (unsigned)soft_limit, (unsigned)hard_limit);
+	}
+#endif
 	if (pid == 0 || pid == 1) {
 		return;
 	}
@@ -8719,11 +8726,27 @@ SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_KQWORKLOOPS(task_t task, int cur
 {
 	int pid = 0;
 	char *procname = (char *) "unknown";
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
 #ifdef MACH_BSD
 	pid = proc_selfpid();
 	if (get_bsdtask_info(task) != NULL) {
 		procname = proc_name_address(get_bsdtask_info(task));
 	}
+#endif
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	extern uint32_t sweet_speed_flags(void);
+	if (sweet_speed_flags() & 32) {
+		printf("SWEET RLIMIT: %s[%d] too many kqworkloops: %u (soft %u hard %u)\n", procname, pid,
+		    (unsigned)current_size, (unsigned)soft_limit, (unsigned)hard_limit);
+	}
+#endif
+#else
+#ifdef MACH_BSD
+	pid = proc_selfpid();
+	if (get_bsdtask_info(task) != NULL) {
+		procname = proc_name_address(get_bsdtask_info(task));
+	}
+#endif
 #endif
 	if (pid == 0 || pid == 1) {
 		return;
@@ -8787,6 +8810,13 @@ SENDING_NOTIFICATION__THIS_PROCESS_HAS_TOO_MANY_FILE_DESCRIPTORS(task_t task, in
 	 * Only kernel_task and launchd may be allowed to
 	 * have really large ipc space.
 	 */
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	extern uint32_t sweet_speed_flags(void);
+	if (sweet_speed_flags() & 32) {
+		printf("SWEET RLIMIT: %s[%d] too many file_descriptors: %u (soft %u hard %u)\n", procname, pid,
+		    (unsigned)current_size, (unsigned)soft_limit, (unsigned)hard_limit);
+	}
+#endif
 	if (pid == 0 || pid == 1) {
 		return;
 	}

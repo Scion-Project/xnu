@@ -389,7 +389,38 @@ _get_commpage_text_priv_address(void)
 }
 
 #if defined(__arm64__)
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#include <pexpert/arm64/board_config.h>
+#if defined(ARM64_BOARD_CONFIG_STARLTE) && !defined(STARLTE)
+#error "STARLTE board header not seen: the M3 feature mask would be skipped"
+#endif
+#if defined(STARLTE)
+/*
+ * The S9 boots on a Cortex-A55 (ARMv8.2), but its Mongoose M3 cores are
+ * ARMv8.0: no LSE atomics, RDM, DotProd, FP16, LRCPC, DPB, ... Userland may
+ * run on either, so it is told only what both have: each 4-bit ID field is
+ * the smaller of the two. The M3 values are what Linux reports on the phone
+ * (CPU features: SANITY CHECK lines for CPU4..7).
+ */
+#define STARLTE_M3_ISAR0        0x0000000000011120ULL
+#define STARLTE_M3_ISAR1        0x0000000000000000ULL
+#define STARLTE_M3_MMFR2        0x0000000000000000ULL
+#define STARLTE_M3_PFR0         0x0000000000002222ULL
 
+static uint64_t
+starlte_common_id(uint64_t boot, uint64_t m3)
+{
+	uint64_t common = 0;
+	for (unsigned int s = 0; s < 64; s += 4) {
+		uint64_t a = (boot >> s) & 0xf, b = (m3 >> s) & 0xf;
+		common |= (a < b ? a : b) << s;
+	}
+	return common;
+}
+#endif
+#else
+
+#endif
 
 /**
  * Initializes all commpage entries and sysctls for EL0 visible features in ID_AA64ISAR0_EL1
@@ -399,6 +430,9 @@ commpage_init_arm_optional_features_isar0(uint64_t *commpage_bits)
 {
 	uint64_t bits = 0;
 	uint64_t isar0 = __builtin_arm_rsr64("ID_AA64ISAR0_EL1");
+#if defined(STARLTE)
+	isar0 = starlte_common_id(isar0, STARLTE_M3_ISAR0);
+#endif
 
 	if ((isar0 & ID_AA64ISAR0_EL1_TS_MASK) >= ID_AA64ISAR0_EL1_TS_FLAGM_EN) {
 		gARM_FEAT_FlagM = 1;
@@ -462,6 +496,9 @@ commpage_init_arm_optional_features_isar1(uint64_t *commpage_bits)
 {
 	uint64_t bits = 0;
 	uint64_t isar1 = __builtin_arm_rsr64("ID_AA64ISAR1_EL1");
+#if defined(STARLTE)
+	isar1 = starlte_common_id(isar1, STARLTE_M3_ISAR1);
+#endif
 	uint64_t sctlr = __builtin_arm_rsr64("SCTLR_EL1");
 
 	if ((isar1 & ID_AA64ISAR1_EL1_SPECRES_MASK) >= ID_AA64ISAR1_EL1_SPECRES_EN &&
@@ -583,6 +620,9 @@ commpage_init_arm_optional_features_mmfr2(uint64_t *commpage_bits)
 {
 	uint64_t bits = 0;
 	uint64_t mmfr2 = __builtin_arm_rsr64("ID_AA64MMFR2_EL1");
+#if defined(STARLTE)
+	mmfr2 = starlte_common_id(mmfr2, STARLTE_M3_MMFR2);
+#endif
 
 	if ((mmfr2 & ID_AA64MMFR2_EL1_AT_MASK) >= ID_AA64MMFR2_EL1_AT_LSE2_EN) {
 		gARM_FEAT_LSE2 = 1;
@@ -600,6 +640,9 @@ commpage_init_arm_optional_features_pfr0(uint64_t *commpage_bits)
 {
 	uint64_t bits = 0;
 	uint64_t pfr0 = __builtin_arm_rsr64("ID_AA64PFR0_EL1");
+#if defined(STARLTE)
+	pfr0 = starlte_common_id(pfr0, STARLTE_M3_PFR0);
+#endif
 
 	if ((pfr0 & ID_AA64PFR0_EL1_CSV3_MASK) >= ID_AA64PFR0_EL1_CSV3_EN) {
 		gARM_FEAT_CSV3 = 1;

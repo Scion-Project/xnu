@@ -231,10 +231,18 @@ ifeq ($(origin CXX),default)
 	export CXX := $(shell $(XCRUN) -sdk $(SDKROOT) -find clang++)
 endif
 ifeq ($(origin MIG),undefined)
+ifneq ($(FAKEROOT_DIR),)
+	export MIG := $(shell find $(FAKEROOT_DIR) -name "mig")
+else
 	export MIG := $(shell $(XCRUN) -sdk $(SDKROOT) -find mig)
 endif
+endif
 ifeq ($(origin MIGCOM),undefined)
+ifneq ($(FAKEROOT_DIR),)
+	export MIGCOM := $(shell find $(FAKEROOT_DIR) -name "migcom")
+else
 	export MIGCOM := $(shell $(XCRUN) -sdk $(SDKROOT) -find migcom)
+endif
 endif
 ifeq ($(origin MIGCC),undefined)
 	export MIGCC := $(CC)

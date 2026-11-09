@@ -33,7 +33,9 @@ PRIVATE_KERNELFILES = \
 	H15.h \
 	H16.h \
 	H17.h \
-	VMAPPLE.h
+	VMAPPLE.h \
+	SWEET.h \
+	A5XELTE.h
 
 
 # Headers installed into System.framework/PrivateHeaders (userspace internal SDK only).

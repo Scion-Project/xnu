@@ -155,6 +155,114 @@
  * Cache configuration
  */
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined (APPLETYPHOON)
+
+/* I-Cache */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache */
+#define MMU_CLINE   6                      /* cache line size as 1<<MMU_CLINE (64) */
+
+#elif defined (APPLETWISTER)
+
+/* I-Cache */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLEHURRICANE)
+
+/* I-Cache */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLEMONSOON)
+
+/* I-Cache, 96KB for Monsoon, 48KB for Mistral, 6-way. */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache, 64KB for Monsoon, 32KB for Mistral, 4-way. */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLEVORTEX)
+
+/* I-Cache, 128KB 8-way for Vortex, 48KB 6-way for Tempest. */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache, 128KB 8-way for Vortex, 32KB 4-way for Tempest. */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLELIGHTNING)
+
+/* I-Cache, 192KB for Lightning, 96KB for Thunder, 6-way. */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache, 128KB for Lightning, 8-way. 48KB for Thunder, 6-way. */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLEFIRESTORM)
+
+/* I-Cache, 256KB for Firestorm, 128KB for Icestorm, 6-way. */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache, 160KB for Firestorm, 8-way. 64KB for Icestorm, 6-way. */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLEAVALANCHE)
+
+/* I-Cache, 192KB for Avalanche, 128KB for Blizzard, 6-way. */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache, 128KB for Avalanche, 8-way. 64KB for Blizzard, 8-way. */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLEEVEREST)
+
+/* I-Cache, 192KB for Everest, 128KB for SawTooth, 6-way. */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache, 128KB for Everest, 8-way. 64KB for SawTooth, 8-way. */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLEH16)
+
+/* I-Cache, 192KB for AppleH16 PCore, 128KB for ECore, 6-way. */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache, 128KB for AppleH16 PCore, 8-way. 64KB for ECore, 8-way. */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
+#elif defined (APPLEACC8)
+
+/* I-Cache, 192KB for Acc8 PCore, 128KB for ECore, 6-way. */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache, 128KB for Acc8 PCore, 8-way. 64KB for ECore, 8-way. */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+#elif defined (SWEET) /* Qualcomm Kryo 470: Cortex-A76 + Cortex-A55 */
+
+/* I-Cache. */
+#define MMU_I_CLINE 6
+
+/* D-Cache. */
+#define MMU_CLINE   6
+
+#elif defined (VMAPPLE)
+
+/* I-Cache. */
+#define MMU_I_CLINE 6
+
+/* D-Cache. */
+#define MMU_CLINE   6
+
+#else
+#error processor not supported
+#endif
+#else
 #if defined (APPLETYPHOON)
 
 /* I-Cache */
@@ -253,6 +361,7 @@
 
 #else
 #error processor not supported
+#endif
 #endif
 
 #define MAX_L2_CLINE_BYTES (1 << MAX_L2_CLINE)
@@ -751,12 +860,30 @@
 
 #define SCTLR_OTHER            0
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/* Cortex-A55 has PAN but this port does not manage it: keep it off. */
+#define SCTLR_STARLTE_SPAN      SCTLR_PAN_UNCHANGED
+#else
+#define SCTLR_STARLTE_SPAN      0
+#endif
+
+#endif
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#define SCTLR_EL1_REQUIRED \
+	(SCTLR_STARLTE_SPAN | SCTLR_RESERVED | SCTLR_UCI_ENABLED | SCTLR_nTWE_WFE_ENABLED | SCTLR_DZE_ENABLED | \
+	 SCTLR_I_ENABLED | SCTLR_SED_DISABLED | SCTLR_CP15BEN_ENABLED | SCTLR_BT_DEFAULT | \
+	 SCTLR_SA0_ENABLED | SCTLR_SA_ENABLED | SCTLR_C_ENABLED | SCTLR_M_ENABLED |        \
+	 SCTLR_EPAN_DEFAULT | SCTLR_EIS_DEFAULT | SCTLR_EOS_DEFAULT | SCTLR_DSSBS_DEFAULT | \
+	 SCTLR_PAC_KEYS_DEFAULT | SCTLR_TP2_DEFAULT | SCTLR_OTHER)
+#else
 #define SCTLR_EL1_REQUIRED \
 	(SCTLR_RESERVED | SCTLR_UCI_ENABLED | SCTLR_nTWE_WFE_ENABLED | SCTLR_DZE_ENABLED | \
 	 SCTLR_I_ENABLED | SCTLR_SED_DISABLED | SCTLR_CP15BEN_ENABLED | SCTLR_BT_DEFAULT | \
 	 SCTLR_SA0_ENABLED | SCTLR_SA_ENABLED | SCTLR_C_ENABLED | SCTLR_M_ENABLED |        \
 	 SCTLR_EPAN_DEFAULT | SCTLR_EIS_DEFAULT | SCTLR_EOS_DEFAULT | SCTLR_DSSBS_DEFAULT | \
 	 SCTLR_PAC_KEYS_DEFAULT | SCTLR_TP2_DEFAULT | SCTLR_OTHER)
+#endif
 
 #define SCTLR_EL1_OPTIONAL \
 	(SCTLR_EPAN_OPTIONAL)
@@ -2537,9 +2664,13 @@ typedef enum {
 	ESR_EC_SVC_64              = 0x15,
 	ESR_EC_HVC_64              = 0x16,
 	ESR_EC_MSR_TRAP            = 0x18,
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	ESR_EC_PAC_FAIL            = 0x1C,
+#else
 #if __has_feature(ptrauth_calls)
 	ESR_EC_PAC_FAIL            = 0x1C,
 #endif /* __has_feature(ptrauth_calls) */
+#endif
 #if HAS_ARM_FEAT_SME
 	ESR_EC_SME                 = 0x1D,
 #endif

@@ -246,6 +246,7 @@ ml_default_rop_pid(void)
 uint64_t
 ml_default_jop_pid(void)
 {
+#if !defined(ARM64_BOARD_CONFIG_A5XELTE) && !defined(ARM64_BOARD_CONFIG_SWEET)
 #if HAS_PARAVIRTUALIZED_PAC
 	vmapple_pac_get_default_keys();
 	return vmapple_default_jop_pid;
@@ -259,6 +260,14 @@ ml_default_jop_pid(void)
 #else
 	return 0;
 #endif /* HAS_PARAVIRTUALIZED_PAC */
+#else
+#if HAS_PARAVIRTUALIZED_PAC
+	vmapple_pac_get_default_keys();
+	return vmapple_default_jop_pid;
+#else
+	return 0;
+#endif /* HAS_PARAVIRTUALIZED_PAC */
+#endif
 }
 
 /**

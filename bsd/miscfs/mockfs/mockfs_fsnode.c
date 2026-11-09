@@ -85,7 +85,11 @@ mockfs_fsnode_create(mount_t mp, uint8_t type, mockfs_fsnode_t * fsnpp)
 		goto done;
 	}
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	*fsnpp = kalloc_type(struct mockfs_fsnode, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+#else
 	*fsnpp = kalloc_type(mockfs_fsnode_t, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+#endif
 	(*fsnpp)->size = new_size;
 	(*fsnpp)->type = type;
 	(*fsnpp)->mnt = mp;
@@ -154,7 +158,11 @@ mockfs_fsnode_destroy(mockfs_fsnode_t fsnp)
 		}
 	}
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	kfree_type(struct mockfs_fsnode, fsnp);
+#else
 	kfree_type(mockfs_fsnode_t, fsnp);
+#endif
 done:
 	return rvalue;
 }
@@ -345,7 +353,12 @@ mockfs_fsnode_vnode(mockfs_fsnode_t fsnp, vnode_t * vpp)
 				panic("mockfs_fsvnode failed to get ubc_mem_object for a new vnode");
 			}
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+			/* memdev counts in 4K pages, independent of the kernel's PAGE_SHIFT. */
+			rvalue = pager_map_to_phys_contiguous(ubc_mem_object, 0, ((uint64_t)mockfs_mnt->mockfs_memdev_base << 12), fsnp->size);
+#else
 			rvalue = pager_map_to_phys_contiguous(ubc_mem_object, 0, (mockfs_mnt->mockfs_memdev_base << PAGE_SHIFT), fsnp->size);
+#endif
 
 			if (rvalue) {
 				panic("mockfs_fsnode_vnode failed to create fictitious pages for a memory-backed device; rvalue = %d", rvalue);

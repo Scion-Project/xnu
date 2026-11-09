@@ -44,6 +44,43 @@
 #endif
 
 static crypto_random_ctx_t __zpercpu ks_rng_ctx;
+#if defined(SWEET)
+/*
+ * No corecrypto kext is loaded on SWEET yet. The kmem RNG contract permits
+ * a non-cryptographic generator and requires lock-free generation. Keep
+ * allocator RNG state per CPU; seed it from XNU's built-in early
+ * HMAC-SHA256 DRBG during single-CPU initialization.
+ *
+ * SplitMix64: Sebastiano Vigna, 2015, public-domain reference:
+ * https://prng.di.unimi.it/splitmix64.c
+ * This is private to kmem; it does not register or replace crypto services.
+ */
+struct sweet_kmem_rng {
+	uint64_t state;
+};
+
+static uint64_t
+sweet_kmem_random64(struct sweet_kmem_rng *rng)
+{
+	uint64_t value = (rng->state += 0x9e3779b97f4a7c15ULL);
+	value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+	value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+	return value ^ (value >> 31);
+}
+
+static uint64_t
+sweet_kmem_uniform(struct sweet_kmem_rng *rng, uint64_t bound)
+{
+	assert(bound != 0);
+	/* Reject the incomplete residue interval to avoid modulo bias. */
+	const uint64_t threshold = -bound % bound;
+	uint64_t value;
+	do {
+		value = sweet_kmem_random64(rng);
+	} while (value < threshold);
+	return value % bound;
+}
+#endif /* SWEET */
 #ifdef __BUILDING_XNU_LIB_UNITTEST__
 static bool vmgo_enabled = true;
 #else
@@ -709,17 +746,37 @@ vms_path_update_holes_eagerly(vms_path_t path, uint32_t pos, uint32_t mask)
 
 /*
  * This is done during EARLY_BOOT as it needs the corecrypto module to be
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+ * set up on platforms that use it for allocator randomness.
+#else
  * set up.
+#endif
  */
 __startup_func
 static void
 vm_map_store_crypto_init(void)
 {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(SWEET)
+	vm_size_t ctx_size = sizeof(struct sweet_kmem_rng);
+#else
 	vm_size_t ctx_size = crypto_random_kmem_ctx_size();
+#endif
+#else
+	vm_size_t ctx_size = crypto_random_kmem_ctx_size();
+#endif
 
 	ks_rng_ctx = zalloc_percpu_permanent(ctx_size, ZALIGN_PTR);
 	zpercpu_foreach(ctx, ks_rng_ctx) {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(SWEET)
+		((struct sweet_kmem_rng *)ctx)->state = early_random();
+#else
 		crypto_random_kmem_init(ctx);
+#endif
+#else
+		crypto_random_kmem_init(ctx);
+#endif
 	}
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, vm_map_store_crypto_init);
@@ -1115,7 +1172,15 @@ vmgo_chunk_select_random_slot(vm_guard_object_chunk_t chunk)
 		n = kmem_get_random16((uint16_t)free - 1);
 	} else {
 		disable_preemption();
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(SWEET)
+		n = sweet_kmem_uniform(zpercpu_get(ks_rng_ctx), free);
+#else
 		crypto_random_uniform(zpercpu_get(ks_rng_ctx), free, &n);
+#endif
+#else
+		crypto_random_uniform(zpercpu_get(ks_rng_ctx), free, &n);
+#endif
 		enable_preemption();
 	}
 
@@ -1716,6 +1781,16 @@ vm_guard_object_should_fallback(
 	vm_map_size_t           size,
 	vm_map_offset_t         mask)
 {
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/*
+	 * sweet: no guard objects, kernel or user. The 4 KiB-page kernel faults
+	 * user (16 KiB-page) memory one 16 KiB page from the 4 KiB-aligned fault
+	 * address; the guard-object range check then sees the fault spill into
+	 * the next slot (launchd: req 0x10217d000-0x102181000 against a slot
+	 * ending at 0x102180000) and fails it with KERN_INVALID_GUARD_OBJECT_SLOT.
+	 */
+	return true;
+#endif
 	/*
 	 * Various things that do not support or do not need guard objects:
 	 *

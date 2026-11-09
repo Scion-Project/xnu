@@ -3665,6 +3665,39 @@ csops_audittoken(__unused proc_t p, struct csops_audittoken_args *uap, __unused 
 	           uap->usersize, uap->uaudittoken);
 }
 
+
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/*
+ * No App Sandbox on SWEET macOS (sweetappsandbox=1 keeps it): a sandboxed app's libsystem_secinit
+ * issues sandbox extensions while setting up its sandbox, our Sandbox policy stand-in answers
+ * ENOENT, and the app traps in its initializer (WallpaperAgent, NotificationCenter, WindowManager,
+ * ControlCenter ..., boot 151456). Copies of the entitlements handed to user space get
+ * "com.apple.security.app-sandbox" renamed to "com.apple.security.app-sandboX" (same length, XML
+ * and DER alike), so libsecinit sees an unsandboxed app. The signature itself is not touched.
+ * Only a process asking about itself (libsecinit) gets the renamed copy: hiding the key from
+ * WindowServer's checks of its clients left it spinning before its first frame (boot 152643).
+ */
+static void
+sweet_strip_app_sandbox(uint8_t *buf, size_t len)
+{
+	static int keep = -1;
+	if (keep < 0) {
+		keep = 0;
+		PE_parse_boot_argn("sweetappsandbox", &keep, sizeof(keep));
+	}
+	static const char key[] = "com.apple.security.app-sandbox";
+	const size_t n = sizeof(key) - 1;
+	if (keep || len < n) {
+		return;
+	}
+	for (size_t i = 0; i + n <= len; i++) {
+		if (buf[i] == 'c' && memcmp(buf + i, key, n) == 0) {
+			buf[i + n - 1] = 'X';
+		}
+	}
+}
+#endif
+
 static int
 csops_copy_token(const void *start, size_t length, user_size_t usize, user_addr_t uaddr)
 {
@@ -3932,6 +3965,11 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 			goto out;
 		}
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		if (forself) {
+			sweet_strip_app_sandbox((uint8_t *)start, length);
+		}
+#endif
 		error = csops_copy_token(start, length, usize, uaddr);
 		kfree_data(start, length);
 		goto out;
@@ -3972,6 +4010,22 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 			}
 		}
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		{
+			uint8_t *copy = kalloc_data(length, Z_WAITOK);
+			if (copy == NULL) {
+				error = ENOMEM;
+				goto out;
+			}
+			memcpy(copy, start, length);
+			if (forself) {
+				sweet_strip_app_sandbox(copy, length);
+			}
+			error = csops_copy_token(copy, length, usize, uaddr);
+			kfree_data(copy, length);
+			goto out;
+		}
+#endif
 		error = csops_copy_token(start, length, usize, uaddr);
 		goto out;
 	}
@@ -6687,6 +6741,87 @@ out:
 	return error;
 }
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if !XNU_TARGET_OS_OSX || defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * SWEET and A5XELTE run the iOS userland on the macOS config: SpringBoard calls
+ * pid_hibernate when an app leaves the foreground, and nosys (SIGSYS)
+ * killed it. Without CONFIG_FREEZE this returns 0, as on iOS.
+ */
+/*
+ * Freeze the specified process (provided in args->pid), or find and freeze a PID.
+ * When a process is specified, this call is blocking, otherwise we wake up the
+ * freezer thread and do not block on a process being frozen.
+ */
+int
+pid_hibernate(struct proc *p __unused, struct pid_hibernate_args *args, int *ret)
+{
+	int     error = 0;
+	proc_t  targetproc = PROC_NULL;
+	int     pid = args->pid;
+
+	/*
+	 * TODO: Create a different interface for compressor sweeps,
+	 * gated by an entitlement: rdar://116490432
+	 */
+	if (pid == -2) {
+		error = mach_to_bsd_errno(vm_pageout_anonymous_pages());
+	}
+
+#ifndef CONFIG_FREEZE
+	if (pid != -2) {
+		os_log(OS_LOG_DEFAULT, "%s: pid %d not supported when freezer is disabled.",
+		    __func__, pid);
+		error = ENOTSUP;
+	}
+#else
+
+	/*
+	 * If a pid has been provided, we obtain the process handle and call task_for_pid_posix_check().
+	 */
+
+	if (pid >= 0) {
+		targetproc = proc_find(pid);
+
+		if (targetproc == PROC_NULL) {
+			error = ESRCH;
+			goto out;
+		}
+
+		if (!task_for_pid_posix_check(targetproc)) {
+			error = EPERM;
+			goto out;
+		}
+	}
+
+#if CONFIG_MACF
+	//Note that targetproc may be null
+	error = mac_proc_check_suspend_resume(targetproc, MAC_PROC_CHECK_HIBERNATE);
+	if (error) {
+		error = EPERM;
+		goto out;
+	}
+#endif
+
+	if (pid == -1) {
+		memorystatus_on_inactivity(targetproc);
+	} else if (pid >= 0) {
+		error = memorystatus_freeze_process_sync(targetproc);
+	}
+	/* We already handled the pid == -2 case */
+
+out:
+
+#endif /* CONFIG_FREEZE */
+
+	if (targetproc != PROC_NULL) {
+		proc_rele(targetproc);
+	}
+	*ret = error;
+	return error;
+}
+#endif /* !XNU_TARGET_OS_OSX || SWEET || A5XELTE */
+#else
 #if !XNU_TARGET_OS_OSX
 /*
  * Freeze the specified process (provided in args->pid), or find and freeze a PID.
@@ -6761,6 +6896,7 @@ out:
 	return error;
 }
 #endif /* !XNU_TARGET_OS_OSX */
+#endif
 
 #if SOCKETS
 

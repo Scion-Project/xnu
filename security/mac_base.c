@@ -250,11 +250,32 @@ static LCK_MTX_DECLARE(mac_policy_mtx, &mac_lck_grp);
 
 static int mac_policy_busy;
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+/*
+ * Starbite boards: the built-in AMFI/Sandbox/Quarantine stand-ins
+ * (bsd/kern/sweet_amfi.c) register after machine_lockdown(), when an
+ * iOS-target kernel's SECURITY_READ_ONLY_LATE policy list is already
+ * read-only. Keep the macOS-style kalloc'ed, growable list on those boards.
+ */
+#if XNU_TARGET_OS_OSX || defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#define MAC_POLICY_LIST_DYNAMIC 1
+#else
+#define MAC_POLICY_LIST_DYNAMIC 0
+#endif
+
+#if !MAC_POLICY_LIST_DYNAMIC
+SECURITY_READ_ONLY_LATE(mac_policy_list_t) mac_policy_list;
+SECURITY_READ_ONLY_LATE(static struct mac_policy_list_element) mac_policy_static_entries[MAC_POLICY_LIST_CHUNKSIZE];
+#else
+mac_policy_list_t mac_policy_list;
+#endif
+#else
 #if !XNU_TARGET_OS_OSX
 SECURITY_READ_ONLY_LATE(mac_policy_list_t) mac_policy_list;
 SECURITY_READ_ONLY_LATE(static struct mac_policy_list_element) mac_policy_static_entries[MAC_POLICY_LIST_CHUNKSIZE];
 #else
 mac_policy_list_t mac_policy_list;
+#endif
 #endif
 
 /*
@@ -340,7 +361,7 @@ mac_policy_init(void)
 	mac_policy_list.freehint = 0;
 	mac_policy_list.chunks = 1;
 
-#if !XNU_TARGET_OS_OSX
+#if (defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)) ? (!MAC_POLICY_LIST_DYNAMIC) : (!XNU_TARGET_OS_OSX)
 	mac_policy_list.entries = mac_policy_static_entries;
 #else
 	mac_policy_list.entries = kalloc_type(struct mac_policy_list_element,
@@ -607,7 +628,7 @@ int
 mac_policy_register(struct mac_policy_conf *mpc, mac_policy_handle_t *handlep,
     void *xd)
 {
-#if XNU_TARGET_OS_OSX
+#if (defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)) ? (MAC_POLICY_LIST_DYNAMIC) : (XNU_TARGET_OS_OSX)
 	struct mac_policy_list_element *tmac_policy_list_element;
 #endif
 	int error, slot, static_entry = 0;
@@ -646,7 +667,7 @@ mac_policy_register(struct mac_policy_conf *mpc, mac_policy_handle_t *handlep,
 	}
 
 	if (mac_policy_list.numloaded >= mac_policy_list.max) {
-#if XNU_TARGET_OS_OSX
+#if (defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)) ? (MAC_POLICY_LIST_DYNAMIC) : (XNU_TARGET_OS_OSX)
 		/* allocate new policy list array, zero new chunk */
 		tmac_policy_list_element =
 		    kalloc_type(struct mac_policy_list_element,
@@ -1614,6 +1635,26 @@ __mac_syscall(proc_t p, struct __mac_syscall_args *uap, int *retv __unused)
 	}
 
 done:
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (error == ENOPOLICY) {
+		/* which MAC policy a new userland asks for that is not here (first of each name/op, 40 max) */
+		static struct { char n[16]; int c; } seen[40];
+		static int nseen;
+		int k;
+		for (k = 0; k < nseen; k++) {
+			if (seen[k].c == uap->call && strncmp(seen[k].n, target, sizeof(seen[k].n) - 1) == 0) {
+				break;
+			}
+		}
+		if (k == nseen && nseen < 40) {
+			strlcpy(seen[nseen].n, target, sizeof(seen[nseen].n));
+			seen[nseen].c = uap->call;
+			nseen++;
+			printf("STARBITE MAC: %s[%d] __mac_syscall(\"%s\", %d): no such policy\n", p->p_comm,
+			    proc_getpid(p), target, uap->call);
+		}
+	}
+#endif
 	return error;
 }
 

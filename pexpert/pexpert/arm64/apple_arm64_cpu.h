@@ -27,6 +27,11 @@
  */
 
 #pragma once
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+
+/* sweet: MPIDR_CORETYPE_* come from here; Apple SoC headers include it first, generic boards do not. */
+#include <pexpert/arm64/apple_arm64_regs.h>
+#endif
 
 #if !defined(__ASSEMBLER__)
 

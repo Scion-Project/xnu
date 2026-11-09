@@ -49,8 +49,17 @@ EXPORTS_FILES := $(foreach symbolset,$(SYMBOL_COMPONENT_LIST),$(symbolset).expor
 	$(symbolset).$(EXPORT_SOURCE_ARCH_CONFIG_LC).exports \
 	$(notdir $(wildcard $(SOURCE)/$(symbolset).$(EXPORT_SOURCE_ARCH_CONFIG_LC).$(PLATFORM).exports))) \
 	Unused.exports
+# The generic ARMv8 boards (SWEET A5XELTE HEROLTE STARLTE) export what they define: Private.generic.exports and
+# Private.arm64.generic.exports are Private.exports and Private.arm64.exports without the symbols of Apple's closed
+# support library (IOMMU, DART, UAT, ...) that these boards do not have.
+ifneq ($(filter SWEET A5XELTE HEROLTE STARLTE,$(CURRENT_MACHINE_CONFIG)),)
+EXPORTS_FILES := $(patsubst Private.exports,Private.generic.exports,$(patsubst Private.arm64.exports,Private.arm64.generic.exports,$(EXPORTS_FILES)))
+endif
+# sweet: the generic boards do not link Apple's closed libTightbeam.
+ifeq ($(filter SWEET A5XELTE HEROLTE STARLTE,$(CURRENT_MACHINE_CONFIG)),)
 EXPORTS_FILES += $(TIGHTBEAM_EXPORTS)
 Private_OTHER_EXPORTS += $(TIGHTBEAM_EXPORTS)
+endif
 
 
 Kasan_EXPORTS := $(SRCROOT)/config/Kasan_disabled.exports

@@ -38,6 +38,11 @@
 #include <sys/malloc.h>
 #include <sys/mount_internal.h>
 #include <sys/vnode_internal.h>
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#include <sys/buf.h>
+#include <mach-o/loader.h>
+#include <mach-o/fat.h>
+#endif
 
 static LCK_GRP_DECLARE(mockfs_mtx_grp, "mockfs-mutex");
 
@@ -61,6 +66,45 @@ int mockfs_init(__unused struct vfsconf * vfsc);
  *
  * Returns 0 on success, or an error.
  */
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+/*
+ * mockfs_check_macho:
+ *   mockfs serves the whole root device as one executable, so it would claim
+ *   any device. Accept only a Mach-O (thin or fat) image, so that a device
+ *   holding a real filesystem is left to the next filesystem in mountroot.
+ */
+static int
+mockfs_check_macho(vnode_t rvp)
+{
+	buf_t bp = NULL;
+	uint32_t magic = 0;
+	int error;
+
+	error = (int)buf_meta_bread(rvp, 0, DEV_BSIZE, NOCRED, &bp);
+	if (!error) {
+		memcpy(&magic, (const void *)buf_dataptr(bp), sizeof(magic));
+		switch (magic) {
+		case MH_MAGIC:
+		case MH_CIGAM:
+		case MH_MAGIC_64:
+		case MH_CIGAM_64:
+		case FAT_MAGIC:
+		case FAT_CIGAM:
+			break;
+		default:
+			error = EINVAL;
+			break;
+		}
+	}
+	if (bp) {
+		/* Do not leave a DEV_BSIZE block cached for the next filesystem's reads. */
+		buf_markinvalid(bp);
+		buf_brelse(bp);
+	}
+	return error;
+}
+
+#endif
 int
 mockfs_mountroot(mount_t mp, vnode_t rvp, __unused vfs_context_t ctx)
 {
@@ -72,9 +116,19 @@ mockfs_mountroot(mount_t mp, vnode_t rvp, __unused vfs_context_t ctx)
 	dk_memdev_info_t memdev_info;
 
 	/*
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	 * Validate that the device at least LOOKS like a mach-o (has a sane header); this prevents us from
+	 *   claiming devices that hold real filesystems, and from causing EBADMACHO panics further along the boot path.
+#else
 	 * TODO: Validate that the device at least LOOKS like a mach-o (has a sane header); this would prevent us
 	 *   from causing EBADMACHO panics further along the boot path.
+#endif
 	 */
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	if ((rvalue = mockfs_check_macho(rvp))) {
+		return rvalue;
+	}
+#endif
 
 	/*
 	 * There are no M_MOCKFS* definitions at the moment, just use M_TEMP.
@@ -102,7 +156,16 @@ mockfs_mountroot(mount_t mp, vnode_t rvp, __unused vfs_context_t ctx)
 		 * For the moment, we won't try to optimize when mi_phys is true.
 		 */
 		if (!mockfs_mount_data->mockfs_physical_memory) {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+			/*
+			 * Only a physical memory device has an address the pager can map
+			 * directly; a virtual one (IOKit's RAMDisk) goes through normal
+			 * device I/O. mi_base is a physical page number only when mi_phys.
+			 */
+			mockfs_mount_data->mockfs_memory_backed = memdev_info.mi_mdev && memdev_info.mi_phys;
+#else
 			mockfs_mount_data->mockfs_memory_backed = memdev_info.mi_mdev;
+#endif
 			mockfs_mount_data->mockfs_physical_memory = memdev_info.mi_phys;
 			mockfs_mount_data->mockfs_memdev_base = memdev_info.mi_base;
 			mockfs_mount_data->mockfs_memdev_size = memdev_info.mi_size;

@@ -64,6 +64,27 @@
 #include <ptrauth.h>
 #include <arm/misc_protos.h>
 #endif /* defined(HAS_APPLE_PAC) */
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+
+/*
+ * sweet (iOS 26 on the S9): no PAC, and a 4 KiB-page kernel under 16 KiB user
+ * maps. dyld's chained fixups come in 16 KiB pages (mwli_page_size 0x4000), so
+ * the fixup routines work in DYLD_FIXUP_PAGE_SIZE units: the pager assembles the
+ * whole 16 KiB block around each 4 KiB page it fills (sweet_fixup_subpage), and
+ * the arm64e formats are applied without signing (pointers stay plain).
+ */
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+#define SWEET_DYLD              1
+#include <ptrauth.h>
+#define DYLD_FIXUP_PAGE_SIZE    0x4000ULL
+#define DYLD_FIXUP_PAGE_SHIFT   14
+#else
+#define SWEET_DYLD              0
+#define DYLD_FIXUP_PAGE_SIZE    PAGE_SIZE
+#define DYLD_FIXUP_PAGE_SHIFT   PAGE_SHIFT
+#endif
+#define DYLD_FIXUP_PAGE_MASK    (DYLD_FIXUP_PAGE_SIZE - 1)
+#endif
 
 
 /* For speculation macros */
@@ -147,10 +168,19 @@ const struct memory_object_pager_ops dyld_pager_ops = {
 static inline bool
 _delta_ptr_within_page_nospec(uint64_t ** __nonnull ptr, uint64_t deltaByteCount, bool *crossing_page, uintptr_t userVA)
 {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	uintptr_t old_page = (uintptr_t)*ptr >> DYLD_FIXUP_PAGE_SHIFT;
+	uintptr_t new_page = ((uintptr_t)*ptr + deltaByteCount) >> DYLD_FIXUP_PAGE_SHIFT;
+#else
 	uintptr_t old_page = (uintptr_t)*ptr >> PAGE_SHIFT;
 	uintptr_t new_page = ((uintptr_t)*ptr + deltaByteCount) >> PAGE_SHIFT;
+#endif
 	uint64_t  nospec_delta = deltaByteCount;
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	uintptr_t page_offset = (uintptr_t)*ptr & DYLD_FIXUP_PAGE_MASK;
+#else
 	uintptr_t page_offset = (uintptr_t)*ptr & PAGE_MASK;
+#endif
 #if __arm64__
 	bool      nospec_delta_valid = false;
 	SPECULATION_GUARD_ZEROING_XXX(
@@ -186,9 +216,15 @@ _delta_ptr_within_page_nospec(uint64_t ** __nonnull ptr, uint64_t deltaByteCount
 static inline bool
 _delta_ptr_within_page32_nospec(uint32_t ** __nonnull ptr, uint32_t deltaByteCount, bool *crossing_page, uintptr_t userVA)
 {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	uintptr_t old_page = (uintptr_t)*ptr >> DYLD_FIXUP_PAGE_SHIFT;
+	uintptr_t new_page = ((uintptr_t)*ptr + deltaByteCount) >> DYLD_FIXUP_PAGE_SHIFT;
+	uintptr_t page_offset = (uintptr_t)*ptr & DYLD_FIXUP_PAGE_MASK;
+#else
 	uintptr_t old_page = (uintptr_t)*ptr >> PAGE_SHIFT;
 	uintptr_t new_page = ((uintptr_t)*ptr + deltaByteCount) >> PAGE_SHIFT;
 	uintptr_t page_offset = (uintptr_t)*ptr & PAGE_MASK;
+#endif
 	uint64_t  nospec_delta = deltaByteCount;
 #if __arm64__
 	bool      nospec_delta_valid = false;
@@ -372,7 +408,11 @@ fixupPage64(
 	struct mwl_info_hdr                   *hdr = (struct mwl_info_hdr *)link_info;
 	uint64_t                              *bindsArray  = (uint64_t *)((uintptr_t)hdr + hdr->mwli_binds_offset);
 	uint16_t                              firstStartOffset = segInfo->page_start[pageIndex];
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	vm_offset_t                           end_contents = contents + DYLD_FIXUP_PAGE_SIZE;
+#else
 	vm_offset_t                           end_contents = contents + PAGE_SIZE;
+#endif
 	//  For DYLD_CHAINED_PTR_64 (arm64 and x86_64) and DYLD_CHAINED_PTR_32 (arm64_32) the stride is always 4
 	uint64_t                              step_multiplier = 4; // 4-byte stride
 	/*
@@ -452,7 +492,11 @@ fixupPageChain32(
 	struct mwl_info_hdr                   *hdr = (struct mwl_info_hdr *)link_info;
 	uint32_t                              delta = 0;
 	bool                                  chain_valid = false;
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	vm_offset_t                           end_contents = contents + DYLD_FIXUP_PAGE_SIZE;
+#else
 	vm_offset_t                           end_contents = contents + PAGE_SIZE;
+#endif
 	uint32_t                              step_multiplier = 4; // always 4-bytes stride
 	do {
 		if ((uintptr_t)chain < contents || (uintptr_t)chain + sizeof(*chain) > end_contents) {
@@ -557,6 +601,272 @@ fixupPage32(
 	return KERN_SUCCESS;
 }
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(HAS_APPLE_PAC) || SWEET_DYLD
+/*
+ * Sign a pointer needed for fixups.
+ */
+static kern_return_t
+signPointer(
+	uint64_t         unsignedAddr,
+	void             *loc,
+	bool             addrDiv,
+	uint16_t         diversity,
+	ptrauth_key      key,
+	dyld_pager_t     pager,
+	uint64_t         *signedAddr)
+{
+	// don't sign NULL
+	if (unsignedAddr == 0) {
+		*signedAddr = 0;
+		return KERN_SUCCESS;
+	}
+#if !defined(HAS_APPLE_PAC)
+	/* sweet: no pointer authentication on these cores, pointers stay plain. */
+	(void)loc; (void)addrDiv; (void)diversity; (void)key; (void)pager;
+	*signedAddr = unsignedAddr;
+	return KERN_SUCCESS;
+#else
+
+	uint64_t extendedDiscriminator = diversity;
+	if (addrDiv) {
+		extendedDiscriminator = __builtin_ptrauth_blend_discriminator(loc, extendedDiscriminator);
+	}
+
+	switch (key) {
+	case ptrauth_key_asia:
+	case ptrauth_key_asda:
+		if (pager->dyld_a_key == 0 || arm_user_jop_disabled()) {
+			*signedAddr = unsignedAddr;
+		} else {
+			*signedAddr = (uintptr_t)pmap_sign_user_ptr((void *)unsignedAddr, key, extendedDiscriminator, pager->dyld_a_key);
+		}
+		break;
+
+	default:
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_INVALID_AUTH_KEY), (uintptr_t)unsignedAddr);
+		printf("%s(): Invalid ptr auth key %d\n", __func__, key);
+		if (panic_on_dyld_issue) {
+			panic("%s(): Invalid ptr auth key %d", __func__, key);
+		}
+		return KERN_FAILURE;
+	}
+	return KERN_SUCCESS;
+#endif /* !HAS_APPLE_PAC */
+}
+
+/*
+ * Apply fixups to a page used by a 64 bit process using pointer authentication.
+ */
+static kern_return_t
+fixupPageAuth64(
+	uint64_t                              userVA,
+	vm_offset_t                           contents,
+	dyld_pager_t                          pager,
+	struct dyld_chained_starts_in_segment *segInfo,
+	uint32_t                              pageIndex,
+	bool                                  offsetBased)
+{
+	void                 *link_info = pager->dyld_link_info;
+	uint32_t             link_info_size = pager->dyld_link_info_size;
+	struct mwl_info_hdr  *hdr = (struct mwl_info_hdr *)link_info;
+	uint64_t             *bindsArray = (uint64_t*)((uintptr_t)link_info + hdr->mwli_binds_offset);
+	vm_offset_t          end_contents = contents + DYLD_FIXUP_PAGE_SIZE;
+	bool                 valid_chain = false;
+	uint64_t             step_multiplier = 8; // always 8-bytes stride for arm64e pages
+
+	/*
+	 * range check against link_info, note +1 to include data we'll dereference
+	 */
+	if ((uintptr_t)&segInfo->page_start[pageIndex + 1] > (uintptr_t)link_info + link_info_size) {
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_PAGE_START_OUT_OF_RANGE), (uintptr_t)userVA);
+		printf("%s(): out of range segInfo->page_start[pageIndex]\n", __func__);
+		if (panic_on_dyld_issue) {
+			panic("%s(): out of range segInfo->page_start[pageIndex]", __func__);
+		}
+		return KERN_FAILURE;
+	}
+	uint16_t firstStartOffset = segInfo->page_start[pageIndex];
+
+	/*
+	 * All done if no fixups on the page
+	 */
+	if (firstStartOffset == DYLD_CHAINED_PTR_START_NONE) {
+		return KERN_SUCCESS;
+	}
+
+	/*
+	 * Walk the chain of offsets to fix up
+	 */
+	uint64_t *chain = (uint64_t *)(contents + firstStartOffset);
+	uint64_t targetAdjust = (offsetBased ? hdr->mwli_image_address : hdr->mwli_slide);
+	uint64_t delta = 0;
+	do {
+		if ((uintptr_t)chain < contents || (uintptr_t)chain + sizeof(*chain) > end_contents) {
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_CHAIN_OUT_OF_RANGE), (uintptr_t)userVA);
+			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx\n", __func__,
+			    (long long)chain, (long long)contents, (long long)end_contents);
+			if (panic_on_dyld_issue) {
+				panic("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
+				    (long long)chain, (long long)contents, (long long)end_contents);
+			}
+			return KERN_FAILURE;
+		}
+		uint64_t value = *chain;
+		/* delta that can be used speculatively */
+		delta = (value >> 51) & 0x7FF;
+		delta *= step_multiplier;
+		bool isAuth = (value & 0x8000000000000000ULL);
+		bool isBind = (value & 0x4000000000000000ULL);
+		if (isAuth) {
+			ptrauth_key key = (ptrauth_key)((value >> 49) & 0x3);
+			bool        addrDiv = ((value & (1ULL << 48)) != 0);
+			uint16_t    diversity = (uint16_t)((value >> 32) & 0xFFFF);
+			uintptr_t   uVA = userVA + ((uintptr_t)chain - contents);
+			if (isBind) {
+				uint32_t bindOrdinal = value & 0x00FFFFFF;
+				if (bindOrdinal >= hdr->mwli_binds_count) {
+					ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_BIND_ORDINAL), (uintptr_t)userVA);
+					printf("%s(): out of range bind ordinal %u (max %u)\n",
+					    __func__, bindOrdinal, hdr->mwli_binds_count);
+					if (panic_on_dyld_issue) {
+						panic("%s(): out of range bind ordinal %u (max %u)",
+						    __func__, bindOrdinal, hdr->mwli_binds_count);
+					}
+					return KERN_FAILURE;
+				}
+				if (signPointer(bindsArray[bindOrdinal], (void *)uVA, addrDiv, diversity, key, pager, chain) != KERN_SUCCESS) {
+					return KERN_FAILURE;
+				}
+			} else {
+				/* note: in auth rebases only have 32-bits, so target is always offset - never vmaddr */
+				uint64_t target = (value & 0xFFFFFFFF) + hdr->mwli_image_address;
+				if (signPointer(target, (void *)uVA, addrDiv, diversity, key, pager, chain) != KERN_SUCCESS) {
+					return KERN_FAILURE;
+				}
+			}
+		} else {
+			if (isBind) {
+				uint32_t bindOrdinal = value & 0x00FFFFFF;
+				if (bindOrdinal >= hdr->mwli_binds_count) {
+					ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_BIND_ORDINAL), (uintptr_t)userVA);
+					printf("%s(): out of range bind ordinal %u (max %u)\n",
+					    __func__, bindOrdinal, hdr->mwli_binds_count);
+					if (panic_on_dyld_issue) {
+						panic("%s(): out of range bind ordinal %u (max %u)",
+						    __func__, bindOrdinal, hdr->mwli_binds_count);
+					}
+					return KERN_FAILURE;
+				} else {
+					uint64_t addend19 = (value >> 32) & 0x0007FFFF;
+					if (addend19 & 0x40000) {
+						addend19 |=  0xFFFFFFFFFFFC0000ULL;
+					}
+					*chain = bindsArray[bindOrdinal] + addend19;
+				}
+			} else {
+				uint64_t target = (value & 0x7FFFFFFFFFFULL);
+				uint64_t high8  = (value << 13) & 0xFF00000000000000ULL;
+				*chain = target + targetAdjust + high8;
+			}
+		}
+		bool crossing_page = false;;
+		valid_chain = _delta_ptr_within_page_nospec(&chain, delta, &crossing_page, (uintptr_t)userVA);
+
+		if (crossing_page) {
+			return KERN_FAILURE;
+		}
+	} while (valid_chain);
+	return KERN_SUCCESS;
+}
+
+/*
+ * Apply fixups to a page used by a 64 bit process using pointer authentication.
+ */
+static kern_return_t
+fixupCachePageAuth64(
+	uint64_t                              userVA,
+	vm_offset_t                           contents,
+	dyld_pager_t                          pager,
+	struct dyld_chained_starts_in_segment *segInfo,
+	uint32_t                              pageIndex)
+{
+	void                 *link_info = pager->dyld_link_info;
+	uint32_t             link_info_size = pager->dyld_link_info_size;
+	struct mwl_info_hdr  *hdr = (struct mwl_info_hdr *)link_info;
+	vm_offset_t          end_contents = contents + DYLD_FIXUP_PAGE_SIZE;
+	bool                 valid_chain = false;
+	uint64_t             step_multiplier = 8; // always 8-bytes stride for arm64e
+
+	/*
+	 * range check against link_info, note +1 to include data we'll dereference
+	 */
+	if ((uintptr_t)&segInfo->page_start[pageIndex + 1] > (uintptr_t)link_info + link_info_size) {
+		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_PAGE_START_OUT_OF_RANGE), (uintptr_t)userVA);
+		printf("%s(): out of range segInfo->page_start[pageIndex]\n", __func__);
+		if (panic_on_dyld_issue) {
+			panic("%s(): out of range segInfo->page_start[pageIndex]", __func__);
+		}
+		return KERN_FAILURE;
+	}
+	uint16_t firstStartOffset = segInfo->page_start[pageIndex];
+
+	/*
+	 * All done if no fixups on the page
+	 */
+	if (firstStartOffset == DYLD_CHAINED_PTR_START_NONE) {
+		return KERN_SUCCESS;
+	}
+
+	/*
+	 * Walk the chain of offsets to fix up
+	 */
+	uint64_t *chain = (uint64_t *)(contents + firstStartOffset);
+	uint64_t delta = 0;
+	do {
+		if ((uintptr_t)chain < contents || (uintptr_t)chain + sizeof(*chain) > end_contents) {
+			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_DYLD_PAGER, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_DYLD_PAGER_CHAIN_OUT_OF_RANGE), (uintptr_t)userVA);
+			printf("%s(): chain 0x%llx out of range 0x%llx..0x%llx\n", __func__,
+			    (long long)chain, (long long)contents, (long long)end_contents);
+			if (panic_on_dyld_issue) {
+				panic("%s(): chain 0x%llx out of range 0x%llx..0x%llx", __func__,
+				    (long long)chain, (long long)contents, (long long)end_contents);
+			}
+			return KERN_FAILURE;
+		}
+		uint64_t value = *chain;
+		/* delta that can be used speculatively */
+		delta = (value >> 52) & 0x7FF;
+		delta *= step_multiplier;
+		bool isAuth = (value & 0x8000000000000000ULL);
+		if (isAuth) {
+			bool        addrDiv = ((value & (1ULL << 50)) != 0);
+			bool        keyIsData = ((value & (1ULL << 51)) != 0);
+			// the key is always A, and the bit tells us if its IA or ID
+			ptrauth_key key = keyIsData ? ptrauth_key_asda : ptrauth_key_asia;
+			uint16_t    diversity = (uint16_t)((value >> 34) & 0xFFFF);
+			uintptr_t   uVA = userVA + ((uintptr_t)chain - contents);
+			// target is always a 34-bit runtime offset, never a vmaddr
+			uint64_t target = (value & 0x3FFFFFFFFULL) + hdr->mwli_image_address;
+			if (signPointer(target, (void *)uVA, addrDiv, diversity, key, pager, chain) != KERN_SUCCESS) {
+				return KERN_FAILURE;
+			}
+		} else {
+			// target is always a 34-bit runtime offset, never a vmaddr
+			uint64_t target = (value & 0x3FFFFFFFFULL) + hdr->mwli_image_address;
+			uint64_t high8  = (value << 22) & 0xFF00000000000000ULL;
+			*chain = target + high8;
+		}
+		bool crossing_page = false;
+		valid_chain = _delta_ptr_within_page_nospec(&chain, delta, &crossing_page, (uintptr_t)userVA);
+		if (crossing_page) {
+			return KERN_FAILURE;
+		}
+	} while (valid_chain);
+	return KERN_SUCCESS;
+}
+#endif /* defined(HAS_APPLE_PAC) || SWEET_DYLD */
+#else
 #if defined(HAS_APPLE_PAC)
 /*
  * Sign a pointer needed for fixups.
@@ -814,6 +1124,7 @@ fixupCachePageAuth64(
 	return KERN_SUCCESS;
 }
 #endif /* defined(HAS_APPLE_PAC) */
+#endif
 
 
 /*
@@ -865,7 +1176,11 @@ fixup_page(
 		segEndAddress = segStartAddress + seg->page_count * seg->page_size;
 		if (segStartAddress <= userVA && userVA < segEndAddress) {
 			segInfo = seg;
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+			pageIndex = (uint32_t)((userVA - segStartAddress) / DYLD_FIXUP_PAGE_SIZE);
+#else
 			pageIndex = (uint32_t)(userVA - segStartAddress) / PAGE_SIZE;
+#endif
 
 			/* ensure seg->size fits in link_info_size */
 			if ((uintptr_t)seg + seg->size > (uintptr_t)link_info + link_info_size) {
@@ -922,6 +1237,20 @@ fixup_page(
 	 * Route to the appropriate fixup routine
 	 */
 	switch (hdr->mwli_pointer_format) {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(HAS_APPLE_PAC) || SWEET_DYLD
+	case DYLD_CHAINED_PTR_ARM64E:
+		fixupPageAuth64(userVA, contents, pager, segInfo, pageIndex, false);
+		break;
+	case DYLD_CHAINED_PTR_ARM64E_USERLAND:
+	case DYLD_CHAINED_PTR_ARM64E_USERLAND24:
+		fixupPageAuth64(userVA, contents, pager, segInfo, pageIndex, true);
+		break;
+	case DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE:
+		fixupCachePageAuth64(userVA, contents, pager, segInfo, pageIndex);
+		break;
+#endif /* defined(HAS_APPLE_PAC) || SWEET_DYLD */
+#else
 #if defined(HAS_APPLE_PAC)
 	case DYLD_CHAINED_PTR_ARM64E:
 		fixupPageAuth64(userVA, contents, pager, segInfo, pageIndex, false);
@@ -934,6 +1263,7 @@ fixup_page(
 		fixupCachePageAuth64(userVA, contents, pager, segInfo, pageIndex);
 		break;
 #endif /* defined(HAS_APPLE_PAC) */
+#endif
 	case DYLD_CHAINED_PTR_64:
 		fixupPage64(userVA, contents, link_info, segInfo, pageIndex, false);
 		break;
@@ -953,6 +1283,99 @@ fixup_page(
 	}
 	return KERN_SUCCESS;
 }
+
+#if SWEET_DYLD
+/*
+ * Copy one kernel page of the backing object at "off" into "buf". Fails with
+ * KERN_ALREADY_WAITING if the page is busy, so the whole request is retried.
+ */
+static kern_return_t
+sweet_dyld_read_src(vm_object_t obj, vm_object_offset_t off, void *buf,
+    struct vm_object_fault_info *fault_info)
+{
+	vm_page_t         page, top_page;
+	vm_prot_t         prot;
+	kern_return_t     error_code;
+	vm_fault_return_t vmfr;
+
+retry:
+	vm_page_grab_prime();
+	vm_object_lock(obj);
+	vm_object_paging_begin(obj);
+	error_code = 0;
+	prot = VM_PROT_READ;
+	page = VM_PAGE_NULL;
+	top_page = VM_PAGE_NULL;
+	vmfr = vm_fault_page(obj, off, VM_PROT_READ, FALSE, FALSE, &prot, &page, &top_page,
+	    NULL, &error_code, FALSE, fault_info, NULL);
+	switch (vmfr) {
+	case VM_FAULT_SUCCESS:
+		break;
+	case VM_FAULT_RETRY:
+		goto retry;
+	case VM_FAULT_MEMORY_SHORTAGE:
+		if (vm_page_wait(THREAD_UNINT)) {
+			goto retry;
+		}
+		return KERN_RESOURCE_SHORTAGE;
+	case VM_FAULT_SUCCESS_NO_VM_PAGE:
+		vm_object_paging_end(obj);
+		vm_object_unlock(obj);
+		return KERN_MEMORY_ERROR;
+	case VM_FAULT_BUSY:
+		return KERN_ALREADY_WAITING;
+	default:
+		return error_code ? error_code : KERN_MEMORY_ERROR;
+	}
+	vm_object_t page_obj = VM_PAGE_OBJECT(page);
+	bcopy((const void *)phystokv((pmap_paddr_t)VM_PAGE_GET_PHYS_PAGE(page) << PAGE_SHIFT), buf, PAGE_SIZE);
+	vm_page_wakeup_done(page_obj, page);
+	vm_object_paging_end(page_obj);
+	vm_object_unlock(page_obj);
+	if (top_page != VM_PAGE_NULL) {
+		vm_object_lock(obj);
+		VM_PAGE_FREE(top_page);
+		vm_object_paging_end(obj);
+		vm_object_unlock(obj);
+	}
+	return KERN_SUCCESS;
+}
+
+/*
+ * Fix up the 4 KiB kernel page at user address userVA (file offset file_off,
+ * original contents at src) through its whole 16 KiB fixup page, then copy the
+ * page's part of the result to dst.
+ */
+static kern_return_t
+sweet_fixup_subpage(vm_offset_t dst, vm_offset_t src, uint64_t userVA,
+    vm_object_offset_t file_off, dyld_pager_t pager, vm_object_t obj,
+    struct vm_object_fault_info *fault_info)
+{
+	uint64_t           blockVA = userVA & ~(uint64_t)DYLD_FIXUP_PAGE_MASK;
+	uint64_t           sub = userVA - blockVA;
+	vm_object_offset_t block_off = file_off - sub;
+	kern_return_t      kr = KERN_SUCCESS;
+	void               *raw = kalloc_data(2 * DYLD_FIXUP_PAGE_SIZE, Z_WAITOK | Z_NOFAIL);
+	/* aligned like a real fixup page: the chain checks compare page numbers */
+	vm_offset_t        buf = ((vm_offset_t)raw + DYLD_FIXUP_PAGE_MASK) & ~(vm_offset_t)DYLD_FIXUP_PAGE_MASK;
+
+	for (uint64_t o = 0; o < DYLD_FIXUP_PAGE_SIZE && kr == KERN_SUCCESS; o += PAGE_SIZE) {
+		if (o == sub) {
+			bcopy((const void *)src, (void *)(buf + o), PAGE_SIZE);
+		} else {
+			kr = sweet_dyld_read_src(obj, block_off + o, (void *)(buf + o), fault_info);
+		}
+	}
+	if (kr == KERN_SUCCESS) {
+		kr = fixup_page(buf, blockVA, pager);
+	}
+	if (kr == KERN_SUCCESS) {
+		bcopy((const void *)(buf + sub), (void *)dst, PAGE_SIZE);
+	}
+	kfree_data(raw, 2 * DYLD_FIXUP_PAGE_SIZE);
+	return kr;
+}
+#endif /* SWEET_DYLD */
 
 /*
  * dyld_pager_data_request()
@@ -1187,7 +1610,19 @@ retry_src_fault:
 				panic("%s(): Range not found for offset 0x%llx", __func__, (long long)cur_offset);
 			}
 			retval = KERN_FAILURE;
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if SWEET_DYLD
+		} else if (DYLD_FIXUP_PAGE_SIZE > PAGE_SIZE &&
+		    (retval = sweet_fixup_subpage(dst_vaddr, src_vaddr, userVA, offset + cur_offset,
+		    pager, src_top_object, &fault_info)) != KERN_SUCCESS) {
+			/* reported below */
+		} else if (DYLD_FIXUP_PAGE_SIZE == PAGE_SIZE && fixup_page(dst_vaddr, userVA, pager) != KERN_SUCCESS) {
+#else
 		} else if (fixup_page(dst_vaddr, userVA, pager) != KERN_SUCCESS) {
+#endif
+#else
+		} else if (fixup_page(dst_vaddr, userVA, pager) != KERN_SUCCESS) {
+#endif
 			/* KDBG / printf was done under fixup_page() */
 			retval = KERN_FAILURE;
 		}

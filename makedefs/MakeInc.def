@@ -29,7 +29,7 @@ SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
 else ifneq ($(findstring _host,$(RC_ProjectName)),)
 SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
 else
-SUPPORTED_ARM64_MACHINE_CONFIGS = T6000 T6020 T6030 T6031 T6041 T6050 T8101 T8103 T8112 T8122 T8132 T8142 VMAPPLE
+SUPPORTED_ARM64_MACHINE_CONFIGS = T6000 T6020 T6030 T6031 T6041 T6050 T8101 T8103 T8112 T8122 T8132 T8142 VMAPPLE SWEET A5XELTE HEROLTE STARLTE
 
 SPTM_ENABLED_SOCS_MacOSX = t6000 t8112 t6020 t8122 t6030 t6031 t6041 t6050 t8132 t8142
 EXCLAVES_ENABLED_SOCS_MacOSX = t8142 t6050
@@ -93,6 +93,13 @@ MACHINE_FLAGS_ARM64_T8132 = -DARM64_BOARD_CONFIG_T8132			-mcpu=apple-m4
 MACHINE_FLAGS_ARM64_T8142 = -DARM64_BOARD_CONFIG_T8142 			-mcpu=apple-m4+memtag+predres2
 
 MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a+sme2 $(if $(filter 1,$(SCION_NATIVE_PAC)),-DSCION_NATIVE_PAC=1)
+MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto
+MACHINE_FLAGS_ARM64_A5XELTE = -DARM64_BOARD_CONFIG_A5XELTE            -mcpu=cortex-a53 -march=armv8-a+crypto
+# Galaxy S7 (Exynos 8890) boots on a Cortex-A53 and reuses the A5XELTE port.
+MACHINE_FLAGS_ARM64_HEROLTE = -DARM64_BOARD_CONFIG_A5XELTE -DARM64_BOARD_CONFIG_HEROLTE -mcpu=cortex-a53 -march=armv8-a+crypto
+# Galaxy S9 (Exynos 9810) boots on a Cortex-A55 and reuses the HEROLTE port;
+# ARMv8.0 code generation also runs on the Mongoose M3 cores.
+MACHINE_FLAGS_ARM64_STARLTE = -DARM64_BOARD_CONFIG_A5XELTE -DARM64_BOARD_CONFIG_HEROLTE -DARM64_BOARD_CONFIG_STARLTE -mcpu=cortex-a53 -march=armv8-a+crypto
 
 
 #
@@ -370,7 +377,10 @@ ifeq ($(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG),)
 # Without embdedded device map, use a default arch string
 export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := $(shell echo $(CURRENT_ARCH_CONFIG) | tr A-Z a-z)
 ifneq ($(filter arm64,$(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG)),)
+# These generic ARMv8 targets do not use Apple's arm64e pointer authentication.
+ifeq ($(filter $(CURRENT_MACHINE_CONFIG),SWEET A5XELTE HEROLTE STARLTE),)
 export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := arm64e
+endif
 endif
 
 endif
@@ -446,6 +456,14 @@ ARM64_PLKSEG_ADDR  = 0xfffffe0004004000
 ARM64_LINK_ADDR    = 0xfffffe0007004000
 endif
 
+# Exynos7580 uses 4 KiB pages: TTBR1 has a 39-bit range. The macOS
+# ARM_LARGE_MEMORY link address at -2 TiB is outside that range. Keep this
+# board inside the existing compact kernel VA layout instead.
+ifneq ($(filter $(CURRENT_MACHINE_CONFIG),A5XELTE HEROLTE STARLTE),)
+ARM64_LARGE_MEMORY = 0
+ARM64_PLKSEG_ADDR  =0xfffffff004004000
+ARM64_LINK_ADDR    =0xfffffff007004000
+endif
 
 ifeq ($(ARM64_LARGE_MEMORY),1)
 	ARM64_EXTRA_BUILD_FLAGS += -DARM_LARGE_MEMORY=1
@@ -912,7 +930,12 @@ LDFLAGS_KERNEL_GEN = \
 	-Wl,-headerpad,152
 
 # LDFLAGS_KERNEL_SDK	= -L$(SDKROOT)/usr/local/lib/kernel -lfirehose_kernel
+# The generic ARMv8 boards (SWEET A5XELTE HEROLTE STARLTE) are built from a fakeroot (darwin-xnu-build's), not an SDK.
+ifneq ($(filter SWEET A5XELTE HEROLTE STARLTE,$(CURRENT_MACHINE_CONFIG)),)
+LDFLAGS_KERNEL_SDK	= -L$(FAKEROOT_DIR)/usr/local/lib/kernel -lfirehose_kernel
+else
 LDFLAGS_KERNEL_SDK	= -L$(SDKROOT)/usr/local/lib/kernel -L$(SDKROOT)/usr/local/lib/kernel/platform
+endif
 ifneq ($(KDKROOT),)
 LDFLAGS_KERNEL_SDK     += -L$(KDKROOT)/usr/local/lib/kernel/platform
 endif
@@ -1153,9 +1176,10 @@ LD_KERNEL_ARCHIVES = $(LDFLAGS_KERNEL_SDK) -lfirehose_kernel
 # Link binary support library
 # Scion: Apple's binary support library comes with a KDK, which this build does not use: the parts of the
 # machine layer it holds are compiled from this tree instead (nos_arm_asm, nos_arm_pmap in the machine's MASTER).
-# It is linked only when it is there.
+# It is linked only when it is there, and never for the generic ARMv8 boards (SWEET A5XELTE HEROLTE STARLTE: the
+# KDK has no lib<board>.os.<config>.a for them).
 ifneq ($(CURRENT_MACHINE_CONFIG),NONE)
-ifneq ($(wildcard $(KDKROOT)/System/Library/KernelSupport/lib$(CURRENT_MACHINE_CONFIG).os.$(CURRENT_KERNEL_CONFIG).a),)
+ifneq ($(if $(filter SWEET A5XELTE HEROLTE STARLTE,$(CURRENT_MACHINE_CONFIG)),,$(wildcard $(KDKROOT)/System/Library/KernelSupport/lib$(CURRENT_MACHINE_CONFIG).os.$(CURRENT_KERNEL_CONFIG).a)),)
         LDFLAGS_KERNEL_ONLY += -rdynamic -Wl,-force_load,$(KDKROOT)/System/Library/KernelSupport/lib$(CURRENT_MACHINE_CONFIG).os.$(CURRENT_KERNEL_CONFIG).a
 endif
 endif
@@ -1232,7 +1256,11 @@ INCFLAGS_IMPORT	= $(patsubst %, -I$(OBJROOT)/EXPORT_HDRS/%, $(COMPONENT_IMPORT_L
 INCFLAGS_EXTERN	= -I$(SRCROOT)/EXTERNAL_HEADERS
 INCFLAGS_GEN	= -I$(SRCROOT)/$(COMPONENT) -I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)
 INCFLAGS_LOCAL	= -I.
+ifneq ($(filter SWEET A5XELTE HEROLTE STARLTE,$(CURRENT_MACHINE_CONFIG)),)
+INCFLAGS_SDK    = -I$(FAKEROOT_DIR)/usr/local/include/kernel -I$(SDKROOT)/usr/local/include/iBoot -I$(SDKROOT)/$(KPINCDIR)/AppleFeatures
+else
 INCFLAGS_SDK    = -I$(SDKROOT)/usr/local/include/kernel -I$(SDKROOT)/usr/local/include/iBoot -I$(SDKROOT)/$(KPINCDIR)/AppleFeatures
+endif
 INCFLAGS_PLATFORM = -I$(SDKROOT)/$(KPINCDIR)/platform
 ifneq ($(KDKROOT),)
 INCFLAGS_SDK   += -I$(KDKROOT)/$(KPINCDIR) -I$(KDKROOT)/System/Library/KernelSupport

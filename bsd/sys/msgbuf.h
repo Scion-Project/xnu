@@ -65,7 +65,17 @@
 
 #include <sys/cdefs.h>
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/* STARLTE: up to 8 MiB (msgbuf=8388608), the card log region (sdlog=1) holds 64 MiB; the macOS
+ * desktop's console output overran 1 MiB in about 40 s */
+#define MAX_MSG_BSIZE   (8*1024*1024)
+#else
 #define MAX_MSG_BSIZE   (1*1024*1024)
+#endif
+#else
+#define MAX_MSG_BSIZE   (1*1024*1024)
+#endif
 struct  msgbuf {
 #define MSG_MAGIC       0x063061
 	int             msg_magic;

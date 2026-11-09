@@ -620,7 +620,11 @@ pmap_data_bootstrap(void)
 	 * needed to cover all of kernel-managed physical memory.
 	 */
 	const uint32_t num_leaf_page_tables =
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	    (uint32_t)((mem_size + ptoa(hakios_extra_ram_pages)) / ((PAGE_SIZE / sizeof(pt_entry_t)) * ARM_PGBYTES));
+#else
 	    (uint32_t)(mem_size / ((PAGE_SIZE / sizeof(pt_entry_t)) * ARM_PGBYTES));
+#endif
 
 	/**
 	 * There should be one PTD per page table (times 2 since we want twice the
@@ -635,7 +639,11 @@ pmap_data_bootstrap(void)
 	vm_size_t ptd_root_table_size = num_ptd_pages * PAGE_SIZE;
 
 	/* Number of VM pages that span all of kernel-managed memory. */
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	unsigned int npages = (unsigned int)atop(mem_size) + hakios_extra_ram_pages;   /* (HakiOS, patch 1512: and the extra RAM's) */
+#else
 	unsigned int npages = (unsigned int)atop(mem_size);
+#endif
 
 	/* The pv_head_table and pp_attr_table both have one entry per VM page. */
 	const vm_size_t pp_attr_table_size = npages * sizeof(pp_attr_t);
@@ -1234,8 +1242,15 @@ pmap_enqueue_pages(vm_page_t list)
 	vm_object_lock(pmap_object);
 
 	_vm_page_list_foreach_consume(mem, &list) {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+		/* (HakiOS, patch 1512: pa - gPhysBase, and for the extra RAM beside the window an offset after it) */
+#endif
 		const vm_object_offset_t offset =
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+		    (vm_object_offset_t) ptoa(pa_index(ptoa(VM_PAGE_GET_PHYS_PAGE(mem))));
+#else
 		    (vm_object_offset_t) ((ptoa(VM_PAGE_GET_PHYS_PAGE(mem))) - gPhysBase);
+#endif
 
 		vm_page_insert_internal(mem, pmap_object, offset,
 		    VM_KERN_MEMORY_PTE, VMPI_NONE, &delayed_acct);
@@ -1553,7 +1568,11 @@ pmap_pages_free(pmap_paddr_t pa, __assert_only unsigned size)
 		 * Remove the page from the pmap's VM object and return it back to the
 		 * VM's global free list of pages.
 		 */
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+		mem = vm_page_lookup(pmap_object, ptoa(pa_index(pa)));   /* (HakiOS, patch 1512) */
+#else
 		mem = vm_page_lookup(pmap_object, (pa - gPhysBase));
+#endif
 		assert(mem != VM_PAGE_NULL);
 		assert(VM_PAGE_WIRED(mem));
 		vm_page_lock_queues();
@@ -2626,7 +2645,11 @@ pmap_remove_pv(
 	}
 #endif /* PVH_FLAG_EXEC */
 	if (__improbable((pvh_flags & PVH_FLAG_FLUSH_NEEDED) && pvh_test_type(pvh, PVH_TYPE_NULL))) {
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+		pmap_flush_noncoherent_page(pai_to_pa(pai));   /* (HakiOS, patch 1512) */
+#else
 		pmap_flush_noncoherent_page((pmap_paddr_t)ptoa(pai) + vm_first_phys);
+#endif
 	}
 
 	*is_internal_p = is_internal;

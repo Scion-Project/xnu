@@ -5362,6 +5362,29 @@ bad:
 		}
 
 #if CONFIG_PROC_RESOURCE_LIMITS
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		/*
+		 * boot-arg sweetspeed&32 logs launchd's spawn resource limits; sweetspeed&256 drops the kqworkloop limits (their
+		 * hard-limit notification has no receiver here, so the "fatal port" kills the daemon at once from its own
+		 * context: runningboardd, lsd, SpringBoard restarts at boot; docs/ios27/NIGHT.md).
+		 */
+		extern uint32_t sweet_speed_flags(void);
+		static int sweet_lim_left = 150;
+		uint32_t sweet_sbx = sweet_speed_flags();
+		if (imgp->ip_px_sa != NULL && sweet_lim_left > 0 && (sweet_sbx & 32) != 0 &&
+		    (px_sa.psa_port_soft_limit | px_sa.psa_port_hard_limit | px_sa.psa_filedesc_soft_limit |
+		    px_sa.psa_filedesc_hard_limit | px_sa.psa_kqworkloop_soft_limit | px_sa.psa_kqworkloop_hard_limit) != 0) {
+			sweet_lim_left--;
+			printf("SWEET LIMITS: %s[%d] port %u/%u fd %u/%u kqwl %u/%u thr %u%s\n", p->p_comm, proc_getpid(p),
+			    px_sa.psa_port_soft_limit, px_sa.psa_port_hard_limit, px_sa.psa_filedesc_soft_limit,
+			    px_sa.psa_filedesc_hard_limit, px_sa.psa_kqworkloop_soft_limit, px_sa.psa_kqworkloop_hard_limit,
+			    (unsigned)px_sa.psa_thread_limit, (sweet_sbx & 256) ? " (kqwl dropped)" : "");
+		}
+		if ((sweet_sbx & 256) != 0) {
+			px_sa.psa_kqworkloop_soft_limit = 0;
+			px_sa.psa_kqworkloop_hard_limit = 0;
+		}
+#endif
 		if (imgp->ip_px_sa != NULL && (px_sa.psa_port_soft_limit > 0 || px_sa.psa_port_hard_limit > 0)) {
 			task_set_port_space_limits(new_task, (uint32_t)px_sa.psa_port_soft_limit,
 			    (uint32_t)px_sa.psa_port_hard_limit);
@@ -6724,6 +6747,88 @@ bad:
  * Note:	The argument and environment vectors are user space pointers
  *		to arrays of user space pointers.
  */
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * Starbite bring-up aid (after HakiOS's kern.exec_inject, APSL): the sysctl
+ * kern.exec_inject holds "LIBRARY NAME NAME ..." groups separated by ";";
+ * every program whose file name is one of the NAMEs is started with
+ * DYLD_INSERT_LIBRARIES=LIBRARY (several joined with ":"), because launchd
+ * drops DYLD_ variables from job descriptions. Boot-arg sweetinject= sets it
+ * at boot, with "," for the spaces: sweetinject=/path/lib.dylib,backboardd
+ */
+static char sweet_exec_inject[512];
+SYSCTL_STRING(_kern, OID_AUTO, exec_inject, CTLFLAG_RW | CTLFLAG_LOCKED, sweet_exec_inject,
+    sizeof(sweet_exec_inject), "LIBRARY NAME... [; LIBRARY NAME...]: programs started with the library inserted");
+
+__startup_func
+static void
+sweet_exec_inject_init(void)
+{
+	if (PE_parse_boot_argn("sweetinject", sweet_exec_inject, sizeof(sweet_exec_inject))) {
+		/* (no printf here: TUNABLES runs before the console's locks exist) */
+		for (char *c = sweet_exec_inject; *c != 0; c++) {
+			if (*c == ',') {
+				*c = ' ';
+			}
+		}
+	}
+}
+STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, sweet_exec_inject_init);
+
+static bool
+sweet_exec_inject_env(struct image_params *imgp, char *env, size_t size)
+{
+	const char *p = sweet_exec_inject;
+	const char *name, *path;
+	size_t namelen, used;
+	bool any = false;
+
+	if (*p == 0 || imgp->ip_strings == NULL) {
+		return false;
+	}
+	/* the program's file name: the last part of the path exec_save_path kept */
+	path = imgp->ip_strings + strlen(EXECUTABLE_KEY);
+	name = strrchr(path, '/');
+	name = name != NULL ? name + 1 : path;
+	namelen = strlen(name);
+	used = strlcpy(env, "DYLD_INSERT_LIBRARIES=", size);
+	while (*p != 0) {
+		const char *library;
+		size_t liblen;
+		bool matched = false;
+
+		while (*p == ' ' || *p == ';') {
+			p++;
+		}
+		library = p;
+		while (*p != 0 && *p != ' ' && *p != ';') {
+			p++;
+		}
+		liblen = (size_t)(p - library);
+		while (*p == ' ') {
+			const char *word = ++p;
+
+			while (*p != 0 && *p != ' ' && *p != ';') {
+				p++;
+			}
+			if ((size_t)(p - word) == namelen && namelen != 0 && strncmp(word, name, namelen) == 0) {
+				matched = true;
+			}
+		}
+		if (matched && liblen != 0 && used + 1 + liblen < size) {
+			if (any) {
+				env[used++] = ':';
+			}
+			memcpy(env + used, library, liblen);
+			used += liblen;
+			env[used] = 0;
+			any = true;
+		}
+	}
+	return any;
+}
+#endif
+
 __attribute__((noinline))
 static int
 exec_extract_strings(struct image_params *imgp)
@@ -6731,6 +6836,9 @@ exec_extract_strings(struct image_params *imgp)
 	int error = 0;
 	int     ptr_size = (imgp->ip_flags & IMGPF_WAS_64BIT_ADDR) ? 8 : 4;
 	int new_ptr_size = (imgp->ip_flags & IMGPF_IS_64BIT_ADDR) ? 8 : 4;
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	char            inject_env[512];
+#endif
 	user_addr_t     argv = imgp->ip_user_argv;
 	user_addr_t     envv = imgp->ip_user_envv;
 
@@ -6897,6 +7005,23 @@ exec_extract_strings(struct image_params *imgp)
 		imgp->ip_envc++;
 	}
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* one more variable for the programs that get a library inserted (sweet_exec_inject_env) */
+	if (sweet_exec_inject_env(imgp, inject_env, sizeof(inject_env))) {
+		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(inject_env), UIO_SYSSPACE, TRUE);
+		if (error) {
+			goto bad;
+		}
+		if (imgp->ip_argspace < new_ptr_size) {
+			error = E2BIG;
+			goto bad;
+		}
+		imgp->ip_argspace -= new_ptr_size;
+		imgp->ip_envc++;
+		printf("SWEET INJECT: %s gets %s\n", imgp->ip_strings + strlen(EXECUTABLE_KEY), inject_env);
+	}
+#endif
+
 	/* Save space for envv[] NULL terminator */
 	if (imgp->ip_argspace < new_ptr_size) {
 		error = E2BIG;
@@ -6990,7 +7115,7 @@ STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, exe_boothash_salt_generate);
 #define DYLD_FLAGS_KEY "dyld_flags="
 #define SUBSYSTEM_ROOT_PATH_KEY "subsystem_root_path="
 #define APP_BOOT_SESSION_KEY "executable_boothash="
-#if __has_feature(ptrauth_calls)
+#if (defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)) ? (__has_feature(ptrauth_calls) || defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)) : (__has_feature(ptrauth_calls))
 #define PTRAUTH_DISABLED_FLAG "ptrauth_disabled=1"
 #endif /* __has_feature(ptrauth_calls) */
 #define MAIN_TH_PORT_KEY "th_port="
@@ -7242,6 +7367,25 @@ exec_add_apple_strings(struct image_params *imgp,
 
 		imgp->ip_applec++;
 	}
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/*
+	 * sweet: pointers are never signed on this kernel (sweet_a64e.c). A program
+	 * that gets a library inserted is told so, so dyld grades arm64 slices too
+	 * (load_arm64e_keysOff) and takes the arm64 GPU libraries into arm64e
+	 * backboardd; the arm64e shared cache is used as for arm64 on macOS.
+	 */
+	{
+		char inject_env[512];
+
+		if (sweet_exec_inject_env(imgp, inject_env, sizeof(inject_env))) {
+			error = exec_add_user_string(imgp, CAST_USER_ADDR_T(PTRAUTH_DISABLED_FLAG), UIO_SYSSPACE, FALSE);
+			if (error) {
+				goto bad;
+			}
+			imgp->ip_applec++;
+		}
+	}
+#endif
 #if __has_feature(ptrauth_calls)
 	if (is_arm64e_running_as_arm64(imgp)) {
 		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(PTRAUTH_DISABLED_FLAG), UIO_SYSSPACE, FALSE);
@@ -8633,6 +8777,56 @@ process_signature(proc_t p, struct image_params *imgp)
 		}
 	}
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#if XNU_TARGET_OS_OSX
+	/* Check for platform passed in spawn attr if iOS binary is being spawned */
+	if (proc_platform(p) == PLATFORM_IOS) {
+		struct _posix_spawnattr *psa = (struct _posix_spawnattr *) imgp->ip_px_sa;
+		if (psa == NULL || psa->psa_platform == 0) {
+			boolean_t no_sandbox_entitled = FALSE;
+#if DEBUG || DEVELOPMENT
+			/*
+			 * Allow iOS binaries to spawn on internal systems
+			 * if no-sandbox entitlement is present of unentitled_ios_sim_launch
+			 * boot-arg set to true
+			 */
+			if (unentitled_ios_sim_launch) {
+				no_sandbox_entitled = TRUE;
+			} else {
+				no_sandbox_entitled = IOVnodeHasEntitlement(imgp->ip_vp,
+				    (int64_t)imgp->ip_arch_offset, "com.apple.private.security.no-sandbox");
+			}
+#endif /* DEBUG || DEVELOPMENT */
+			if (!no_sandbox_entitled) {
+				signature_failure_reason = os_reason_create(OS_REASON_EXEC,
+				    EXEC_EXIT_REASON_WRONG_PLATFORM);
+				error = EACCES;
+				goto done;
+			}
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+			/* A short line keeps the persistent console ring useful. */
+			printf("exec %s\n", p->p_name);
+#else
+			printf("Allowing spawn of iOS binary %s since it has "
+			    "com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch "
+			    "boot-arg set to true\n", p->p_name);
+#endif
+		} else if (psa->psa_platform != PLATFORM_IOS) {
+			/* Simulator binary spawned with wrong platform */
+			signature_failure_reason = os_reason_create(OS_REASON_EXEC,
+			    EXEC_EXIT_REASON_WRONG_PLATFORM);
+			error = EACCES;
+			goto done;
+		} else {
+			printf("Allowing spawn of iOS binary %s since correct platform was passed in spawn\n",
+			    p->p_name);
+		}
+	}
+#elif defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* keep the per-exec console line the macOS-target build printed above */
+	printf("exec %s\n", p->p_name);
+#endif /* XNU_TARGET_OS_OSX */
+#else
 #if XNU_TARGET_OS_OSX
 	/* Check for platform passed in spawn attr if iOS binary is being spawned */
 	if (proc_platform(p) == PLATFORM_IOS) {
@@ -8673,6 +8867,7 @@ process_signature(proc_t p, struct image_params *imgp)
 		}
 	}
 #endif /* XNU_TARGET_OS_OSX */
+#endif
 
 	/* If the code signature came through the image activation path, we skip the
 	 * taskgated / externally attached path. */

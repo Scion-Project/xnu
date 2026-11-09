@@ -37,6 +37,7 @@
 #define APPLEVIRTUALPLATFORM      1
 
 #define CPU_HAS_APPLE_PAC         1
+#if !defined(ARM64_BOARD_CONFIG_A5XELTE) && !defined(ARM64_BOARD_CONFIG_SWEET)
 #if defined(SCION_NATIVE_PAC) && SCION_NATIVE_PAC
 /*
  * Scion (AVF/crosvm, QEMU virt): there is no Apple hypervisor to take the
@@ -45,6 +46,9 @@
  * one set per boot, shared by EL0 and EL1: there are no per-process keys.
  */
 #define SCION_NO_APPLE_IMPDEF_REGS 1 /* a non-Apple CPU has no Apple implementation-defined registers */
+#else
+#define HAS_PARAVIRTUALIZED_PAC   1
+#endif
 #else
 #define HAS_PARAVIRTUALIZED_PAC   1
 #endif
@@ -63,6 +67,10 @@
 
 
 #include <pexpert/arm64/apple_arm64_common.h>
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+#undef  BTI_ENFORCED
+#define BTI_ENFORCED 0
+#endif
 #undef  __ARM64_PMAP_SUBPAGE_L1__
 #undef  __ARM64_PMAP_KERN_SUBPAGE_L1__
 
