@@ -108,6 +108,8 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
 bsd/dev/unix_startup.c			standard
 
 bsd/dev/monotonic.c         optional config_cpu_counters
+# Scion, this base only: kern.hakios until drivers/core/hakios.platform.c builds here (patches/xnu-12377/0110)
+bsd/dev/hakios.base.c	standard
 # HakiOS drivers: made by tools/hakios-config.py kernel from drivers/*/conf. Edit those, not these lines.
 # end of the HakiOS drivers
 

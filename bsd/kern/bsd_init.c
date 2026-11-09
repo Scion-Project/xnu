@@ -182,6 +182,7 @@
 
 #if CONFIG_NETBOOT
 #include <sys/netboot.h>
+#include <sys/hakios.version.h>	/* Scion: drivers/core/hakios.version.c */
 #endif
 
 #if CONFIG_IMAGEBOOT
@@ -1002,6 +1003,7 @@ bsd_init(void)
 
 		bsd_init_kprintf("calling devfs_kernel_mount\n");
 		devfs_kernel_mount(mounthere);
+		hakios_version_init();         /* Scion: kern.hakios.version, and the version in the boot log */
 	}
 #endif /* DEVFS */
 
