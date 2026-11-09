@@ -263,18 +263,23 @@ starlte_wifi_init(void)
 	void const *value;
 	unsigned int size;
 
-	/* a test image's network to join (scion-kernel tools/ios27/wifi/adt-wifi-network.py): kept, then out of the registry */
+	PE_parse_boot_argn("wifi_pcie", &steps, sizeof(steps));
+	/*
+	 * A test image's network to join (scion-kernel tools/ios27/wifi/adt-wifi-network.py): always taken out of the registry,
+	 * kept only when the Wi-Fi is on (wifi_pcie=N), for brcmfmac=8. Never logged but for its size.
+	 */
 	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
 	    SecureDTGetProperty(chosen, "hakios-wifi-network", &value, &size) == kSuccess && size != 0) {
-		dt_network_length = size <= sizeof(dt_network) ? size : 0;
-		if (dt_network_length != 0) {
+		if (steps != 0 && size <= sizeof(dt_network)) {
 			memcpy(dt_network, value, size);
+			dt_network_length = size;
 		}
 		starlte_wifi_dt_forget();
-		printf("wifi: the device tree names a network to join (%u bytes, kept for brcmfmac=8; taken out of the registry)\n", size);
+		printf("wifi: the device tree names a network to join (%u bytes): %s; taken out of the registry\n", size,
+		    dt_network_length != 0 ? "kept for brcmfmac=8" : "not kept (wifi_pcie is off, or it is too long)");
 	}
 
-	if (!PE_parse_boot_argn("wifi_pcie", &steps, sizeof(steps)) || steps == 0) {
+	if (steps == 0) {
 		return;
 	}
 	if (kernel_thread_start(starlte_wifi_thread, NULL, &thread) == KERN_SUCCESS) {
