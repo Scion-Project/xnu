@@ -832,6 +832,10 @@ sweet_surface_wrap_memory(SweetSurface *s, task_t task, uint64_t address, uint64
 			s->offset += (uint32_t)lead;
 			s->allocSize = (uint32_t)length;
 			s->mapCache = kIOMapDefaultCache;
+			s->snapTask = task;
+			s->snapAddress = address;
+			s->snapSize = size;
+			s->snapLead = (uint32_t)lead;
 			return kIOReturnSuccess;
 		}
 		if (++failed <= 10 || (failed % 500) == 0) {
@@ -1139,10 +1143,65 @@ IOSurfaceRootUserClient::externalMethodInner(uint32_t selector, IOExternalMethod
 	}
 }
 
+/*
+ * Boot-arg sweetspeed&8388608: a surface that is a snapshot of its maker's memory (the "copied instead" fallback of
+ * sweet_surface_wrap_memory) is compared with that memory again whenever its maker locks it, changes its use count or
+ * lets go of it, and the pieces that differ are copied in (and the seed moves, so readers that watch the seed take the
+ * picture again). The snapshot assumed that "images do not change after they are wrapped"; a client that wraps first
+ * and draws after (a bitmap context's backing) would be shown empty for good. "SWEET SURF: snapshot of surface N
+ * changed after it was made" says when that happened (the first 20 times, then every 500th).
+ */
+extern "C" uint32_t sweet_speed_flags(void);
+static SweetSurface *sweet_surface_held(IOLock *lock, OSArray *refs, uint32_t id);
+static void
+sweet_surface_resnap(SweetSurface *s, const char *when)
+{
+	if (s->snapSize == 0 || s->snapTask != current_task() || (sweet_speed_flags() & 8388608) == 0 || s->snapLooks >= 256) {
+		return;
+	}
+	IOBufferMemoryDescriptor *buf = OSDynamicCast(IOBufferMemoryDescriptor, s->memory);
+	if (buf == NULL || s->snapLead + s->snapSize > buf->getLength()) {
+		return;
+	}
+	s->snapLooks++;
+	uint8_t *dst = (uint8_t *)buf->getBytesNoCopy() + s->snapLead;
+	uint8_t piece[512];
+	uint64_t changed = 0;
+	for (uint64_t off = 0; off < s->snapSize; off += sizeof(piece)) {
+		size_t n = (size_t)(s->snapSize - off < sizeof(piece) ? s->snapSize - off : sizeof(piece));
+		if (copyin((user_addr_t)(s->snapAddress + off), piece, n) != 0) {
+			return;                         /* the memory is gone: the snapshot stays */
+		}
+		if (bcmp(dst + off, piece, n) != 0) {
+			bcopy(piece, dst + off, n);
+			changed += n;
+		}
+	}
+	if (changed != 0) {
+		static uint32_t said;
+		OSIncrementAtomic((volatile SInt32 *)sweet_surface_seed(s));
+		s->snapChanges++;
+		if (++said <= 20 || (said % 500) == 0) {
+			char name[32];
+			proc_selfname(name, sizeof(name));
+			IOLog("SWEET SURF: %s snapshot of surface %u (%ux%u, %llu bytes) changed after it was made: %llu bytes in "
+			    "changed pieces copied again at %s (look %u, %u so far)\n", name, s->id, s->width, s->height,
+			    s->snapSize, changed, when, s->snapLooks, said);
+		}
+	}
+}
+
 IOReturn
-IOSurfaceRootUserClient::trapUseCount(__unused void *id, __unused void *category,
+IOSurfaceRootUserClient::trapUseCount(void *id, __unused void *category,
     void *, void *, void *, void *)
 {
+	if ((sweet_speed_flags() & 8388608) != 0) {
+		SweetSurface *s = sweet_surface_held(fLock, fRefs, (uint32_t)(uintptr_t)id);
+		if (s != NULL) {
+			sweet_surface_resnap(s, "use count");
+			s->release();
+		}
+	}
 	return kIOReturnSuccess;
 }
 
@@ -1183,6 +1242,7 @@ IOSurfaceRootUserClient::trapLock(void *id, __unused void *options, void *seedOu
 	if (s == NULL) {
 		return kIOReturnNotFound;
 	}
+	sweet_surface_resnap(s, "lock");
 	IOReturn ret = sweet_surface_seed_out(s, seedOut, false);
 	s->release();
 	return ret;
@@ -1206,6 +1266,14 @@ IOReturn
 IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, void *)
 {
 	unsigned int index;
+	if ((sweet_speed_flags() & 8388608) != 0) {
+		/* (the last look: says whether the maker changed the memory after the snapshot, even if nothing looked before) */
+		SweetSurface *s = sweet_surface_held(fLock, fRefs, (uint32_t)(uintptr_t)id);
+		if (s != NULL) {
+			sweet_surface_resnap(s, "release");
+			s->release();
+		}
+	}
 	IOLockLock(fLock);
 	SweetSurfaceRef *ref = findRef((uint32_t)(uintptr_t)id, &index);
 	if (ref != NULL && --ref->count == 0) {

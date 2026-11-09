@@ -86,6 +86,9 @@ extern int proc_selfpid(void);
  *262144  the GPU's app chains in a queue with a thread of their own (bsd/dev/starlte_gpu.c): a submit only appends, waits
  *        sleep, and the framebuffer shows a frame once the chains queued before its swap are done (needs bit 64)
  *524288  the GPU present cleans a frame out of the CPU caches only when its IOSurface seed moved (a CPU wrote it)
+ * (1048576, 2097152 and 4194304 are the data-protection work's.)
+ *8388608 an IOSurface that is a snapshot of its maker's unwireable memory is compared with it again at the maker's locks,
+ *        use counts and release, and brought up to date (iokit/Kernel/arm/SweetSurface.cpp sweet_surface_resnap)
  * The FP16 forms emulated under bit 2 now include FCCMP/FCCMPE/FCSEL H, FMOV/FABS/FNEG H and FABS/FNEG .4H/.8H (tools/ios27/perf/test/fp16t.c
  * checks them bit for bit); and, always on, a trap that was taken on an M3 but is handled after the thread migrated to an A55 is
  * retried (the A55 runs it) instead of ending in SIGILL.
