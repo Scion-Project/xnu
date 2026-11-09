@@ -21,6 +21,8 @@
 #include <sys/tty.h>
 #include <sys/proc.h>
 #include <sys/uio.h>
+#include <sys/uio_internal.h>
+#include <pexpert/pexpert.h>
 
 static struct tty      *_constty;               /* current console device */
 static LCK_GRP_DECLARE(_constty_lock_grp, "constty");
@@ -124,10 +126,53 @@ cnread(__unused dev_t dev, struct uio *uio, int ioflag)
 }
 
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/*
+ * sweetcontee=1: a copy of what userland writes to /dev/console (daemons' stderr, our injected
+ * libraries' lines, uncaught-exception text) goes into the kernel log ring too, so 0370's card log
+ * (sdlog=1) carries it, each line prefixed "UCON ". First 1 KiB of each write, from its first iovec.
+ */
+extern void log_putc(char);
+static void
+sweet_contee(struct uio *uio)
+{
+	static int on = -1;
+	static bool bol = true;
+	if (on < 0) {
+		on = 0;
+		PE_parse_boot_argn("sweetcontee", &on, sizeof(on));
+	}
+	if (!on || uio_iovcnt(uio) < 1 || !UIO_SEG_IS_USER_SPACE(uio->uio_segflg)) {
+		return;
+	}
+	char buf[1024];
+	user_size_t n = uio_curriovlen(uio);
+	if (n > sizeof(buf)) {
+		n = sizeof(buf);
+	}
+	if (n == 0 || copyin(uio_curriovbase(uio), buf, (size_t)n) != 0) {
+		return;
+	}
+	for (user_size_t i = 0; i < n; i++) {
+		if (bol) {
+			const char *pfx = "UCON ";
+			while (*pfx) {
+				log_putc(*pfx++);
+			}
+		}
+		log_putc(buf[i]);
+		bol = buf[i] == '\n';
+	}
+}
+#endif
+
 int
 cnwrite(__unused dev_t dev, struct uio *uio, int ioflag)
 {
 	int error;
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	sweet_contee(uio);
+#endif
 	struct tty *constty = copy_constty();
 	if (constty) {
 		dev = constty->t_dev;
