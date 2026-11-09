@@ -6724,6 +6724,88 @@ bad:
  * Note:	The argument and environment vectors are user space pointers
  *		to arrays of user space pointers.
  */
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * Starbite bring-up aid (after HakiOS's kern.exec_inject, APSL): the sysctl
+ * kern.exec_inject holds "LIBRARY NAME NAME ..." groups separated by ";";
+ * every program whose file name is one of the NAMEs is started with
+ * DYLD_INSERT_LIBRARIES=LIBRARY (several joined with ":"), because launchd
+ * drops DYLD_ variables from job descriptions. Boot-arg sweetinject= sets it
+ * at boot, with "," for the spaces: sweetinject=/path/lib.dylib,backboardd
+ */
+static char sweet_exec_inject[512];
+SYSCTL_STRING(_kern, OID_AUTO, exec_inject, CTLFLAG_RW | CTLFLAG_LOCKED, sweet_exec_inject,
+    sizeof(sweet_exec_inject), "LIBRARY NAME... [; LIBRARY NAME...]: programs started with the library inserted");
+
+__startup_func
+static void
+sweet_exec_inject_init(void)
+{
+	if (PE_parse_boot_argn("sweetinject", sweet_exec_inject, sizeof(sweet_exec_inject))) {
+		/* (no printf here: TUNABLES runs before the console's locks exist) */
+		for (char *c = sweet_exec_inject; *c != 0; c++) {
+			if (*c == ',') {
+				*c = ' ';
+			}
+		}
+	}
+}
+STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, sweet_exec_inject_init);
+
+static bool
+sweet_exec_inject_env(struct image_params *imgp, char *env, size_t size)
+{
+	const char *p = sweet_exec_inject;
+	const char *name, *path;
+	size_t namelen, used;
+	bool any = false;
+
+	if (*p == 0 || imgp->ip_strings == NULL) {
+		return false;
+	}
+	/* the program's file name: the last part of the path exec_save_path kept */
+	path = imgp->ip_strings + strlen(EXECUTABLE_KEY);
+	name = strrchr(path, '/');
+	name = name != NULL ? name + 1 : path;
+	namelen = strlen(name);
+	used = strlcpy(env, "DYLD_INSERT_LIBRARIES=", size);
+	while (*p != 0) {
+		const char *library;
+		size_t liblen;
+		bool matched = false;
+
+		while (*p == ' ' || *p == ';') {
+			p++;
+		}
+		library = p;
+		while (*p != 0 && *p != ' ' && *p != ';') {
+			p++;
+		}
+		liblen = (size_t)(p - library);
+		while (*p == ' ') {
+			const char *word = ++p;
+
+			while (*p != 0 && *p != ' ' && *p != ';') {
+				p++;
+			}
+			if ((size_t)(p - word) == namelen && namelen != 0 && strncmp(word, name, namelen) == 0) {
+				matched = true;
+			}
+		}
+		if (matched && liblen != 0 && used + 1 + liblen < size) {
+			if (any) {
+				env[used++] = ':';
+			}
+			memcpy(env + used, library, liblen);
+			used += liblen;
+			env[used] = 0;
+			any = true;
+		}
+	}
+	return any;
+}
+#endif
+
 __attribute__((noinline))
 static int
 exec_extract_strings(struct image_params *imgp)
@@ -6731,6 +6813,9 @@ exec_extract_strings(struct image_params *imgp)
 	int error = 0;
 	int     ptr_size = (imgp->ip_flags & IMGPF_WAS_64BIT_ADDR) ? 8 : 4;
 	int new_ptr_size = (imgp->ip_flags & IMGPF_IS_64BIT_ADDR) ? 8 : 4;
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	char            inject_env[512];
+#endif
 	user_addr_t     argv = imgp->ip_user_argv;
 	user_addr_t     envv = imgp->ip_user_envv;
 
@@ -6896,6 +6981,23 @@ exec_extract_strings(struct image_params *imgp)
 		imgp->ip_argspace -= new_ptr_size; /* to hold envv[] entry */
 		imgp->ip_envc++;
 	}
+
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* one more variable for the programs that get a library inserted (sweet_exec_inject_env) */
+	if (sweet_exec_inject_env(imgp, inject_env, sizeof(inject_env))) {
+		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(inject_env), UIO_SYSSPACE, TRUE);
+		if (error) {
+			goto bad;
+		}
+		if (imgp->ip_argspace < new_ptr_size) {
+			error = E2BIG;
+			goto bad;
+		}
+		imgp->ip_argspace -= new_ptr_size;
+		imgp->ip_envc++;
+		printf("SWEET INJECT: %s gets %s\n", imgp->ip_strings + strlen(EXECUTABLE_KEY), inject_env);
+	}
+#endif
 
 	/* Save space for envv[] NULL terminator */
 	if (imgp->ip_argspace < new_ptr_size) {
