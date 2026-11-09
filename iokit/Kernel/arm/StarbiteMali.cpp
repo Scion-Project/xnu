@@ -122,6 +122,7 @@ struct sbm_bo {
 	uint32_t surface;                       /* IOSurface ID of an imported buffer, else 0 */
 	bool host;                              /* the caller's own pages, wired for the GPU (IMPORT_HOST) */
 	uint64_t seq;                           /* last chain that named it (async submits) */
+	uint64_t dying;                         /* closed by its owner: it goes once this chain is done (the queue); 0 = live */
 };
 
 /*
@@ -294,6 +295,9 @@ class StarbiteMaliUserClient : public IOUserClient {
 	IOReturn mmapBO(sbm_mmap_bo *a);
 	sbm_bo *lookup(uint32_t handle);
 	void closeBO(sbm_bo *bo);
+	void reap(void);
+	uint32_t fDying[256];                   /* handles closed by the client whose buffers still wait for their chains */
+	uint32_t fDyingCount = 0;
 
 public:
 	bool initWithTask(task_t owningTask, void *securityID, UInt32 type,
@@ -333,8 +337,30 @@ StarbiteMaliUserClient::initWithTask(task_t owningTask, void *securityID, UInt32
 sbm_bo *
 StarbiteMaliUserClient::lookup(uint32_t handle)
 {
-	return (handle >= 1 && handle <= fCount && fBos[handle - 1].mem != NULL) ? &fBos[handle - 1] :
-	       NULL;
+	return (handle >= 1 && handle <= fCount && fBos[handle - 1].mem != NULL && fBos[handle - 1].dying == 0) ?
+	       &fBos[handle - 1] : NULL;
+}
+
+/*
+ * fLock held. The buffers the client has closed whose chains are done by now go; the others stay on the list. With the
+ * queue a GEM_CLOSE used to wait for every chain queued by then (up to 90 ms on the thread that closed, seen on a
+ * phone); now it only notes the chain, and the buffer is unmapped and freed here, at one of the client's next calls.
+ */
+void
+StarbiteMaliUserClient::reap(void)
+{
+	uint32_t kept = 0;
+	for (uint32_t i = 0; i < fDyingCount; i++) {
+		sbm_bo *bo = &fBos[fDying[i] - 1];
+		if (bo->mem != NULL && bo->dying != 0 && starlte_gpu_user_wait_seq(bo->dying, false) != 0) {
+			fDying[kept++] = fDying[i];             /* its chain is still queued or running */
+			continue;
+		}
+		if (bo->mem != NULL && bo->dying != 0) {
+			closeBO(bo);
+		}
+	}
+	fDyingCount = kept;
 }
 
 void
@@ -370,6 +396,7 @@ StarbiteMaliUserClient::closeBO(sbm_bo *bo)
 	bo->pages = 0;
 	bo->surface = 0;
 	bo->host = false;
+	bo->dying = 0;
 	bo->seq = 0;
 }
 
@@ -710,16 +737,8 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 		if (bo == NULL) {
 			return kIOReturnBadArgument;
 		}
-		if (selector == SBM_GEM_CLOSE) {
-			/*
-			 * With the queue, a buffer goes only once every chain queued by now is done, not just the last one
-			 * that listed it: a chain reaches buffers its submit does not list (PanVK lists a batch's pools and
-			 * targets; a descriptor may point at any live buffer), and chains now wait in a queue behind others.
-			 */
-			uint64_t last = starlte_gpu_user_seq();
-			if (last > seq) {
-				seq = last;
-			}
+		if (selector == SBM_GEM_CLOSE && starlte_gpu_user_seq() != 0) {
+			seq = 0;                        /* (the queue: nothing is waited for here, see GEM_CLOSE below) */
 		}
 		bool block = selector == SBM_GEM_CLOSE || u.wait.timeout_ns != 0;
 		if (seq != 0 && starlte_gpu_user_wait_seq(seq, block) != 0 && selector == SBM_WAIT_BO) {
@@ -737,6 +756,9 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 		}
 	}
 	IOLockLock(fLock);
+	if (fDyingCount != 0) {
+		reap();
+	}
 	switch (selector) {
 	case SBM_SUBMIT: {
 		int err;
@@ -779,11 +801,25 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 	case SBM_GEM_CLOSE: {
 		sbm_bo *bo = lookup(u.close.handle);
 		if (bo) {
-			/* (waited for above, outside the lock; a chain that named it since then has to end too) */
-			if (bo->seq != 0) {
-				(void)starlte_gpu_user_wait_seq(bo->seq, true);
+			/*
+			 * With the queue, a buffer goes only once every chain queued by now is done, not just the last one
+			 * that listed it: a chain reaches buffers its submit does not list (PanVK lists a batch's pools and
+			 * targets; a descriptor may point at any live buffer), and chains wait in a queue behind others. The
+			 * close does not wait for that: the buffer is marked and goes at a later call (reap()).
+			 */
+			uint64_t last = starlte_gpu_user_seq();
+			uint64_t need = last > bo->seq ? last : bo->seq;
+			if (last != 0 && need != 0 && fDyingCount < sizeof(fDying) / sizeof(fDying[0]) &&
+			    starlte_gpu_user_wait_seq(need, false) != 0) {
+				bo->dying = need;
+				fDying[fDyingCount++] = u.close.handle;
+			} else {
+				/* (no queue, or its chains are done, or the list is full: as before, wait and close) */
+				if (need != 0) {
+					(void)starlte_gpu_user_wait_seq(need, true);
+				}
+				closeBO(bo);
 			}
-			closeBO(bo);
 		}
 		ret = bo ? kIOReturnSuccess : kIOReturnBadArgument;
 		break;
@@ -888,6 +924,7 @@ StarbiteMaliUserClient::clientClose(void)
 			closeBO(&fBos[i]);
 		}
 	}
+	fDyingCount = 0;
 	IOLockUnlock(fLock);
 	terminate();
 	return kIOReturnSuccess;
