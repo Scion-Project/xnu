@@ -80,6 +80,8 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
 iokit/Kernel/IOGuardPageMemoryDescriptor.cpp		optional iokitcpp
 
 iokit/Kernel/IOPlatformExpert.cpp			optional iokitcpp
+# HakiOS drivers: made by tools/hakios-config.py kernel from drivers/*/conf. Edit those, not these lines.
+# end of the HakiOS drivers
 iokit/Kernel/IOPlatformIO.cpp				optional iokitcpp
 
 iokit/Kernel/IOCPU.cpp					optional iokitcpp

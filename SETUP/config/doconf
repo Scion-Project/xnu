@@ -197,6 +197,13 @@ if ($?beverbose) then
     echo MASTER_CPU=$MASTER_CPU
 endif
 
+# Scion: the drivers a configuration builds (CONFIG_HAKIOS_*), as tools/hakios-config.py kernel writes them: a list
+# HAKIOS_DRIVERS of attributes, which the configurations of the machine's MASTER include, and an `options` line for each
+set MASTER_HAKIOS = /dev/null
+if (-f ${MASTER_DIR}/MASTER.hakios) then
+    set MASTER_HAKIOS = ${MASTER_DIR}/MASTER.hakios
+endif
+
 foreach SYS ($argv)
     set SYSID=${SYS}_${ID}
     set SYSCONF=$OBJDIR/config.$SYSID
@@ -206,8 +213,8 @@ foreach SYS ($argv)
     endif
     echo +$SYS \
     | \
-    cat $MASTER $MASTER_CPU - \
-        $MASTER $MASTER_CPU \
+    cat $MASTER $MASTER_CPU $MASTER_HAKIOS - \
+        $MASTER $MASTER_CPU $MASTER_HAKIOS \
     | \
     unifdef -t -DPLATFORM_${PLATFORM} -DCPU_$cpu -DSOC_CONFIG_${SOC_CONFIG} -DSYS_${SYS} $DEF_AVP $DEF_SEED $DEF_EXCLAVES $DEF_SPTM $DEF_BUILD $DEF_TAG - \
     | \

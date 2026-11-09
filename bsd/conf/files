@@ -108,6 +108,8 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
 bsd/dev/unix_startup.c			standard
 
 bsd/dev/monotonic.c         optional config_cpu_counters
+# HakiOS drivers: made by tools/hakios-config.py kernel from drivers/*/conf. Edit those, not these lines.
+# end of the HakiOS drivers
 
 bsd/libkern/crc32.c			standard
 bsd/libkern/random.c			standard
