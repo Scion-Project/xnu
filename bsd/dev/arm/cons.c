@@ -145,23 +145,33 @@ sweet_contee(struct uio *uio)
 	if (!on || uio_iovcnt(uio) < 1 || !UIO_SEG_IS_USER_SPACE(uio->uio_segflg)) {
 		return;
 	}
-	char buf[1024];
-	user_size_t n = uio_curriovlen(uio);
-	if (n > sizeof(buf)) {
-		n = sizeof(buf);
-	}
-	if (n == 0 || copyin(uio_curriovbase(uio), buf, (size_t)n) != 0) {
-		return;
-	}
-	for (user_size_t i = 0; i < n; i++) {
-		if (bol) {
-			const char *pfx = "UCON ";
-			while (*pfx) {
-				log_putc(*pfx++);
-			}
+	/* every iovec: os_log's stderr mirror writes the header and the message as separate ones */
+	struct user_iovec *iov = uio_iovsaddr_user(uio);
+	int cnt = uio_iovcnt(uio);
+	size_t budget = 2048;
+	for (int v = 0; iov != NULL && v < cnt && budget > 0; v++) {
+		char buf[512];
+		user_size_t n = iov[v].iov_len;
+		if (n > sizeof(buf)) {
+			n = sizeof(buf);
 		}
-		log_putc(buf[i]);
-		bol = buf[i] == '\n';
+		if (n > budget) {
+			n = budget;
+		}
+		if (n == 0 || copyin(iov[v].iov_base, buf, (size_t)n) != 0) {
+			continue;
+		}
+		budget -= (size_t)n;
+		for (user_size_t i = 0; i < n; i++) {
+			if (bol) {
+				const char *pfx = "UCON ";
+				while (*pfx) {
+					log_putc(*pfx++);
+				}
+			}
+			log_putc(buf[i]);
+			bol = buf[i] == '\n';
+		}
 	}
 }
 #endif
