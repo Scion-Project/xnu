@@ -1342,6 +1342,30 @@ handle_uncategorized(arm_saved_state_t *state)
 				thread_bind(little);
 				extern void sweet_m3_pin_note(thread_t);
 				sweet_m3_pin_note(current_thread());
+				/*
+				 * Pin diagnostics (boot-arg sweetspeed&16): one line per pin for the first 64, then at most one per
+				 * 10 s (racy on purpose: an extra line now and then is harmless). Preemptible user trap context,
+				 * about to thread_block: printf is fine, nothing is allocated.
+				 */
+				extern uint32_t sweet_speed_flags(void);
+				if (sweet_speed_flags() & 16) {
+					static uint32_t pin_lines;
+					static uint64_t pin_line_last;
+					uint64_t now = mach_absolute_time(), gap;
+					nanoseconds_to_absolutetime(10ULL * NSEC_PER_SEC, &gap);
+					if (pin_lines < 64 || now - pin_line_last >= gap) {
+						extern void proc_selfname(char *, int);
+						extern int proc_selfpid(void);
+						char comm[17];
+						thread_t pth = current_thread();
+						pin_lines++;
+						pin_line_last = now;
+						proc_selfname(comm, sizeof(comm));
+						printf("STARLTE PIN: %s[%d] tid %llu pri %d pc 0x%llx insn %08x\n", comm,
+						    proc_selfpid(), thread_tid(pth), (int)pth->sched_pri,
+						    (uint64_t)get_saved_state_pc(state), instr);
+					}
+				}
 				thread_block(THREAD_CONTINUE_NULL);
 				return;
 			}

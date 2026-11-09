@@ -68,6 +68,10 @@ SECURITY_READ_ONLY_LATE(static IOPlatformExpertDevice*) gRootNub;
 
 #include <kern/clock.h>
 #include <sys/time.h>
+#include <pexpert/arm64/board_config.h>
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+extern "C" uint32_t sweet_speed_flags(void);
+#endif
 
 void
 IOKitInitializeTime( void )
@@ -76,6 +80,12 @@ IOKitInitializeTime( void )
 
 	t.tv_sec = 30;
 	t.tv_nsec = 0;
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	/* sweet: no driver here publishes IORTC, so this waited the whole 30 s of every boot (boot-arg sweetspeed&1) */
+	if (sweet_speed_flags() & 1) {
+		t.tv_sec = 0;
+	}
+#endif
 
 	IOService::waitForService(
 		IOService::resourceMatching("IORTC"), &t );

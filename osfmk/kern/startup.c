@@ -92,6 +92,9 @@
 #endif
 #include <kern/smr.h>
 #include <kern/startup.h>
+#if defined(__arm64__)
+#include <pexpert/arm64/board_config.h>
+#endif
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/timer.h>
@@ -226,6 +229,16 @@ kernel_bootstrap_log(const char *message)
 	    startup_phase >= STARTUP_SUB_KPRINTF) {
 		kprintf("kernel_bootstrap: %s\n", message);
 	}
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	if (startup_phase >= STARTUP_SUB_KPRINTF) {
+		extern uint32_t sweet_speed_flags(void);
+		if (sweet_speed_flags() & 8) {
+			uint64_t ns_ = 0;
+			absolutetime_to_nanoseconds(mach_absolute_time(), &ns_);
+			printf("SBBOOT %llu ms: %s\n", ns_ / 1000000, message);
+		}
+	}
+#endif
 	kernel_debug_string_early(message);
 }
 
@@ -236,6 +249,16 @@ kernel_bootstrap_thread_log(const char *message)
 	    startup_phase >= STARTUP_SUB_KPRINTF) {
 		kprintf("kernel_bootstrap_thread: %s\n", message);
 	}
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	if (startup_phase >= STARTUP_SUB_KPRINTF) {
+		extern uint32_t sweet_speed_flags(void);
+		if (sweet_speed_flags() & 8) {
+			uint64_t ns_ = 0;
+			absolutetime_to_nanoseconds(mach_absolute_time(), &ns_);
+			printf("SBBOOT %llu ms: thread %s\n", ns_ / 1000000, message);
+		}
+	}
+#endif
 	kernel_debug_string_early(message);
 }
 

@@ -101,6 +101,9 @@
 #include <sys/codesign.h>
 
 #include <kern/startup.h>
+#if defined(__arm64__)
+#include <pexpert/arm64/board_config.h>
+#endif
 #include <kern/thread.h>
 #include <kern/task.h>
 #include <kern/ast.h>
@@ -502,6 +505,11 @@ bsd_init(void)
 
 #if DEBUG_BSDINIT
 #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
+#elif defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/* sweet: boot timing on the console (boot-arg sweetspeed&8, osfmk/arm64/sweet_a64e.c) */
+#define bsd_init_kprintf(x, ...) do { extern uint32_t sweet_speed_flags(void); if (sweet_speed_flags() & 8) { uint64_t ns_ = 0; \
+	absolutetime_to_nanoseconds(mach_absolute_time(), &ns_); \
+	printf("SBBOOT %llu ms: bsd_init: " x, ns_ / 1000000, ## __VA_ARGS__); } } while (0)
 #else
 #define bsd_init_kprintf(x, ...)
 #endif
