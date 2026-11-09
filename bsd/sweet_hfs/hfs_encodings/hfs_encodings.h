@@ -32,7 +32,7 @@
 #ifndef _HFS_ENCODINGS_H_
 #define _HFS_ENCODINGS_H_
 
-#if !TARGET_OS_IPHONE
+#if !TARGET_OS_IPHONE || defined(SWEET_HFS) /* built in on Starbite boards */
 
 #include <sys/appleapiopts.h>
 

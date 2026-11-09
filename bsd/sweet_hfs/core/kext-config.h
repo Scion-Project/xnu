@@ -47,7 +47,7 @@
 
 #else // OS X
 
-#define QUOTA 1
+#define QUOTA 0 /* the iPhoneOS-derived STARLTE config has no kernel quota support */
 #define NAMEDSTREAMS 1
 #define CONFIG_HFS_DIRLINK 1
 #define CONFIG_SEARCHFS 1
