@@ -315,6 +315,16 @@
 
 #endif  /* ARM64_BOARD_CONFIG_SWEET */
 
+#ifdef ARM64_BOARD_CONFIG_A5XELTE
+#include <pexpert/arm64/A5XELTE.h>
+
+#define MAX_L2_CLINE                   6
+#define MAX_CPUS                       8
+#define MAX_CPU_CLUSTERS               1
+
+#define CORE_NCTRS                     8
+#endif  /* ARM64_BOARD_CONFIG_A5XELTE */
+
 #ifdef ARM64_BOARD_CONFIG_VMAPPLE
 #include <pexpert/arm64/VMAPPLE.h>
 
