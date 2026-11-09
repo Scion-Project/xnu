@@ -175,6 +175,23 @@ cs_init(void)
 		cs_enforcement_panic = (panic != 0);
 	}
 
+#if CONFIG_MACF
+	/* boot-arg security= (bsd/kern/kern_minimac.c): off = no enforcement, full = every process */
+	extern int minimac_security_level(void);
+	switch (minimac_security_level()) {
+	case 0:
+		cs_system_enforcement_enable = 0;
+		cs_process_enforcement_enable = 0;
+		break;
+	case 2:
+		cs_system_enforcement_enable = 1;
+		cs_process_enforcement_enable = 1;
+		break;
+	default:
+		break;
+	}
+#endif /* CONFIG_MACF */
+
 	PE_parse_boot_argn("cs_relax_platform_task_ports",
 	    &cs_relax_platform_task_ports,
 	    sizeof(cs_relax_platform_task_ports));
