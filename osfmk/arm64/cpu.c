@@ -678,6 +678,10 @@ cpu_idle_exit(boolean_t from_reset)
 	Idle_load_context();
 }
 
+/* HakiOS (patch 1503): the boot processor's way through cpu_init() in the loader's log, as "[c51]"... */
+extern void loader_checkpoint(uint64_t n);
+#define BOOT_CPU_CHECKPOINT(n) do { if (cdp == &BootCpuData) { loader_checkpoint(n); } } while (0)
+
 void
 cpu_init(void)
 {
@@ -691,10 +695,13 @@ cpu_init(void)
 
 		timer_call_queue_init(&cdp->rtclock_timer.queue);
 		cdp->rtclock_timer.deadline = EndOfAllTime;
+		BOOT_CPU_CHECKPOINT(51);
 
 		if (cdp == &BootCpuData) {
 			do_cpuid();
+			loader_checkpoint(52);
 			do_mvfpid();
+			loader_checkpoint(53);
 		} else {
 			/*
 			 * We initialize non-boot CPUs here; the boot CPU is
@@ -704,9 +711,11 @@ cpu_init(void)
 		}
 
 		do_cacheid();
+		BOOT_CPU_CHECKPOINT(54);
 
 		/* ARM_SMP: Assuming identical cpu */
 		do_debugid();
+		BOOT_CPU_CHECKPOINT(55);
 
 		cpu_info_p = cpuid_info();
 
@@ -726,6 +735,7 @@ cpu_init(void)
 		}
 
 		cdp->cpu_threadtype = CPU_THREADTYPE_NONE;
+		BOOT_CPU_CHECKPOINT(56);
 	}
 	cdp->cpu_stat.irq_ex_cnt_wake = 0;
 	cdp->cpu_stat.ipi_cnt_wake = 0;
@@ -741,6 +751,7 @@ cpu_init(void)
 #if MONOTONIC
 	mt_cpu_up(cdp);
 #endif /* MONOTONIC */
+	BOOT_CPU_CHECKPOINT(57);
 }
 
 void

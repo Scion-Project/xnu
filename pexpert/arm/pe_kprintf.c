@@ -95,6 +95,9 @@ _kprintf(const char *format, ...)
 static int      cpu_last_locked = 0;
 
 __attribute__((noinline, not_tail_called))
+extern bool loader_early_log __attribute__((weak));
+extern void loader_log_vprintf(const char *fmt, va_list *ap) __attribute__((weak));
+
 void
 kprintf(const char *fmt, ...)
 {
@@ -102,6 +105,13 @@ kprintf(const char *fmt, ...)
 	va_list         listp2;
 	boolean_t       state;
 	void           *caller = __builtin_return_address(0);
+
+	/* HakiOS (patch 1503): boot-arg early_log=1, every kprintf in the log the loader gets back */
+	if (&loader_early_log != NULL && loader_early_log) {
+		va_start(listp, fmt);
+		loader_log_vprintf(fmt, &listp);
+		va_end(listp);
+	}
 
 	if (!disable_serial_output && !disable_kprintf_output) {
 		va_start(listp, fmt);

@@ -1063,12 +1063,21 @@ panic_with_thread_context(unsigned int reason, void *ctx, uint64_t debugger_opti
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmissing-noreturn"
+#if defined(__arm64__)
+extern void loader_log_panic(const char *fmt, va_list *ap, unsigned long caller) __attribute__((weak));
+#endif
 void
 panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsigned int reason, void *ctx,
     uint64_t panic_options_mask, void *panic_data_ptr, unsigned long panic_caller)
 {
 #pragma clang diagnostic pop
 
+#if defined(__arm64__)
+	/* HakiOS (patch 1503): the panic's text and frames into the log the loader gets back, before anything can fail */
+	if (loader_log_panic != NULL) {
+		loader_log_panic(panic_format_str, panic_args, panic_caller);
+	}
+#endif
 #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
 	read_lbr();
 #endif
