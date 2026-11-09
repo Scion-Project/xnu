@@ -978,6 +978,156 @@ st_script_thread(void *arg, __unused wait_result_t wr)
 	printf("STARLTE TOUCH: scripted input done\n");
 }
 
+/*
+ * The USB console's "touch X Y [X2 Y2 [MS]]" and "button lock|home|up|down [MS]" (drivers/usb/hakios.dwc3.c): a tap, a
+ * swipe or a key press from the host, so that a flow can be driven and looked at ("shot") with nobody at the phone.
+ * X and Y are thousandths of the screen (0 0 top left, 1000 1000 bottom right) and go to panel pixels as the picture
+ * does: the 828 x 1792 canvas is drawn 1368 wide from x = 36, full height. A tap holds for 70 ms; a swipe takes MS
+ * (default 300, 50 to 5000) with the eased samples of the scripted input above, finger 9, through sweet_hid_touch()
+ * like a real one; a button is down for MS (default 80, up to 3000: a long press). One at a time; each runs on a
+ * thread of its own and says "STARLTE TOUCH: console ..." when it starts and when it is done.
+ */
+static struct {
+	int key;                        /* >= 0: a button (sweet_hid_key's order: power, volume up, volume down, home) */
+	int x0, y0, x1, y1;
+	unsigned ms;
+} st_con_job;
+static volatile int st_con_busy;
+
+static void
+st_con_thread(__unused void *arg, __unused wait_result_t wr)
+{
+	const int f = ST_FINGERS - 1;
+	if (st_con_job.key >= 0) {
+		sweet_hid_key(st_con_job.key, 1);
+		st_msleep(st_con_job.ms);
+		sweet_hid_key(st_con_job.key, 0);
+	} else if (st_con_job.x0 == st_con_job.x1 && st_con_job.y0 == st_con_job.y1) {
+		for (unsigned t = 0; t < 70; t += 6) {
+			sweet_hid_touch(f, 1, st_con_job.x0, st_con_job.y0);
+			st_msleep(6);
+		}
+		sweet_hid_touch(f, 0, st_con_job.x0, st_con_job.y0);
+	} else {
+		int steps = (int)(st_con_job.ms / 6);
+		for (int k = 0; k <= steps; k++) {
+			int t = k * 1000 / steps;                       /* 0..1000 */
+			int e = t * t / 1000 * (3000 - 2 * t) / 1000;   /* smoothstep, 0..1000 */
+			sweet_hid_touch(f, 1, st_con_job.x0 + (st_con_job.x1 - st_con_job.x0) * e / 1000,
+			    st_con_job.y0 + (st_con_job.y1 - st_con_job.y0) * e / 1000);
+			st_msleep(6);
+		}
+		/* (held a moment at the end: a drag that is let go of while it moves is taken for a flick) */
+		for (unsigned t = 0; t < 60; t += 6) {
+			sweet_hid_touch(f, 1, st_con_job.x1, st_con_job.y1);
+			st_msleep(6);
+		}
+		sweet_hid_touch(f, 0, st_con_job.x1, st_con_job.y1);
+	}
+	printf("STARLTE TOUCH: console input done\n");
+	st_con_busy = 0;
+}
+
+static bool
+st_con_start(void)
+{
+	thread_t thread;
+	if (kernel_thread_start(st_con_thread, NULL, &thread) != KERN_SUCCESS) {
+		st_con_busy = 0;
+		printf("usb: touch: no thread\n");
+		return false;
+	}
+	thread_deallocate(thread);
+	return true;
+}
+
+/* up to `most` decimal numbers of `arg` into v[]: how many were there */
+static unsigned
+st_con_numbers(const char *arg, int *v, unsigned most)
+{
+	unsigned n = 0;
+	while (n < most) {
+		while (*arg == ' ') {
+			arg++;
+		}
+		if (*arg < '0' || *arg > '9') {
+			break;
+		}
+		int x = 0;
+		for (; *arg >= '0' && *arg <= '9' && x < 100000; arg++) {
+			x = x * 10 + (*arg - '0');
+		}
+		v[n++] = x;
+	}
+	return n;
+}
+
+void hakios_input_console_touch(const char *arg);
+void
+hakios_input_console_touch(const char *arg)
+{
+	int v[5] = { 0, 0, 0, 0, 300 };
+	unsigned n = st_con_numbers(arg, v, 5);
+	if (n != 2 && n != 4 && n != 5) {
+		printf("usb: touch X Y [X2 Y2 [MS]]: thousandths of the screen; two numbers are a tap, four a swipe (MS 50 to 5000, 300)\n");
+		return;
+	}
+	if (n == 2) {
+		v[2] = v[0];
+		v[3] = v[1];
+	}
+	for (unsigned i = 0; i < 4; i++) {
+		if (v[i] > 1000) {
+			v[i] = 1000;
+		}
+	}
+	if (!__sync_bool_compare_and_swap(&st_con_busy, 0, 1)) {
+		printf("usb: touch: one is going on\n");
+		return;
+	}
+	st_con_job.key = -1;
+	st_con_job.x0 = 36 + v[0] * 1368 / 1000;
+	st_con_job.y0 = v[1] * 2959 / 1000;
+	st_con_job.x1 = 36 + v[2] * 1368 / 1000;
+	st_con_job.y1 = v[3] * 2959 / 1000;
+	st_con_job.ms = v[4] < 50 ? 50 : v[4] > 5000 ? 5000 : (unsigned)v[4];
+	printf("STARLTE TOUCH: console %s %d,%d -> %d,%d (panel pixels) in %u ms\n", n == 2 ? "tap" : "swipe", st_con_job.x0,
+	    st_con_job.y0, st_con_job.x1, st_con_job.y1, n == 2 ? 70 : st_con_job.ms);
+	(void)st_con_start();
+}
+
+void hakios_input_console_button(const char *arg);
+void
+hakios_input_console_button(const char *arg)
+{
+	static const char *const names[] = { "lock", "up", "down", "home" };
+	int key = -1;
+	while (*arg == ' ') {
+		arg++;
+	}
+	for (int i = 0; i < 4; i++) {
+		size_t len = strlen(names[i]);
+		if (strncmp(arg, names[i], len) == 0 && (arg[len] == 0 || arg[len] == ' ')) {
+			key = i;
+			arg += len;
+		}
+	}
+	if (key < 0) {
+		printf("usb: button lock|home|up|down [MS]: a press (80 ms; MS up to 3000 for a long one)\n");
+		return;
+	}
+	int ms = 80;
+	(void)st_con_numbers(arg, &ms, 1);
+	if (!__sync_bool_compare_and_swap(&st_con_busy, 0, 1)) {
+		printf("usb: button: an input is going on\n");
+		return;
+	}
+	st_con_job.key = key;
+	st_con_job.ms = ms < 20 ? 20 : ms > 3000 ? 3000 : (unsigned)ms;
+	printf("STARLTE TOUCH: console button %s for %u ms\n", names[key], st_con_job.ms);
+	(void)st_con_start();
+}
+
 void
 starlte_touch_probe(void)
 {
