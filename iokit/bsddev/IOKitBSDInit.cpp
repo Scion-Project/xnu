@@ -807,6 +807,9 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 	/* sec_ts on the Exynos 8890 HSI2C (bsd/dev/herolte_touch.c). */
 	extern void herolte_touch_probe(void);
 	herolte_touch_probe();
+	/* Mali-T880 read-only probe (bsd/dev/herolte_gpu.c). */
+	extern void herolte_gpu_probe(void);
+	herolte_gpu_probe();
 #else
 	/* Exynos 7580 I2C touch. */
 	a5xelte_touch_probe();

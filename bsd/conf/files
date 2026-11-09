@@ -108,6 +108,7 @@ bsd/dev/a5xelte_emmc.c			standard
 bsd/dev/herolte_ufs.c			standard
 bsd/dev/herolte_touch.c			standard
 bsd/dev/herolte_battery.c		standard
+bsd/dev/herolte_gpu.c			standard
 bsd/dev/a5xelte_keys.c			standard
 bsd/dev/a5xelte_touch.c			standard
 bsd/dev/sweet_sample.c			standard
