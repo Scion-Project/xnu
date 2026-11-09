@@ -1254,6 +1254,11 @@ endif # DO_CTFMERGE
 #
 INCFLAGS_IMPORT	= $(patsubst %, -I$(OBJROOT)/EXPORT_HDRS/%, $(COMPONENT_IMPORT_LIST))
 INCFLAGS_EXTERN	= -I$(SRCROOT)/EXTERNAL_HEADERS
+# VMAPPLE's stand-ins for the TrustCache, CodeSignature and CoreEntitlements V2 types (the open source does not ship them);
+# the generic ARMv8 boards take Apple's from the KDK, which these would shadow, so only the other boards see them
+ifeq ($(filter SWEET A5XELTE HEROLTE STARLTE,$(CURRENT_MACHINE_CONFIG)),)
+INCFLAGS_EXTERN += -I$(SRCROOT)/EXTERNAL_HEADERS/scion-vmapple
+endif
 INCFLAGS_GEN	= -I$(SRCROOT)/$(COMPONENT) -I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)
 INCFLAGS_LOCAL	= -I.
 ifneq ($(filter SWEET A5XELTE HEROLTE STARLTE,$(CURRENT_MACHINE_CONFIG)),)
