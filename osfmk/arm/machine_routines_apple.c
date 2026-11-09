@@ -249,6 +249,13 @@ ml_default_jop_pid(void)
 #if HAS_PARAVIRTUALIZED_PAC
 	vmapple_pac_get_default_keys();
 	return vmapple_default_jop_pid;
+#elif SCION_NATIVE_PAC
+	/*
+	 * Every process signs with the one architectural key set, so this value
+	 * selects no key. It must not be 0: the shared region and dyld pagers
+	 * sign pointers only for a nonzero key and give arm64 processes key 0.
+	 */
+	return 1;
 #else
 	return 0;
 #endif /* HAS_PARAVIRTUALIZED_PAC */
