@@ -335,7 +335,10 @@ arm_setup_pre_sign(void)
  */
 
 __startup_func
+#include "hakios_arm_init.h"
+
 void
+
 arm_init(
 	boot_args       *args)
 {
@@ -354,6 +357,7 @@ arm_init(
 	const_boot_args = *args;
 	BootArgs = args = &const_boot_args;
 
+	loader_checkpoint(10);
 	cpu_data_init(&BootCpuData);
 #if defined(HAS_APPLE_PAC)
 	/* bootstrap cpu process dependent key for kernel has been loaded by start.s */
@@ -362,14 +366,20 @@ arm_init(
 #endif /* defined(HAS_APPLE_PAC) */
 
 	PE_init_platform(FALSE, args); /* Get platform expert set up */
+	loader_checkpoint(11);
+	loader_early_log_init();
 
 #if __arm64__
 	configure_timer_apple_regs();
+	loader_checkpoint(30);
 	wfe_timeout_configure();
+	loader_checkpoint(31);
 	wfe_timeout_init();
+	loader_checkpoint(32);
 
 	configure_misc_apple_boot_args();
 	configure_misc_apple_regs();
+	loader_checkpoint(33);
 
 #if (DEVELOPMENT || DEBUG)
 	unsigned long const *platform_stall_ptr = NULL;
@@ -385,6 +395,7 @@ arm_init(
 	}
 
 	platform_stall_panic_or_spin(PLATFORM_STALL_XNU_LOCATION_ARM_INIT);
+	loader_checkpoint(34);
 
 	chosen = NULL; // Force a re-lookup later on since VM addresses are not final at this point
 	dt_entry_size = 0;
@@ -422,10 +433,14 @@ arm_init(
 	}
 #endif
 
+	loader_checkpoint(35);
 	ml_parse_cpu_topology();
+	loader_checkpoint(12);
+	loader_log_cpu_facts();
 
 
 	master_cpu = ml_get_boot_cpu_number();
+	loader_checkpoint(40);
 	assert(master_cpu >= 0 && master_cpu <= ml_get_max_cpu_number());
 
 	BootCpuData.cpu_number = (unsigned short)master_cpu;
@@ -439,11 +454,14 @@ arm_init(
 	CpuDataEntries[master_cpu].cpu_data_paddr = (void *)((uintptr_t)(args->physBase)
 	    + ((uintptr_t)&BootCpuData
 	    - (uintptr_t)(args->virtBase)));
+	loader_checkpoint(41);
 
 	thread = thread_bootstrap();
+	loader_checkpoint(42);
 	thread->machine.CpuDatap = &BootCpuData;
 	thread->machine.pcpu_data_base = (vm_offset_t)0;
 	machine_set_current_thread(thread);
+	loader_checkpoint(43);
 
 	/*
 	 * Preemption is enabled for this thread so that it can lock mutexes without
@@ -452,19 +470,25 @@ arm_init(
 	 * preemption level is not really meaningful for the bootstrap thread.
 	 */
 	thread->machine.preemption_count = 0;
+	loader_checkpoint(44);
 	cpu_bootstrap();
+	loader_checkpoint(13);
 
 	rtclock_early_init();
+	loader_checkpoint(14);
 
 	kernel_debug_string_early("kernel_startup_bootstrap");
 	kernel_startup_bootstrap();
+	loader_checkpoint(15);
 
 	/*
 	 * Initialize the timer callout world
 	 */
 	timer_call_init();
+	loader_checkpoint(50);
 
 	cpu_init();
+	loader_checkpoint(16);
 
 	processor_bootstrap();
 
@@ -510,10 +534,19 @@ arm_init(
 	PE_parse_boot_argn("immediate_NMI", &force_immediate_debug_halt, sizeof(force_immediate_debug_halt));
 
 #if __ARM_PAN_AVAILABLE__
-	__builtin_arm_wsr("pan", 1);
+	{
+		uint32_t pan = 1;
+
+		if (!hakios_cpu_has_pan() || (PE_parse_boot_argn("pan", &pan, sizeof(pan)) && pan == 0)) {
+			hakios_pan_off = 1;
+		}
+	}
+	hakios_pan_apply();
 #endif  /* __ARM_PAN_AVAILABLE__ */
+	hakios_ucache_apply();          /* patch 1511 */
 
 	arm_vm_init(xmaxmem, args);
+	loader_checkpoint(17);
 
 	if (debug_boot_arg) {
 		patch_low_glo();
@@ -527,7 +560,9 @@ arm_init(
 
 	/* Setup debugging output. */
 	const unsigned int serial_exists = serial_init();
+	loader_checkpoint(18);
 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
+	loader_checkpoint(19);
 	kprintf("kprintf initialized\n");
 
 	serialmode = 0;
@@ -569,6 +604,7 @@ arm_init(
 		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
 	}
 	PE_create_console();
+	loader_checkpoint(20);
 
 	/* setup console output */
 	PE_init_printf(FALSE);
@@ -647,6 +683,7 @@ arm_init(
 	 * against string vulnerabilities
 	 */
 	__stack_chk_guard &= ~(0xFFULL << 8);
+	loader_checkpoint(21);
 	machine_startup(args);
 }
 
@@ -661,8 +698,9 @@ arm_init_cpu(
 	cpu_data_t      *cpu_data_ptr)
 {
 #if __ARM_PAN_AVAILABLE__
-	__builtin_arm_wsr("pan", 1);
+	hakios_pan_apply();
 #endif
+	hakios_ucache_apply();          /* patch 1511 */
 
 #ifdef __arm64__
 	configure_timer_apple_regs();
@@ -673,6 +711,10 @@ arm_init_cpu(
 
 
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
+#if defined(GENERIC_PSCI_SMP)
+	psci_smp_diag_vectors();        /* m3_diag=1: the kernel's vectors only now that it has its thread (patch 1509) */
+	psci_smp_cpu_reached(PSCI_SMP_CPU_IN_KERNEL);
+#endif
 
 #if APPLE_ARM64_ARCH_FAMILY
 	configure_late_apple_regs();
@@ -793,8 +835,9 @@ arm_init_idle_cpu(
 	cpu_data_t      *cpu_data_ptr)
 {
 #if __ARM_PAN_AVAILABLE__
-	__builtin_arm_wsr("pan", 1);
+	hakios_pan_apply();
 #endif
+	hakios_ucache_apply();          /* patch 1511 */
 
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
 

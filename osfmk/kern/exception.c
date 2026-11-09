@@ -636,6 +636,11 @@ check_exc_receiver_dependency(
  *	Returns:
  *		KERN_SUCCESS if exception is handled by any of the handlers.
  */
+#if defined(__arm64__)
+extern void user_exception_trace(exception_type_t exception, mach_exception_data_t code,
+    mach_msg_type_number_t count, thread_t thread);
+#endif
+
 kern_return_t
 exception_triage_thread(
 	exception_type_t        exception,
@@ -649,6 +654,11 @@ exception_triage_thread(
 	lck_mtx_t               *mutex;
 	struct exception_action *actions;
 	kern_return_t   kr = KERN_FAILURE;
+
+#if defined(__arm64__)
+	/* bring-up aid, see osfmk/arm64/user_exception_trace.c */
+	user_exception_trace(exception, code, codeCnt, thread);
+#endif
 
 	assert(exception != EXC_RPC_ALERT);
 

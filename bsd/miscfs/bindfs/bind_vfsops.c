@@ -139,8 +139,12 @@ bindfs_mount(struct mount * mp, __unused vnode_t devvp, user_addr_t user_data, v
 		return ENOTSUP;
 	}
 
-	/* check entitlement */
-	if (!IOCurrentTaskHasEntitlement(BINDFS_ENTITLEMENT)) {
+	/*
+	 * check entitlement -- hakios: or process 1, the port's own init, unsigned, which binds
+	 * its choice of launchd jobs and the like onto the read-only Darwin root volume before it
+	 * hands over to launchd (userland/src/init.c, root_apfs=)
+	 */
+	if (!IOCurrentTaskHasEntitlement(BINDFS_ENTITLEMENT) && proc_getpid(current_proc()) != 1) {
 		return EPERM;
 	}
 

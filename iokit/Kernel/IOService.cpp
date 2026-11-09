@@ -5179,7 +5179,10 @@ IOService::setRootMedia(IOService * root)
 	bool unhide;
 
 	ioblockstoragedriverClass = OSMetaClass::getMetaClassWithName(gIOBlockStorageDriverKey);
-	assert(ioblockstoragedriverClass);
+	if (!ioblockstoragedriverClass) {
+		// No IOStorageFamily in this kernel: the root cannot be a block storage device
+		root = NULL;
+	}
 
 	while (root) {
 		if (root->metaCast(ioblockstoragedriverClass)) {

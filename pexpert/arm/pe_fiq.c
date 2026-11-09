@@ -169,6 +169,15 @@ pe_init_fiq()
 	__builtin_arm_wsr64("ICC_IGRPEN0_EL1", 1);
 	__builtin_arm_isb(ISB_SY);
 }
+#elif defined(GENERIC_GIC_V3_IRQ)
+/* Generic boards: Group 1 IRQs through a GICv3, see osfmk/arm64/gic_v3_irq.c */
+extern void gic_v3_irq_cpu_init(void);
+
+void
+pe_init_fiq()
+{
+	gic_v3_irq_cpu_init();
+}
 #else
 void
 pe_init_fiq()

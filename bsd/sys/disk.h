@@ -284,7 +284,7 @@ typedef struct{
 typedef struct{
 	boolean_t mi_mdev; /* Is this a memdev device? */
 	boolean_t mi_phys; /* Physical memory? */
-	uint32_t mi_base; /* Base page number of the device? */
+	uint64_t mi_base; /* Base page number of the device (a kernel VA page number does not fit in 32 bits) */
 	uint64_t mi_size; /* Size of the device (in ) */
 } dk_memdev_info_t;
 

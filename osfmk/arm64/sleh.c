@@ -74,6 +74,9 @@
 
 
 #include <arm64/platform_error_handler.h>
+#if defined(GENERIC_PSCI_SMP)
+#include <arm64/psci_smp.h>
+#endif
 
 #if KASAN_TBI
 #include <san/kasan.h>
@@ -141,6 +144,7 @@ static void handle_mach_absolute_time_trap(arm_saved_state_t *);
 static void handle_mach_continuous_time_trap(arm_saved_state_t *);
 
 static void handle_msr_trap(arm_saved_state_t *state, uint32_t esr);
+static bool hakios_user_cache_op(arm_saved_state_t *state, uint32_t esr);
 #if __has_feature(ptrauth_calls)
 static void handle_pac_fail(arm_saved_state_t *state, uint32_t esr) __dead2;
 #endif
@@ -611,6 +615,14 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 	uintptr_t saved_expected_fault_addr = 0;
 #endif /* CONFIG_XNUPOST */
 
+#if defined(GENERIC_PSCI_SMP)
+	/* HakiOS (patch 1509): m3_diag=1, a core being started records its first exception here and parks */
+	if (__improbable(psci_smp_diag != 0)) {
+		psci_smp_diag_sleh(esr, far, get_saved_state_pc(state), get_saved_state_cpsr(state), get_saved_state_lr(state),
+		    get_saved_state_sp(state));
+	}
+#endif
+
 	ASSERT_CONTEXT_SANITY(context);
 
 	task_vtimer_check(thread);
@@ -705,6 +717,9 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 		break;
 
 	case ESR_EC_MSR_TRAP:
+		if (hakios_user_cache_op(state, esr)) {    /* patch 1511 */
+			break;
+		}
 		handle_msr_trap(state, esr);
 		break;
 /**
@@ -1694,6 +1709,8 @@ handle_mach_continuous_time_trap(arm_saved_state_t *state)
 	saved_state64(state)->x[0] = now;
 }
 
+
+#include "hakios_sleh.h"
 
 __attribute__((noreturn))
 static void

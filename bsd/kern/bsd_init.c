@@ -147,6 +147,14 @@
 #include <net/if_ether.h>               /* for ether_family_init() */
 #include <net/if_gif.h>                 /* for gif_init() */
 #include <miscfs/devfs/devfsdefs.h>     /* for devfs_kernel_mount() */
+#include <sys/hakios.input.h>
+#include <sys/hakios.audio.h>
+#include <sys/hakios.virtio_blk.h>
+#include <sys/hakios.sparse.h>
+#include <sys/hakios.version.h>
+#if APFS
+#include <sys/hakios.apfs_check.h>
+#endif
 #include <vm/vm_kern.h>                 /* for kmem_suballoc() */
 #include <sys/proc_uuid_policy.h>       /* proc_uuid_policy_init() */
 #include <netinet/flow_divert.h>        /* flow_divert_init() */
@@ -490,7 +498,7 @@ bsd_init(void)
 	platform_stall_panic_or_spin(PLATFORM_STALL_XNU_LOCATION_BSD_INIT);
 #endif
 
-#define DEBUG_BSDINIT 0
+#define DEBUG_BSDINIT 1 /* bring-up: trace bsd_init steps (only visible with -enable_kprintf_spam) */
 
 #if DEBUG_BSDINIT
 #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
@@ -976,6 +984,15 @@ bsd_init(void)
 
 		bsd_init_kprintf("calling devfs_kernel_mount\n");
 		devfs_kernel_mount(mounthere);
+		hakios_version_init();         /* kern.hakios.version, and the version in the boot log */
+		hakios_input_init();           /* /dev/hakios-touch */
+		hakios_audio_init();           /* /dev/hakios-audio */
+		hakios_virtio_blk_init();      /* /dev/rvblk0, a disk image of the host (QEMU) */
+		hakios_sparse_init();          /* /dev/rsp0, part of an image too big to hold */
+#if APFS
+		/* mounts and walks /dev/rvblk0 once userland has /private/var up */
+		hakios_apfs_check_init();
+#endif
 	}
 #endif /* DEVFS */
 

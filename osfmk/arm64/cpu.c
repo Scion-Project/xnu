@@ -568,7 +568,12 @@ cpu_idle(void)
 #endif /* MONOTONIC */
 
 	if (wfi) {
-#if !defined(APPLE_ARM64_ARCH_FAMILY)
+#if !defined(APPLE_ARM64_ARCH_FAMILY) && !defined(GENERIC_PSCI_SMP)
+		/*
+		 * (Not on the generic boards either. There a core keeps its cache while it waits,
+		 * and this would empty it by set and way every time: slow, wrong among several
+		 * processors, and under a hypervisor every one of those instructions is a trap.)
+		 */
 		platform_cache_idle_enter();
 #endif
 

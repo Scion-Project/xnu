@@ -156,6 +156,7 @@
 #include <security/mac_mach_internal.h>
 #if CONFIG_VNGUARD
 extern void vnguard_policy_init(void);
+extern void minimac_policy_init(void);
 #endif
 #endif
 
@@ -721,6 +722,9 @@ kernel_bootstrap_thread(void)
 	kernel_bootstrap_log("vnguard_policy_init");
 	vnguard_policy_init();
 #endif
+	/* stand-ins for the AMFI and Sandbox policies (bsd/kern/kern_minimac.c) */
+	kernel_bootstrap_log("minimac_policy_init");
+	minimac_policy_init();
 #endif
 
 #if CONFIG_DTRACE

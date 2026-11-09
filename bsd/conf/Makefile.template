@@ -588,5 +588,13 @@ do_build_all:: do_all
 
 %RULES
 
+# HakiOS: HFS Plus built in (bsd/hfs, Apple's hfs-627.100.6), compiled as its kext was: against the kernel's KPI,
+# not its insides (no XNU/BSD/MACH_KERNEL_PRIVATE), kext-config.h first, its own headers beside it, and its warnings
+# its own (it is Apple's code as it was published, not this kernel's)
+HFS_OBJS = $(patsubst %.c,%.o,$(notdir $(wildcard $(SRCROOT)/bsd/hfs/*.c)))
+$(foreach o,$(HFS_OBJS),$(eval $(o)_CFLAGS_ADD += -UXNU_KERNEL_PRIVATE -UBSD_KERNEL_PRIVATE -UMACH_KERNEL_PRIVATE \
+	-include $(SRCROOT)/bsd/hfs/kext-config.h -I$(SRCROOT)/bsd/hfs -idirafter $(SDKROOT)/usr/include))
+$(foreach o,$(HFS_OBJS),$(eval $(o)_CWARNFLAGS_ADD += -w))
+
 include $(MakeInc_rule)
 include $(MakeInc_dir)

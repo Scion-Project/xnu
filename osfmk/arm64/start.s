@@ -126,6 +126,27 @@ LEXT(LowResetVectorBase)
 	.globl EXT(reset_vector)
 LEXT(reset_vector)
 	// Preserve x0 for start_first_cpu, if called
+#if defined(GENERIC_PSCI_SMP)
+	/*
+	 * A core that the firmware has just started for us (PSCI CPU_ON, see
+	 * psci_smp.c) has no vectors at all, and under a third-party hypervisor
+	 * even the OS lock write can trap: vectors first. Not the boot
+	 * processor's early ones, which hand the exception to the boot loader:
+	 * that is not for this core to do.
+	 */
+	msr		DAIFSet, #(DAIFSC_ALL)				// Disable all interrupts
+	adrp	x0, EXT(LowSecondaryExceptionVectorBase)@page
+	add		x0, x0, EXT(LowSecondaryExceptionVectorBase)@pageoff
+	msr		VBAR_EL1, x0
+	isb
+	// The MMU and the caches are off, says PSCI; of the rest of SCTLR it
+	// says nothing. Only the bits that must be set, until common_start.
+	MOV64	x0, 0x30D00800
+	msr		SCTLR_EL1, x0
+	isb
+	// Unlock the core for debugging
+	msr		OSLAR_EL1, xzr
+#else /* defined(GENERIC_PSCI_SMP) */
 	// Unlock the core for debugging
 	msr		OSLAR_EL1, xzr
 	msr		DAIFSet, #(DAIFSC_ALL)				// Disable all interrupts
@@ -136,6 +157,7 @@ LEXT(reset_vector)
 	add     x0, x0, EXT(LowExceptionVectorBase)@pageoff
 	msr     VBAR_EL1, x0
 #endif
+#endif /* defined(GENERIC_PSCI_SMP) */
 
 
 
@@ -143,8 +165,20 @@ LEXT(reset_vector)
 	adrp	x19, EXT(ResetHandlerData)@page			// Get address of the reset handler data
 	add		x19, x19, EXT(ResetHandlerData)@pageoff
 	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
-#if HAS_CLUSTER
+#include "hakios_start_ids.h"
+#if HAS_CLUSTER || defined(GENERIC_PSCI_SMP)
+	// (generic boards: some number their cores in Affinity1 and leave Affinity0 at zero;
+	// a cpu data's phys id is both fields, as the device tree's "reg" has them)
 	and		x0, x15, #0xFFFF					// CPU number in Affinity0, cluster ID in Affinity1
+	// HakiOS (patch 1504): a device tree numbering the cores one affinity field lower than an MT MPIDR
+	// does (the Galaxy S9's A55s: 0x81000200 is its core 2), as ml_phys_id_from_mpidr()
+	adrp	x2, EXT(ml_mpidr_mt_aff1)@page
+	add		x2, x2, EXT(ml_mpidr_mt_aff1)@pageoff
+	ldr		w2, [x2]
+	cbz		w2, Lmpidr_numbered
+	tbz		x15, #24, Lmpidr_numbered
+	ubfx	x0, x15, #8, #16
+Lmpidr_numbered:
 #else
 	and		x0, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
 #endif
@@ -233,40 +267,42 @@ LEXT(_start)
 	.global	EXT(LowExceptionVectorBase)
 LEXT(LowExceptionVectorBase)
 	/* EL1 SP 0 */
-	b		.
+	b		Lloader_early_exception
 	.align	7
-	b		.
+	b		Lloader_early_exception
 	.align	7
-	b		.
+	b		Lloader_early_exception
 	.align	7
-	b		.
+	b		Lloader_early_exception
 	/* EL1 SP1 */
 	.align	7
-	b		.
+	b		Lloader_early_exception
 	.align	7
-	b		.
+	b		Lloader_early_exception
 	.align	7
-	b		.
+	b		Lloader_early_exception
 	.align	7
-	b		.
+	b		Lloader_early_exception
 	/* EL0 64 */
 	.align	7
-	b		.
+	b		Lloader_early_exception
 	.align	7
-	b		.
+	b		Lloader_early_exception
 	.align	7
-	b		.
+	b		Lloader_early_exception
 	.align	7
-	b		.
+	b		Lloader_early_exception
 	/* EL0 32 */
 	.align	7
-	b		.
+	b		Lloader_early_exception
 	.align	7
-	b		.
+	b		Lloader_early_exception
 	.align	7
-	b		.
+	b		Lloader_early_exception
 	.align	7
-	b		.
+	b		Lloader_early_exception
+
+#include "hakios_start_vectors.h"
 	.align 12, 0
 
 #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
@@ -452,21 +488,27 @@ start_cpu:
  * Cold boot init routine.  Called from __start
  *   x0 - Boot args
  */
+#include "hakios_start_checkpoint.h"
+
 	.align 2
 	.globl EXT(start_first_cpu)
 LEXT(start_first_cpu)
 
-	// Unlock the core for debugging
-	msr		OSLAR_EL1, xzr
 	msr		DAIFSet, #(DAIFSC_ALL)				// Disable all interrupts
 
 	mov		x20, x0
 	mov		x21, #0
+	LOADER_CHECKPOINT 1
 
-	// Set low reset vector before attempting any loads
+	// Set low reset vector before attempting anything that might trap
+	// (under a third-party hypervisor even the OS lock write below can).
 	adrp	x0, EXT(LowExceptionVectorBase)@page
 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
 	MSR_VBAR_EL1_X0
+
+	// Unlock the core for debugging
+	msr		OSLAR_EL1, xzr
+	LOADER_CHECKPOINT 2
 
 
 	// Get the kernel memory parameters from the boot args
@@ -612,6 +654,7 @@ Lkernelcache_base_found:
 	/* Ensure TTEs are visible */
 	dsb		ish
 
+	LOADER_CHECKPOINT 3
 
 	b		common_start
 
@@ -686,7 +729,10 @@ common_start:
 	dsb		ish
 
 
-#if defined(BCM2837)
+#if defined(BCM2837) && defined(BCM2837_CORE_TIMER_ROUTING)
+	// Raspberry Pi 3 only: pokes the SoC's local-interrupt block at a fixed
+	// physical address (0x4000004X). Fatal on any other board, so it is
+	// disabled unless explicitly requested.
 	// Setup timer interrupt routing; must be done before MMU is enabled
 	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
 	and		x15, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
@@ -734,16 +780,38 @@ common_start:
 	add		x0, x0, x22									// Convert exception vector address to KVA
 	sub		x0, x0, x23
 1:
+#if defined(GENERIC_PSCI_SMP)
+	// HakiOS (patch 1509): with m3_diag=1 a core being started keeps the physical early vectors
+	// (LowSecondaryExceptionVectorBase, reached through the V=P map once the MMU is on) until
+	// arm_init_cpu() has its thread in TPIDR_EL1 (psci_smp_diag_vectors()). Its first exception is then
+	// recorded in full and the core parks, instead of entering sleh with no thread and recursing.
+	cbz		x21, Lvbar_kernel
+	adrp	x9, EXT(psci_smp_diag)@page
+	add		x9, x9, EXT(psci_smp_diag)@pageoff
+	ldr		w9, [x9]
+	cbnz	w9, Lvbar_done
+Lvbar_kernel:
+#endif
 	MSR_VBAR_EL1_X0
+#if defined(GENERIC_PSCI_SMP)
+Lvbar_done:
+#endif
 
 #if HAS_APPLE_PAC
 	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
 #endif /* HAS_APPLE_PAC */
 
+	cbnz	x21, 1f								// boot CPU cold start only
+	LOADER_CHECKPOINT 4
+1:
 	// Enable caches, MMU, ROP and JOP
 	MOV64   x0, SCTLR_EL1_DEFAULT
 	MSR_SCTLR_EL1_X0
 	isb		sy
+	cbnz	x21, 1f
+	LOADER_CHECKPOINT 5
+	MOV64   x0, SCTLR_EL1_DEFAULT				// restore what the checkpoint clobbered
+1:
 
 #if !VMAPPLE
 	MOV64   x1, SCTLR_EL1_DEFAULT

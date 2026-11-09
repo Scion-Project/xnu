@@ -965,7 +965,7 @@ private:
 		    "only trivially copyable types can be contained");
 		static_assert(!__is_pointer(T) || (acquisition == kValueNoCopy),
 		    "pointers cannot be contained");
-		static_assert(KALLOC_TYPE_IS_DATA_ONLY(T) || (acquisition == kValueNoCopy),
+		static_assert(XNU_NO_TYPE_BUILTINS || KALLOC_TYPE_IS_DATA_ONLY(T) || (acquisition == kValueNoCopy),
 		    "only plain data types can be contained (consider using OSValueObject)");
 		return 0; // C++11 does not support void-returning constexpr functions
 	}

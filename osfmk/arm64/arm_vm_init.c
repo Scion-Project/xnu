@@ -361,9 +361,12 @@ typedef struct {
 	vm_size_t len;
 } ptov_table_entry;
 
-#define PTOV_TABLE_SIZE 8
+/* (HakiOS, patch 1512: and one for each range of the boot loader's extra RAM) */
+#define PTOV_TABLE_SIZE (8 + HAKIOS_EXTRA_RAM_MAX)
 SECURITY_READ_ONLY_LATE(static ptov_table_entry)        ptov_table[PTOV_TABLE_SIZE];
 SECURITY_READ_ONLY_LATE(static boolean_t)               kva_active = FALSE;
+
+#include "hakios_extra_ram.h"
 
 
 vm_map_address_t
@@ -995,7 +998,9 @@ arm_vm_page_granular_helper(vm_offset_t start, vm_offset_t _end, vm_offset_t va,
 		va &= ~ARM_TT_L2_OFFMASK;
 		pa = va - gVirtBase + gPhysBase - pa_offset;
 
-		if (pa >= real_avail_end) {
+		/* (HakiOS, patch 1512: an extra range may be anywhere, below the window too) */
+		bool extra = hakios_extra_ram_meets(pa, ARM_TT_L2_SIZE);
+		if (pa >= real_avail_end && !extra) {
 			return;
 		}
 
@@ -1022,10 +1027,10 @@ arm_vm_page_granular_helper(vm_offset_t start, vm_offset_t _end, vm_offset_t va,
 		}
 
 		vm_offset_t len = _end - va;
-		if ((pa + len) > real_avail_end) {
+		if (!extra && (pa + len) > real_avail_end) {
 			_end -= (pa + len - real_avail_end);
 		}
-		assert((start - gVirtBase + gPhysBase - pa_offset) >= gPhysBase);
+		assert(extra || (start - gVirtBase + gPhysBase - pa_offset) >= gPhysBase);
 
 		/* Round up to the nearest PAGE_SIZE boundary when creating mappings:
 		 * PAGE_SIZE may be a multiple of ARM_PGBYTES, and we don't want to leave
@@ -1116,7 +1121,7 @@ arm_vm_page_granular_prot(vm_offset_t start, unsigned long size, pmap_paddr_t pa
 
 			tte2 = arm_kva_to_tte(align_start);
 
-			if ((pa >= gPhysBase) && (pa < real_avail_end)) {
+			if (((pa >= gPhysBase) && (pa < real_avail_end)) || hakios_extra_ram_covers(pa, ARM_TT_L2_SIZE)) {
 				tmplate = (pa & ARM_TTE_BLOCK_L2_MASK) | ARM_TTE_TYPE_BLOCK
 				    | ARM_TTE_VALID | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_NX
 				    | ARM_TTE_BLOCK_AP(pte_prot_APX) | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY)
@@ -1602,6 +1607,16 @@ arm_vm_physmap_init(boot_args *args)
 	arm_vm_physmap_slide(temp_ptov_table, (args->topOfKernelData - gPhysBase + gVirtBase),
 	    real_avail_end - args->topOfKernelData, AP_RWNA, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT); // rest of physmem
 
+	/*
+	 * HakiOS (patch 1512): the boot loader's extra RAM, each range after the last in the aperture. Its "va" for
+	 * arm_vm_physmap_slide() is where the static formula (pa - gPhysBase + gVirtBase) would put it, which for a range
+	 * below the window is no address at all: it is only ever turned back into the physical address.
+	 */
+	for (unsigned int i = 0; i < hakios_extra_ram_count; i++) {
+		arm_vm_physmap_slide(temp_ptov_table, hakios_extra_ram[i].pa - gPhysBase + gVirtBase,
+		    hakios_extra_ram[i].end - hakios_extra_ram[i].pa, AP_RWNA, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
+	}
+
 	assert((temp_ptov_table[ptov_index - 1].va + temp_ptov_table[ptov_index - 1].len) <= physmap_end);
 
 	// Sort in descending order of segment length.  LUT traversal is linear, so largest (most likely used)
@@ -1650,6 +1665,8 @@ arm_vm_prot_finalize(boot_args * args __unused)
 	cpu_stack_alloc(&BootCpuData);
 	arm64_replace_bootstack(&BootCpuData);
 	ml_static_mfree(phystokv(segBOOTDATAB - gVirtBase + gPhysBase), segSizeBOOTDATA);
+
+	hakios_extra_ram_to_vm();
 
 #if __ARM_KERNEL_PROTECT__
 	arm_vm_populate_kernel_el0_mappings();
@@ -1853,6 +1870,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 		max_mem_actual = memory_size;
 	} else {
 		max_mem_actual = mem_actual;
+		/* HakiOS (patch 1512): the boot loader's extra RAM beside the window (none with maxmem=) */
+		hakios_extra_ram_init();
+		mem_actual += ptoa((uint64_t)hakios_extra_ram_pages);
+		max_mem_actual += ptoa((uint64_t)hakios_extra_ram_pages);
 	}
 	if (mem_size >= ((VM_MAX_KERNEL_ADDRESS - VM_MIN_KERNEL_ADDRESS) / 2)) {
 		panic("Unsupported memory configuration %lx", mem_size);
@@ -1887,6 +1908,9 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 #else
 	static_memory_end = physmap_base + mem_size + (PTOV_TABLE_SIZE * ARM_TT_TWIG_SIZE); // worst possible case for block alignment
 	physmap_end = physmap_base + real_phys_size + (PTOV_TABLE_SIZE * ARM_TT_TWIG_SIZE);
+	/* (HakiOS, patch 1512: the extra RAM is in the aperture too) */
+	static_memory_end += ptoa((vm_map_address_t)hakios_extra_ram_pages);
+	physmap_end += ptoa((vm_map_address_t)hakios_extra_ram_pages);
 #endif // ARM_LARGE_MEMORY
 #endif
 
@@ -2202,6 +2226,9 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 
 	sane_size = mem_size - (avail_start - gPhysBase);
 	max_mem = mem_size;
+	/* (HakiOS, patch 1512: the extra RAM counts as the VM's: it is given to it in arm_vm_prot_finalize()) */
+	sane_size += ptoa((uint64_t)hakios_extra_ram_pages);
+	max_mem += ptoa((uint64_t)hakios_extra_ram_pages);
 	vm_kernel_slid_base = segLOWESTTEXT;
 	// vm_kernel_slide is set by arm_init()->arm_slide_rebase_and_sign_image()
 	vm_kernel_stext = segTEXTB;

@@ -285,7 +285,7 @@ endif
 # $(warning PRIMARY_KERNEL_CONFIGS is $(PRIMARY_KERNEL_CONFIGS))
 # $(warning VARIANT_CONFIGS is $(VARIANT_CONFIGS))
 
-MEMORY_SIZE := $(shell /usr/sbin/sysctl -n hw.memsize)
+MEMORY_SIZE := $(shell if [ -r /proc/meminfo ]; then awk '/MemTotal/{printf "%d", $$2*1024}' /proc/meminfo; else sysctl -n hw.memsize; fi)
 
 # Assume LTO scaling by default, unless it is being explicitly passed on the command-line
 LARGE_BUILD_FOOTPRINT := $(if $(BUILD_LTO),$(BUILD_LTO),1)

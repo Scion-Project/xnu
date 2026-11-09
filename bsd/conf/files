@@ -109,6 +109,8 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
 bsd/dev/unix_startup.c			standard
 
 bsd/dev/monotonic.c optional monotonic
+# HakiOS drivers: made by tools/hakios-config.py kernel from drivers/*/conf. Edit those, not these lines.
+# end of the HakiOS drivers
 bsd/dev/dev_perfmon.c optional config_perfmon
 
 bsd/libkern/crc32.c			standard
@@ -155,6 +157,52 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
 bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
 bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
 bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
+bsd/miscfs/apfs/apfs_deflate.c		optional apfs
+bsd/miscfs/apfs/apfs_zbitmap.c		optional apfs
+bsd/miscfs/apfs/apfs_lib.c		optional apfs
+bsd/miscfs/apfs/apfs_write.c		optional apfs
+bsd/miscfs/apfs/apfs_store.c		optional apfs
+bsd/miscfs/apfs/apfs_vfsops.c		optional apfs
+bsd/miscfs/apfs/apfs_vnops.c		optional apfs
+bsd/miscfs/ramfs/ramfs.c			optional ramfs
+bsd/hfs/BTree.c		optional hfs
+bsd/hfs/BTreeAllocate.c		optional hfs
+bsd/hfs/BTreeMiscOps.c		optional hfs
+bsd/hfs/BTreeNodeOps.c		optional hfs
+bsd/hfs/BTreeNodeReserve.c		optional hfs
+bsd/hfs/BTreeScanner.c		optional hfs
+bsd/hfs/BTreeTreeOps.c		optional hfs
+bsd/hfs/BTreeWrapper.c		optional hfs
+bsd/hfs/CatalogUtilities.c		optional hfs
+bsd/hfs/FileExtentMapping.c		optional hfs
+bsd/hfs/FileIDsServices.c		optional hfs
+bsd/hfs/MacOSStubs.c		optional hfs
+bsd/hfs/UnicodeWrappers.c		optional hfs
+bsd/hfs/VolumeAllocation.c		optional hfs
+bsd/hfs/hfs_attrlist.c		optional hfs
+bsd/hfs/hfs_btreeio.c		optional hfs
+bsd/hfs/hfs_builtin.c		optional hfs
+bsd/hfs/hfs_catalog.c		optional hfs
+bsd/hfs/hfs_chash.c		optional hfs
+bsd/hfs/hfs_cnode.c		optional hfs
+bsd/hfs/hfs_cprotect.c		optional hfs
+bsd/hfs/hfs_endian.c		optional hfs
+bsd/hfs/hfs_extents.c		optional hfs
+bsd/hfs/hfs_fsinfo.c		optional hfs
+bsd/hfs/hfs_hotfiles.c		optional hfs
+bsd/hfs/hfs_journal.c		optional hfs
+bsd/hfs/hfs_link.c		optional hfs
+bsd/hfs/hfs_lookup.c		optional hfs
+bsd/hfs/hfs_notification.c		optional hfs
+bsd/hfs/hfs_quota.c		optional hfs
+bsd/hfs/hfs_readwrite.c		optional hfs
+bsd/hfs/hfs_resize.c		optional hfs
+bsd/hfs/hfs_search.c		optional hfs
+bsd/hfs/hfs_vfsops.c		optional hfs
+bsd/hfs/hfs_vfsutils.c		optional hfs
+bsd/hfs/hfs_vnops.c		optional hfs
+bsd/hfs/hfs_xattr.c		optional hfs
+bsd/hfs/rangelist.c		optional hfs
 
 bsd/miscfs/routefs/routefs_ops.c	optional routefs
 
@@ -361,6 +409,7 @@ bsd/security/audit/audit_syscalls.c		standard
 bsd/security/audit/audit_worker.c		optional config_audit
 
 bsd/pthread/pthread_shims.c		standard
+bsd/pthread/pthread_kext_static.c    standard
 bsd/pthread/pthread_priority.c		standard
 bsd/pthread/pthread_workqueue.c		standard
 
@@ -383,6 +432,7 @@ bsd/kern/kern_debug.c			standard
 bsd/kern/kern_symfile.c			standard
 bsd/kern/kern_descrip.c			standard
 bsd/kern/kern_guarded.c			standard
+bsd/kern/kern_minimac.c			optional config_macf
 bsd/kern/kern_event.c			standard
 bsd/kern/kern_control.c			optional networking
 bsd/kern/kern_exec.c			standard

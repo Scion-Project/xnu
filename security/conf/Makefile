@@ -17,6 +17,9 @@ MASTERCONFDIR = $(SRCROOT)/config
 DOCONFDEPS = $(addprefix $(MASTERCONFDIR)/, MASTER MASTER.$(DOCONF_ARCH_CONFIG_LC)) \
 	$(addprefix $(SOURCE)/, Makefile.template Makefile.$(DOCONF_ARCH_CONFIG_LC) files files.$(DOCONF_ARCH_CONFIG_LC))
 
+# HakiOS: the drivers' choice (tools/hakios-config.py kernel); a new choice makes the configuration again
+DOCONFDEPS += $(wildcard $(MASTERCONFDIR)/MASTER.hakios)
+
 ifneq (,$(wildcard $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)))
 DOCONFDEPS += $(MASTERCONFDIR)/MASTER.$(DOCONF_ARCH_CONFIG_LC).$(CURRENT_MACHINE_CONFIG_LC)
 endif

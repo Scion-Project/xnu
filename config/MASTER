@@ -113,6 +113,9 @@ options		CONFIG_WORKLOOP_DEBUG	# <config_workloop_debug>
 #	4.4 filesystems
 #
 options		MOCKFS		# Boot from an executable	# <mockfs>
+options		APFS		# Apple File System, read only	# <apfs>
+options		RAMFS		# Read-write filesystem in memory	# <ramfs>
+options		HFS		# HFS Plus, read-write: the data volume on the flash	# <hfs>
 options		FIFO		# fifo support			# <fifo>
 options		FDESC		# fdesc_fs support		# <fdesc>
 options		DEVFS		# devfs support			# <devfs>

@@ -91,7 +91,7 @@
 #include <pexpert/arm64/BCM2837.h>
 
 #define MAX_L2_CLINE                   6
-#define MAX_CPUS                       4
+#define MAX_CPUS                       8 /* the Raspberry Pi has four; the boards this runs on now have up to eight */
 #define MAX_CPU_CLUSTERS               1
 
 #define CORE_NCTRS                     8 /* Placeholder; KPC is not enabled for this target */

@@ -29,6 +29,7 @@ SECURITY_READ_ONLY_LATE(bool) enable_dklog_serial_output = false;
 static SIMPLE_LOCK_DECLARE(kprintf_lock, 0);
 
 static void serial_putc_crlf(char c);
+extern void loader_log_putc(char c);
 
 __startup_func
 static void
@@ -159,6 +160,7 @@ serial_putc_crlf(char c)
 	if (c == '\n') {
 		uart_putc('\r');
 	}
+	loader_log_putc(c);
 	uart_putc(c);
 }
 

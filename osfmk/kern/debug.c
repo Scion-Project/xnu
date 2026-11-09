@@ -1147,9 +1147,12 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
 	__builtin_unreachable();
 }
 
+extern void loader_return(void);
+
 void
 panic_spin_forever(void)
 {
+	loader_return();
 	for (;;) {
 #if defined(__arm__) || defined(__arm64__)
 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
@@ -1163,6 +1166,7 @@ panic_spin_forever(void)
 static void
 kdp_machine_reboot_type(unsigned int type, uint64_t debugger_flags)
 {
+	loader_return();
 	if ((type == kPEPanicRestartCPU) && (debugger_flags & DEBUGGER_OPTION_SKIP_PANICEND_CALLOUTS)) {
 		PEHaltRestart(kPEPanicRestartCPUNoCallouts);
 	} else {

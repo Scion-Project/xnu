@@ -1099,6 +1099,14 @@ __pthread_kill(__unused proc_t p, struct __pthread_kill_args *uap,
 	thread_t target_act;
 	int error = 0;
 	int signum = uap->sig;
+
+#if defined(__arm64__)
+	if (signum == SIGABRT) {
+		extern void user_abort_trace(void);
+
+		user_abort_trace();             /* no crash reporter here: this is where an abort() gets recorded */
+	}
+#endif
 	struct uthread *uth;
 
 	target_act = (thread_t)port_name_to_thread(uap->thread_port,

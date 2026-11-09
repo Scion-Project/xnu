@@ -32,6 +32,10 @@
  * Version 2.0.
  */
 
+#if defined(__arm64__)
+#include <pexpert/arm64/board_config.h>
+#endif
+
 const char * gIOKernelConfigTables =
     "("
     "   {"
@@ -39,4 +43,11 @@ const char * gIOKernelConfigTables =
     "     'IOProviderClass' = IOPlatformExpertDevice;"
     "     'IOProbeScore'    = 0:32;"
     "   }"
+#if defined(__arm64__) && !defined(APPLE_ARM64_ARCH_FAMILY)
+    "   ,{"
+    "     'IOClass'         = GenericARMPE;"
+    "     'IOProviderClass' = IOPlatformExpertDevice;"
+    "     'IOProbeScore'    = 1000:32;"
+    "   }"
+#endif
     ")";

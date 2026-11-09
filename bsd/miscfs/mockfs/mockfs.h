@@ -59,7 +59,7 @@ struct mockfs_mount {
 	mockfs_fsnode_t mockfs_root;            /* Root of the node tree */
 	boolean_t       mockfs_memory_backed;   /* Does the backing store reside in memory */
 	boolean_t       mockfs_physical_memory; /* (valid if memory backed) */
-	uint32_t        mockfs_memdev_base;     /* Base page of the backing store (valid if memory backed) */
+	uint64_t        mockfs_memdev_base;     /* Base page of the backing store (valid if memory backed) */
 	uint64_t        mockfs_memdev_size;     /* Size of the backing store (valid if memory backed) */
 };
 

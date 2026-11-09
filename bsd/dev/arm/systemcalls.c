@@ -29,6 +29,7 @@
 #include <sys/sysproto.h>
 #include <sys/kauth.h>
 #include <sys/bitstring.h>
+#include <sys/hakios.systrace.h>
 
 #include <security/audit/audit.h>
 
@@ -180,6 +181,8 @@ unix_syscall(
 	AUDIT_SYSCALL_ENTER(code, proc, uthread);
 	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
 	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
+
+	HAKIOS_SYSTRACE(proc, syscode, uthread, error);
 
 #if CONFIG_MACF
 skip_syscall:

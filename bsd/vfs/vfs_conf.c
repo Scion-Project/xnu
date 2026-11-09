@@ -103,6 +103,9 @@ extern  struct vfsops mockfs_vfsops;
 extern  int mockfs_mountroot(mount_t, vnode_t, vfs_context_t);
 #endif /* MOCKFS */
 
+#define HAKIOS_VFS_PART 1
+#include "hakios_vfs_conf.h"
+
 enum fs_type_num {
 	FT_NFS = 2,
 	FT_DEVFS = 19,
@@ -193,6 +196,9 @@ static struct vfstable vfstbllist[] = {
 		.vfc_sysctl = NULL
 	},
 #endif /* BINDFS */
+
+#define HAKIOS_VFS_PART 2
+#include "hakios_vfs_conf.h"
 
 #if MOCKFS
 	/* If we are configured for it, mockfs should always be the last standard entry (and thus the last FS we attempt mountroot with) */
@@ -298,6 +304,9 @@ extern const struct vnodeopv_desc devfs_fdesc_vnodeop_opv_desc;
 extern const struct vnodeopv_desc mockfs_vnodeop_opv_desc;
 #endif /* MOCKFS */
 
+#define HAKIOS_VFS_PART 3
+#include "hakios_vfs_conf.h"
+
 extern const struct vnodeopv_desc nullfs_vnodeop_opv_desc;
 extern const struct vnodeopv_desc bindfs_vnodeop_opv_desc;
 
@@ -327,5 +336,7 @@ const struct vnodeopv_desc *vfs_opv_descs[] = {
 #if MOCKFS
 	&mockfs_vnodeop_opv_desc,
 #endif /* MOCKFS */
+#define HAKIOS_VFS_PART 4
+#include "hakios_vfs_conf.h"
 	NULL
 };

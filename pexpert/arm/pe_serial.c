@@ -681,6 +681,10 @@ SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) vmapple_uart_serial_f
 
 /*****************************************************************************/
 
+#include "hakios_pe_serial_ns16550.h"
+
+/*****************************************************************************/
+
 /**
  * Output @str onto every registered serial interface by polling.
  *
@@ -696,6 +700,8 @@ register_serial_functions(struct pe_serial_functions *fns)
 	fns->next = gPESF;
 	gPESF = fns;
 }
+
+#include "hakios_pe_serial_vcon.h"
 
 #if HIBERNATION
 /**
@@ -793,11 +799,21 @@ serial_init(void)
 
 #ifdef VMAPPLE_UART
 	if (SecureDTFindEntry("name", "uart0", &entryP) == kSuccess) {
+		char const *uart_compat = NULL;
+		unsigned int compat_size = 0;
+
 		SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size);
-		vmapple_uart0_base_vaddr = ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
+		if (SecureDTGetProperty(entryP, "compatible", (void const **)&uart_compat, &compat_size) == kSuccess &&
+		    compat_size >= sizeof("ns16550a") && strcmp(uart_compat, "ns16550a") == 0) {
+			ns16550_base_vaddr = ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
+		} else {
+			vmapple_uart0_base_vaddr = ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
+		}
 	}
 
-	if (vmapple_uart0_base_vaddr != 0) {
+	if (ns16550_base_vaddr != 0) {
+		register_serial_functions(&ns16550_serial_functions);
+	} else if (vmapple_uart0_base_vaddr != 0) {
 		register_serial_functions(&vmapple_uart_serial_functions);
 	}
 #endif /* VMAPPLE_UART */
@@ -896,6 +912,10 @@ serial_init(void)
 		register_serial_functions(&apple_serial_functions);
 	}
 #endif /* APPLE_UART */
+
+	if (hakios_vcon_probe(gPESF != NULL)) {
+		register_serial_functions(&virtio_console_serial_functions);
+	}
 
 	if (gPESF == NULL) {
 		return 0;

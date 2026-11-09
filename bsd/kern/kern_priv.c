@@ -83,6 +83,19 @@ priv_check_cred(kauth_cred_t cred, int priv, int flags)
 	int error;
 
 	/*
+	 * hakios: nothing is signed here and no process carries an entitlement (AMFI is a stub), so
+	 * every privilege that an entitlement would answer for is refused -- and Darwin leans on one of
+	 * them for ordinary work. A daemon that goes to the network on behalf of an application
+	 * (trustd checking the certificate for whoever opened the connection, nsurlsessiond carrying
+	 * out its downloads) describes the connection to NECP as delegated, and without this
+	 * privilege the kernel refuses it with EPERM: the download then never starts and never fails.
+	 * These daemons run as mobile, so the "root gets everything" rule below does not reach them.
+	 */
+	if (priv == PRIV_NET_PRIVILEGED_SOCKET_DELEGATE) {
+		return 0;
+	}
+
+	/*
 	 * We first evaluate policies that may deny the granting of
 	 * privilege unilaterally.
 	 */

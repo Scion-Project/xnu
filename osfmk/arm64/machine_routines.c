@@ -734,6 +734,11 @@ ml_get_machine_mem(void)
 	return machine_info.memory_size;
 }
 
+extern void loader_return(void);
+extern void loader_exit_wanted(bool reset);    /* osfmk/arm64/loader_return.c */
+extern void hakios_adreno_stop(void);
+extern void hakios_exynos_halt_off(boolean_t reboot);  /* drivers/power/exynos/hakios.exynos_poweroff.c (halt_off=N, the Galaxy S9) */
+
 __attribute__((noreturn))
 void
 halt_all_cpus(boolean_t reboot)
@@ -745,6 +750,11 @@ halt_all_cpus(boolean_t reboot)
 		printf("CPU halted\n");
 		PEHaltRestart(kPEHaltCPU);
 	}
+	/* No platform driver powers the machine off: hand control (and the log) back to the loader. */
+	hakios_adreno_stop();
+	hakios_exynos_halt_off(reboot); /* a halt with halt_off=N on the S9: panel dark, PS_HOLD low; back here only if not off */
+	loader_exit_wanted(reboot);     /* without a loader: PSCI SYSTEM_RESET or SYSTEM_OFF */
+	loader_return();
 	while (1) {
 		;
 	}
@@ -932,6 +942,8 @@ ml_read_chip_revision(unsigned int *rev __unused)
 #endif
 }
 
+#include "hakios_ml.h"
+
 void
 ml_parse_cpu_topology(void)
 {
@@ -945,6 +957,7 @@ ml_parse_cpu_topology(void)
 	int64_t cluster_max_cpu_phys_id[MAX_CPU_CLUSTER_PHY_ID + 1];
 	const boolean_t cpus_boot_arg_present = PE_parse_boot_argn("cpus", &cpu_boot_arg, sizeof(cpu_boot_arg));
 	const boolean_t cpumask_boot_arg_present = PE_parse_boot_argn("cpumask", &cpumask_boot_arg, sizeof(cpumask_boot_arg));
+	PE_parse_boot_argn("small_cores", &small_cores_apart, sizeof(small_cores_apart));
 
 	// The cpus=N and cpumask=N boot args cannot be used simultaneously. Flag this
 	// so that we trigger a panic later in the boot process, once serial is enabled.
@@ -1005,6 +1018,10 @@ ml_parse_cpu_topology(void)
 		cpu->phys_id = (uint32_t)ml_readprop(child, "reg", ML_READPROP_MANDATORY);
 
 		cpu->l2_access_penalty = (uint32_t)ml_readprop(child, "l2-access-penalty", 0);
+		/* a core the loader calls small is paired with a faster one: see ml_choose_slow_core_partners() (hakios_ml.h) */
+		if (cpu->l2_access_penalty == 0 && ml_readprop(child, "small-core", 0) != 0 && small_cores_apart) {
+			cpu->l2_access_penalty = 1;
+		}
 		cpu->l2_cache_size = (uint32_t)ml_readprop(child, "l2-cache-size", 0);
 		cpu->l2_cache_id = (uint32_t)ml_readprop(child, "l2-cache-id", 0);
 		cpu->l3_cache_size = (uint32_t)ml_readprop(child, "l3-cache-size", 0);
@@ -1107,6 +1124,8 @@ ml_parse_cpu_topology(void)
 	cluster_offsets[0] = 0;
 #endif
 	assert(topology_info.boot_cpu != NULL);
+	ml_mpidr_numbering();
+	ml_choose_slow_core_partners();
 	ml_read_chip_revision(&topology_info.chip_revision);
 
 	/*
@@ -1215,7 +1234,7 @@ ml_get_cpu_number_local(void)
 
 	/* We identify the CPU based on the constant bits of MPIDR_EL1. */
 	MRS(mpidr_el1_value, "MPIDR_EL1");
-	cpu_id = ml_get_cpu_number((uint32_t)mpidr_el1_value);
+	cpu_id = ml_get_cpu_number(ml_phys_id_from_mpidr(mpidr_el1_value));
 
 	assert(cpu_id <= (unsigned int)ml_get_max_cpu_number());
 
@@ -1230,7 +1249,7 @@ ml_get_cluster_number_local()
 
 	/* We identify the cluster based on the constant bits of MPIDR_EL1. */
 	MRS(mpidr_el1_value, "MPIDR_EL1");
-	cluster_id = ml_get_cluster_number((uint32_t)mpidr_el1_value);
+	cluster_id = ml_get_cluster_number(ml_phys_id_from_mpidr(mpidr_el1_value));
 
 	assert(cluster_id <= (unsigned int)ml_get_max_cluster_number());
 
@@ -1427,17 +1446,9 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 	processor_t processor = PERCPU_GET_RELATIVE(processor, cpu_data, this_cpu_datap);
 	if (!is_boot_cpu) {
 		processor_init(processor, this_cpu_datap->cpu_number, pset);
-
-		if (this_cpu_datap->cpu_l2_access_penalty) {
-			/*
-			 * Cores that have a non-zero L2 access penalty compared
-			 * to the boot processor should be de-prioritized by the
-			 * scheduler, so that threads use the cores with better L2
-			 * preferentially.
-			 */
-			processor_set_primary(processor, master_processor);
-		}
 	}
+	/* the cores with an L2 access penalty are de-prioritized, each behind a faster core of its own: ml_pair_slow_processors() (hakios_ml.h) */
+	ml_pair_slow_processors(this_cpu_datap->cpu_number);
 
 	*processor_out = processor;
 	*ipi_handler_out = cpu_signal_handler;
@@ -2237,8 +2248,16 @@ _enable_virtual_timer(void)
 	uint64_t cntvctl = CNTV_CTL_EL0_ENABLE; /* One wants to use 32 bits, but "mrs" prefers it this way */
 
 	__builtin_arm_wsr64("CNTV_CTL_EL0", cntvctl);
+#if defined(APPLE_ARM64_ARCH_FAMILY)
 	/* disable the physical timer as a precaution, as its registers reset to architecturally unknown values */
 	__builtin_arm_wsr64("CNTP_CTL_EL0", CNTP_CTL_EL0_IMASKED);
+#else
+	/*
+	 * When running at EL1 under a third-party hypervisor (e.g. Qualcomm's),
+	 * the EL1 physical timer registers are trapped and the access faults.
+	 * The guest only owns the virtual timer.
+	 */
+#endif
 }
 
 void

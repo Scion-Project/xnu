@@ -170,7 +170,7 @@ __END_DECLS
 #define UIO_SIZEOF( a_iovcount ) \
 	( sizeof(struct uio) + UIO_SIZEOF_IOVS(a_iovcount) )
 
-typedef char __attribute__((aligned(_Alignof(union iovecs)))) uio_stackbuf_t;
+typedef uint64_t uio_stackbuf_t; /* was over-aligned char; array of those is rejected by clang >= 16 */
 
 #define UIO_IS_USER_SPACE32( a_uio_t )  \
 	( (a_uio_t)->uio_segflg == UIO_USERSPACE32 || (a_uio_t)->uio_segflg == UIO_PHYS_USERSPACE32 || \

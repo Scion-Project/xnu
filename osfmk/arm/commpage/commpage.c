@@ -363,6 +363,8 @@ _get_commpage_text_priv_address(void)
 }
 
 #if defined(__arm64__)
+#include "hakios_commpage.h"
+
 /**
  * Initializes all commpage entries and sysctls for EL0 visible features in ID_AA64ISAR0_EL1
  */
@@ -370,7 +372,7 @@ static void
 commpage_init_arm_optional_features_isar0(uint64_t *commpage_bits)
 {
 	uint64_t bits = 0;
-	uint64_t isar0 = __builtin_arm_rsr64("ID_AA64ISAR0_EL1");
+	uint64_t isar0 = hakios_id_floor(__builtin_arm_rsr64("ID_AA64ISAR0_EL1"), 0x0000000000011120ULL);
 
 	if ((isar0 & ID_AA64ISAR0_EL1_TS_MASK) >= ID_AA64ISAR0_EL1_TS_FLAGM_EN) {
 		gARM_FEAT_FlagM = 1;
@@ -433,7 +435,7 @@ static void
 commpage_init_arm_optional_features_isar1(uint64_t *commpage_bits)
 {
 	uint64_t bits = 0;
-	uint64_t isar1 = __builtin_arm_rsr64("ID_AA64ISAR1_EL1");
+	uint64_t isar1 = hakios_id_floor(__builtin_arm_rsr64("ID_AA64ISAR1_EL1"), 0ULL);
 	uint64_t sctlr = __builtin_arm_rsr64("SCTLR_EL1");
 
 	if ((isar1 & ID_AA64ISAR1_EL1_SPECRES_MASK) >= ID_AA64ISAR1_EL1_SPECRES_EN &&
@@ -520,7 +522,7 @@ static void
 commpage_init_arm_optional_features_mmfr2(uint64_t *commpage_bits)
 {
 	uint64_t bits = 0;
-	uint64_t mmfr2 = __builtin_arm_rsr64("ID_AA64MMFR2_EL1");
+	uint64_t mmfr2 = hakios_id_floor(__builtin_arm_rsr64("ID_AA64MMFR2_EL1"), 0ULL);
 
 	if ((mmfr2 & ID_AA64MMFR2_EL1_AT_MASK) >= ID_AA64MMFR2_EL1_AT_LSE2_EN) {
 		gARM_FEAT_LSE2 = 1;
@@ -537,7 +539,7 @@ static void
 commpage_init_arm_optional_features_pfr0(uint64_t *commpage_bits)
 {
 	uint64_t bits = 0;
-	uint64_t pfr0 = __builtin_arm_rsr64("ID_AA64PFR0_EL1");
+	uint64_t pfr0 = hakios_id_floor(__builtin_arm_rsr64("ID_AA64PFR0_EL1"), 0x000000000000ffffULL);
 
 	if ((pfr0 & ID_AA64PFR0_EL1_CSV3_MASK) >= ID_AA64PFR0_EL1_CSV3_EN) {
 		gARM_FEAT_CSV3 = 1;
@@ -573,7 +575,7 @@ commpage_init_arm_optional_features_pfr0(uint64_t *commpage_bits)
 static void
 commpage_init_arm_optional_features_pfr1(uint64_t *commpage_bits __unused)
 {
-	uint64_t pfr1 = __builtin_arm_rsr64("ID_AA64PFR1_EL1");
+	uint64_t pfr1 = hakios_id_floor(__builtin_arm_rsr64("ID_AA64PFR1_EL1"), 0ULL);
 
 	if ((pfr1 & ID_AA64PFR1_EL1_SSBS_MASK) >= ID_AA64PFR1_EL1_SSBS_EN) {
 		gARM_FEAT_SSBS = 1;

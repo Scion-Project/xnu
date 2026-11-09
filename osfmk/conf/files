@@ -361,3 +361,11 @@ osfmk/corecrypto/ccsha256_ltc_di.c	standard
 
 osfmk/prng/prng_random.c	standard
 osfmk/prng/entropy.c   standard
+osfmk/minicrypto/mc_digests.c	standard
+osfmk/minicrypto/mc_provider.c	standard
+osfmk/minicrypto/mc_aes.c	standard
+osfmk/minicrypto/mc_keywrap.c	standard
+osfmk/minicrypto/third_party/monocypher.c	standard
+osfmk/minicrypto/third_party/bearssl_aes_ct64.c	standard
+osfmk/minicrypto/third_party/bearssl_aes_ct64_enc.c	standard
+osfmk/minicrypto/third_party/bearssl_aes_ct64_dec.c	standard

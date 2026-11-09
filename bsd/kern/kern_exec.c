@@ -100,6 +100,7 @@
 #include <sys/acct.h>
 #include <sys/exec.h>
 #include <sys/kdebug.h>
+#include <sys/hakios.exec.h>
 #include <sys/signal.h>
 #include <sys/aio_kern.h>
 #include <sys/sysproto.h>
@@ -1315,6 +1316,7 @@ grade:
 	 * Actually load the image file we previously decided to load.
 	 */
 	lret = load_machfile(imgp, mach_header, thread, &map, &load_result);
+	HAKIOS_EXEC_TRACE(imgp, "load_machfile", lret);
 	if (lret != LOAD_SUCCESS) {
 		error = load_return_to_errno(lret);
 
@@ -2197,6 +2199,7 @@ again:
 	}
 
 	error = exec_check_permissions(imgp);
+	HAKIOS_EXEC_TRACE(imgp, "exec_check_permissions", error);
 	if (error) {
 		goto bad;
 	}
@@ -2709,7 +2712,7 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
 			AUDIT_SUBCALL_ENTER(OPEN, p, uthread);
 
 			NDINIT(ndp, LOOKUP, OP_OPEN, FOLLOW | AUDITVNPATH1, UIO_SYSSPACE,
-			    CAST_USER_ADDR_T(psfa->psfaa_openargs.psfao_path),
+			    CAST_USER_ADDR_T(hakios_exec_applog_path(psfa->psfaa_filedes, psfa->psfaa_openargs.psfao_path)),
 			    imgp->ip_vfs_context);
 
 			error = open1(imgp->ip_vfs_context, ndp,
@@ -3094,10 +3097,7 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
 	int error = 0;
 	struct persona *persona = NULL;
 
-	if (!IOCurrentTaskHasEntitlement( PERSONA_MGMT_ENTITLEMENT)) {
-		return EPERM;
-	}
-
+	/* hakios: no entitlement and no persona are needed; see hakios_spawn_adopt_credential() (hakios.exec.c) */
 	if (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_GROUPS) {
 		if (px_persona->pspi_ngroups > NGROUPS_MAX) {
 			return EINVAL;
@@ -3105,12 +3105,6 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
 	}
 
 	persona = persona_lookup(px_persona->pspi_id);
-	if (!persona) {
-		error = ESRCH;
-		goto out;
-	}
-
-out:
 	if (persona) {
 		persona_put(persona);
 	}
@@ -3130,9 +3124,6 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
 	 * the kauth with a different UID/GID combo
 	 */
 	persona = persona_lookup(px_persona->pspi_id);
-	if (!persona) {
-		return ESRCH;
-	}
 
 	cred = kauth_cred_proc_ref(p);
 
@@ -3156,6 +3147,10 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
 		    px_persona->pspi_groups,
 		    px_persona->pspi_ngroups,
 		    px_persona->pspi_gmuid);
+	}
+
+	if (persona == NULL) {
+		return hakios_spawn_adopt_credential(p, cred);
 	}
 
 	ret = persona_proc_adopt(p, persona, cred);
@@ -5590,6 +5585,8 @@ __attribute__((noinline))
 static int
 exec_extract_strings(struct image_params *imgp)
 {
+	char            inject_env[512];
+	const char     *extra_env;
 	int error = 0;
 	int     ptr_size = (imgp->ip_flags & IMGPF_WAS_64BIT_ADDR) ? 8 : 4;
 	int new_ptr_size = (imgp->ip_flags & IMGPF_IS_64BIT_ADDR) ? 8 : 4;
@@ -5756,6 +5753,20 @@ exec_extract_strings(struct image_params *imgp)
 			goto bad;
 		}
 		imgp->ip_argspace -= new_ptr_size; /* to hold envv[] entry */
+		imgp->ip_envc++;
+	}
+
+	/* the variables the bring-up aids add (hakios.exec.c) */
+	for (unsigned cursor = 0; (extra_env = hakios_exec_extra_env(imgp, &cursor, inject_env, sizeof(inject_env))) != NULL;) {
+		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(extra_env), UIO_SYSSPACE, TRUE);
+		if (error) {
+			goto bad;
+		}
+		if (imgp->ip_argspace < new_ptr_size) {
+			error = E2BIG;
+			goto bad;
+		}
+		imgp->ip_argspace -= new_ptr_size;
 		imgp->ip_envc++;
 	}
 
@@ -6636,7 +6647,9 @@ handle_mac_transition:
 	}
 
 	/* Update the process' identity version and set the security token */
-	proc_setpidversion(p, OSIncrementAtomic(&nextpidversion));
+	if (hakios_exec_bumps_pidversion(p)) {
+		proc_setpidversion(p, OSIncrementAtomic(&nextpidversion));
+	}
 	task_set_uniqueid(task);
 	set_security_token_task_internal(p, task);
 
@@ -7538,6 +7551,7 @@ process_signature(proc_t p, struct image_params *imgp)
 	}
 
 done:
+	HAKIOS_EXEC_TRACE_SIGNATURE(p, imgp, error, signature_failure_reason != OS_REASON_NULL);
 	if (0 == error) {
 		/*
 		 * Update the new process's signature-dependent process state.
