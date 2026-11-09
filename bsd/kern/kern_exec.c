@@ -8798,6 +8798,9 @@ process_signature(proc_t p, struct image_params *imgp)
 			    p->p_name);
 		}
 	}
+#elif defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* keep the per-exec console line the macOS-target build printed above */
+	printf("exec %s\n", p->p_name);
 #endif /* XNU_TARGET_OS_OSX */
 
 	/* If the code signature came through the image activation path, we skip the
