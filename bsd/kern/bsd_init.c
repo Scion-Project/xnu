@@ -701,8 +701,8 @@ bsd_init(void)
 	bsd_init_kprintf("calling vfsinit\n");
 	vfsinit();
 
-#if defined(ARM64_BOARD_CONFIG_SWEET)
-	/* AMFI's MAC policy is built in on SWEET (bsd/kern/sweet_amfi.c). */
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* AMFI's MAC policy is built in (bsd/kern/sweet_amfi.c). */
 	extern void sweet_amfi_policy_register(void);
 	sweet_amfi_policy_register();
 #endif
