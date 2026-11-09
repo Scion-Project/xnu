@@ -1885,6 +1885,9 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	/* For large memory systems with no PPL such as virtual machines */
 	static_memory_end = phystokv(args->topOfKernelData);
 	physmap_end = physmap_base + real_phys_size;
+#if SCION_NATIVE_PAC
+	physmap_end += PTOV_TABLE_SIZE * ARM_TT_TWIG_SIZE;     /* worst-case twig alignment, as below */
+#endif
 #else
 	static_memory_end = physmap_base + mem_size + (PTOV_TABLE_SIZE * ARM_TT_TWIG_SIZE); // worst possible case for block alignment
 	physmap_end = physmap_base + real_phys_size + (PTOV_TABLE_SIZE * ARM_TT_TWIG_SIZE);
