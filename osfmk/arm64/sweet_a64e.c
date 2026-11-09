@@ -82,6 +82,10 @@ extern int proc_selfpid(void);
  * 65536  recommended cores 0xf1 (cpu0 + the four M3s) once the machine is up: the scheduler here is symmetric, so UI work else lands on
  *        the A55s; threads bound to an A55 (FP16 pins) still run there
  *131072  the A55s' governor floor 1456 MHz (measured: no change, kept for the record)
+ * The Liquid Glass run (docs/ios27/LIQUID-GLASS.md):
+ *262144  the GPU's app chains in a queue with a thread of their own (bsd/dev/starlte_gpu.c): a submit only appends, waits
+ *        sleep, and the framebuffer shows a frame once the chains queued before its swap are done (needs bit 64)
+ *524288  the GPU present cleans a frame out of the CPU caches only when its IOSurface seed moved (a CPU wrote it)
  * The FP16 forms emulated under bit 2 now include FCCMP/FCCMPE/FCSEL H, FMOV/FABS/FNEG H and FABS/FNEG .4H/.8H (tools/ios27/perf/test/fp16t.c
  * checks them bit for bit); and, always on, a trap that was taken on an M3 but is handled after the thread migrated to an A55 is
  * retried (the A55 runs it) instead of ending in SIGILL.

@@ -627,6 +627,36 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 	}
 
 	IOReturn ret = kIOReturnSuccess;
+	/*
+	 * The waits sleep (or spin) for as long as the GPU works: not under fLock, or this client's other threads
+	 * (the render thread's next submit while a completion thread waits on a fence) would wait with them.
+	 */
+	if (selector == SBM_WAIT_IDLE) {
+		return starlte_gpu_user_wait_seq(0, u.timeout != 0) == 0 ? kIOReturnSuccess : kIOReturnTimeout;
+	}
+	if (selector == SBM_WAIT_BO || selector == SBM_GEM_CLOSE) {
+		IOLockLock(fLock);
+		sbm_bo *bo = lookup(selector == SBM_WAIT_BO ? u.wait.handle : u.close.handle);
+		uint64_t seq = bo ? bo->seq : 0;
+		IOLockUnlock(fLock);
+		if (bo == NULL) {
+			return kIOReturnBadArgument;
+		}
+		bool block = selector == SBM_GEM_CLOSE || u.wait.timeout_ns != 0;
+		if (seq != 0 && starlte_gpu_user_wait_seq(seq, block) != 0 && selector == SBM_WAIT_BO) {
+			return kIOReturnTimeout;
+		}
+		if (selector == SBM_WAIT_BO) {
+			if (args->structureOutput != NULL) {
+				if (args->structureOutputSize < want) {
+					return kIOReturnBadArgument;
+				}
+				bcopy(&u, args->structureOutput, want);
+				args->structureOutputSize = (uint32_t)want;
+			}
+			return kIOReturnSuccess;
+		}
+	}
 	IOLockLock(fLock);
 	switch (selector) {
 	case SBM_SUBMIT: {
@@ -643,21 +673,9 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 		ret = err == 0 ? kIOReturnSuccess : err == ETIMEDOUT ? kIOReturnTimeout : kIOReturnIOError;
 		break;
 	}
-	case SBM_WAIT_BO: {
-		sbm_bo *bo = lookup(u.wait.handle);
-		ret = bo ? kIOReturnSuccess : kIOReturnBadArgument;
-		if (bo != NULL && bo->seq != 0 && starlte_gpu_user_wait_seq(bo->seq, u.wait.timeout_ns != 0) != 0) {
-			ret = kIOReturnTimeout;
-		}
-		break;
-	}
 	case SBM_ASYNC:
 		fAsync = sbm_async_ok && u.flag != 0;
 		u.flag = fAsync;
-		break;
-	case SBM_WAIT_IDLE:
-		ret = starlte_gpu_user_wait_seq(0, u.timeout != 0) == 0 ? kIOReturnSuccess : kIOReturnTimeout;
-		want = 0;
 		break;
 	case SBM_CREATE_BO:
 		ret = createBO(&u.create);
@@ -682,6 +700,7 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 	case SBM_GEM_CLOSE: {
 		sbm_bo *bo = lookup(u.close.handle);
 		if (bo) {
+			/* (waited for above, outside the lock; a chain that named it since then has to end too) */
 			if (bo->seq != 0) {
 				(void)starlte_gpu_user_wait_seq(bo->seq, true);
 			}

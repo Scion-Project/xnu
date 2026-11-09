@@ -1091,6 +1091,32 @@ static uint32_t sgu_busy_req;
 static uint64_t sgu_seq_sub, sgu_seq_done;
 static uint64_t sgu_as_n, sgu_as_prev_waits, sgu_as_prev_ns, sgu_as_gpu_ns, sgu_as_gpu_max, sgu_as_t0;
 
+/*
+ * The apps' chains in a queue, run by a thread of their own (boot-arg sweetspeed&262144, for clients with async
+ * submits, sweetspeed&64). Without it an "asynchronous" submit returns at once only while the GPU is free: the next
+ * submit spins (delay() under sg_lock) until the chain before it is done, and so does every wait. A frame is a dozen
+ * or more chains (a pass is a vertex/tiler chain and a fragment chain; a blur is many passes), so the render thread
+ * spent the GPU's time spinning on a core and the next frame's CPU work never overlapped this frame's GPU work.
+ * With the queue a submit only appends (FIFO, one chain on the GPU at a time, in the order given, which Panfrost
+ * needs), the worker starts each chain and sleeps in short naps until it is done, and waiters sleep until their
+ * chain's number is done. sg_lock is not held while a chain runs (as before), so buffers can be mapped meanwhile.
+ * This is what Scion's iOS 16.5 Mali driver does (drivers/gpu/mali/hakios.mali.c: mali_queue, mali_worker).
+ */
+#define SGU_QUEUE       256
+static struct {
+	uint64_t jc, seq, queued;
+	uint32_t req;
+} sgu_q[SGU_QUEUE];
+static unsigned sgu_q_head, sgu_q_count, sgu_q_deepest;
+static uint64_t sgu_q_seq, sgu_q_done;                  /* last number given, last number done */
+static bool sgu_q_on, sgu_q_started;
+static int sgu_q_checked;
+static int sgu_q_nap_event;
+static uint32_t sgu_q_nap_us = 50;                      /* boot-arg sgu_nap_us (10 to 1000) */
+static LCK_MTX_DECLARE(sgu_q_lock, &sg_lck_grp);
+static LCK_MTX_DECLARE(sgu_q_nap_lock, &sg_lck_grp);
+extern uint32_t sweet_speed_flags(void);                /* boot-arg sweetspeed (osfmk/arm64/sweet_a64e.c) */
+
 /* sg_lock held. 0: nothing on the GPU any more; EBUSY: still running (block false); EIO: failed. */
 static int
 sgu_retire_locked(bool block)
@@ -1110,11 +1136,12 @@ sgu_retire_locked(bool block)
 		if ((jirq & ((1u << js) | (1u << (js + 16)))) || mirq || (girq & 0x81)) {
 			break;
 		}
+		/* (the queue's worker only ever looks: its looks must end a hung chain too) */
+		if (mach_absolute_time() >= deadline && (block || sgu_q_on)) {
+			break;
+		}
 		if (!block) {
 			return EBUSY;
-		}
-		if (mach_absolute_time() >= deadline) {
-			break;
 		}
 		delay(spins < 1500 ? 1 : 20);
 	}
@@ -1145,21 +1172,10 @@ sgu_retire_locked(bool block)
 int starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_t *seq);
 int starlte_gpu_user_wait_seq(uint64_t seq, bool block);
 
-/* Start the chain (after the one before it); async false: and wait for it, as starlte_gpu_user_submit. */
-int
-starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_t *seq)
+/* sg_lock held, nothing on the GPU: start the chain. */
+static void
+sgu_start_locked(uint64_t jc, uint32_t requirements)
 {
-	if (!sgu_ready) {
-		return ENODEV;
-	}
-	lck_mtx_lock(&sg_lock);
-	uint64_t t0 = mach_absolute_time(), ns = 0;
-	if (sgu_busy) {
-		(void)sgu_retire_locked(true);
-		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
-		sgu_as_prev_waits++;
-		sgu_as_prev_ns += ns;
-	}
 	unsigned js = (requirements & 1) ? 0 : 1;
 	uint32_t slot = JS_BASE(js);
 	sg_wr(sg_gpu, MMU_IRQ_CLEAR, 0xffffffffu);
@@ -1175,6 +1191,173 @@ starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_
 	sgu_busy_t0 = mach_absolute_time();
 	sg_wr(sg_gpu, slot + 0x60, 1);                                  /* COMMAND_NEXT START */
 	sgu_busy = true;
+}
+
+/* The queue's thread: one chain at a time, in order; naps (not a spin) while the GPU works. */
+static void
+sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
+{
+	uint64_t win_t0 = 0, win_gpu = 0, win_gpu_max = 0, win_wait = 0, win_n = 0, win_naps = 0;
+	for (;;) {
+		lck_mtx_lock(&sgu_q_lock);
+		while (sgu_q_count == 0) {
+			lck_mtx_sleep(&sgu_q_lock, LCK_SLEEP_DEFAULT, (event_t)&sgu_q_count, THREAD_UNINT);
+		}
+		uint64_t jc = sgu_q[sgu_q_head].jc, seq = sgu_q[sgu_q_head].seq, queued = sgu_q[sgu_q_head].queued;
+		uint32_t req = sgu_q[sgu_q_head].req;
+		lck_mtx_unlock(&sgu_q_lock);
+
+		lck_mtx_lock(&sg_lock);
+		if (sgu_busy) {
+			(void)sgu_retire_locked(true);          /* (a chain of a client without the queue) */
+		}
+		uint64_t began = mach_absolute_time();
+		sgu_start_locked(jc, req);
+		sgu_seq_sub++;
+		lck_mtx_unlock(&sg_lock);
+		for (unsigned looks = 0;; looks++) {
+			lck_mtx_lock(&sg_lock);
+			/* (the present or a client without the queue may have retired it for us: then it is not busy) */
+			int state = sgu_busy ? sgu_retire_locked(false) : 0;
+			lck_mtx_unlock(&sg_lock);
+			if (state != EBUSY) {
+				break;
+			}
+			if (looks < 20) {
+				delay(10);
+				continue;
+			}
+			uint64_t nap;
+			clock_interval_to_deadline(sgu_q_nap_us, NSEC_PER_USEC, &nap);
+			lck_mtx_lock(&sgu_q_nap_lock);
+			(void)lck_mtx_sleep_deadline(&sgu_q_nap_lock, LCK_SLEEP_DEFAULT, (event_t)&sgu_q_nap_event, THREAD_UNINT, nap);
+			lck_mtx_unlock(&sgu_q_nap_lock);
+			win_naps++;
+		}
+		uint64_t ended = mach_absolute_time();
+
+		lck_mtx_lock(&sgu_q_lock);
+		sgu_q_head = (sgu_q_head + 1) % SGU_QUEUE;
+		sgu_q_count--;
+		sgu_q_done = seq;
+		unsigned deepest = sgu_q_deepest;
+		lck_mtx_unlock(&sgu_q_lock);
+		wakeup((caddr_t)&sgu_q_done);
+		wakeup((caddr_t)&sgu_q_head);                   /* (room in the queue) */
+
+		/* every 10 s: how many chains, how long the GPU ran them, how long they waited for their turn */
+		win_n++;
+		win_gpu += ended - began;
+		win_wait += began - queued;
+		if (ended - began > win_gpu_max) {
+			win_gpu_max = ended - began;
+		}
+		if (win_t0 == 0) {
+			win_t0 = queued;
+		}
+		uint64_t window = 0;
+		absolutetime_to_nanoseconds(ended - win_t0, &window);
+		if (window >= 10ull * NSEC_PER_SEC && win_n >= 50) {
+			uint64_t gpu = 0, gmax = 0, wait = 0;
+			absolutetime_to_nanoseconds(win_gpu, &gpu);
+			absolutetime_to_nanoseconds(win_gpu_max, &gmax);
+			absolutetime_to_nanoseconds(win_wait, &wait);
+			printf("STARLTE GPU QUEUE (%llu s): %llu chains, gpu busy %llu%% avg %llu us (max %llu), queued avg %llu us, "
+			    "deepest %u, %llu naps\n", window / NSEC_PER_SEC, win_n, gpu * 100 / window, gpu / win_n / 1000,
+			    gmax / 1000, wait / win_n / 1000, deepest, win_naps);
+			win_t0 = ended;
+			win_gpu = win_gpu_max = win_wait = win_n = win_naps = 0;
+			lck_mtx_lock(&sgu_q_lock);
+			sgu_q_deepest = 0;
+			lck_mtx_unlock(&sgu_q_lock);
+		}
+	}
+}
+
+/* Is the queue on (sweetspeed&262144)? Read once; the worker starts with the first chain. */
+static bool
+sgu_q_enabled(void)
+{
+	if (!sgu_q_checked) {
+		lck_mtx_lock(&sgu_q_lock);
+		if (!sgu_q_checked) {
+			uint32_t nap = 0;
+			if (PE_parse_boot_argn("sgu_nap_us", &nap, sizeof(nap)) && nap >= 10 && nap <= 1000) {
+				sgu_q_nap_us = nap;
+			}
+			sgu_q_on = (sweet_speed_flags() & 262144) != 0;
+			sgu_q_checked = 1;
+			printf("STARLTE GPU QUEUE: %s (sweetspeed&262144), nap %u us\n", sgu_q_on ? "on" : "off", sgu_q_nap_us);
+		}
+		lck_mtx_unlock(&sgu_q_lock);
+	}
+	return sgu_q_on;
+}
+
+/* A chain into the queue: its number. */
+static uint64_t
+sgu_q_enqueue(uint64_t jc, uint32_t requirements)
+{
+	lck_mtx_lock(&sgu_q_lock);
+	if (!sgu_q_started) {
+		thread_t thread;
+		if (kernel_thread_start(sgu_q_worker, NULL, &thread) == KERN_SUCCESS) {
+			thread_set_thread_name(thread, "the Mali's app chains");
+			thread_deallocate(thread);
+			sgu_q_started = true;
+		}
+	}
+	while (sgu_q_count == SGU_QUEUE) {
+		lck_mtx_sleep(&sgu_q_lock, LCK_SLEEP_DEFAULT, (event_t)&sgu_q_head, THREAD_UNINT);
+	}
+	uint64_t seq = ++sgu_q_seq;
+	unsigned at = (sgu_q_head + sgu_q_count) % SGU_QUEUE;
+	sgu_q[at].jc = jc;
+	sgu_q[at].req = requirements;
+	sgu_q[at].seq = seq;
+	sgu_q[at].queued = mach_absolute_time();
+	if (++sgu_q_count > sgu_q_deepest) {
+		sgu_q_deepest = sgu_q_count;
+	}
+	lck_mtx_unlock(&sgu_q_lock);
+	wakeup((caddr_t)&sgu_q_count);
+	return seq;
+}
+
+/* The number of the last chain an app has submitted (0: none, or no queue): what a frame shown now must wait for. */
+uint64_t starlte_gpu_user_seq(void);
+uint64_t
+starlte_gpu_user_seq(void)
+{
+	if (!sgu_ready || !sgu_q_enabled()) {
+		return 0;
+	}
+	lck_mtx_lock(&sgu_q_lock);
+	uint64_t seq = sgu_q_seq;
+	lck_mtx_unlock(&sgu_q_lock);
+	return seq;
+}
+
+/* Start the chain (after the one before it); async false: and wait for it, as starlte_gpu_user_submit. */
+int
+starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_t *seq)
+{
+	if (!sgu_ready) {
+		return ENODEV;
+	}
+	if (async && sgu_q_enabled()) {
+		*seq = sgu_q_enqueue(jc, requirements);
+		return 0;
+	}
+	lck_mtx_lock(&sg_lock);
+	uint64_t t0 = mach_absolute_time(), ns = 0;
+	if (sgu_busy) {
+		(void)sgu_retire_locked(true);
+		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+		sgu_as_prev_waits++;
+		sgu_as_prev_ns += ns;
+	}
+	sgu_start_locked(jc, requirements);
 	*seq = ++sgu_seq_sub;
 	int ret = 0;
 	if (!async) {
@@ -1203,6 +1386,21 @@ starlte_gpu_user_wait_seq(uint64_t seq, bool block)
 {
 	if (!sgu_ready) {
 		return 0;
+	}
+	if (sgu_q_enabled()) {
+		/* asleep until the worker says so; 3 s at most (a hung chain is ended by the worker after 2 s) */
+		uint64_t deadline;
+		clock_interval_to_deadline(3000, NSEC_PER_MSEC, &deadline);
+		lck_mtx_lock(&sgu_q_lock);
+		if (seq == 0) {
+			seq = sgu_q_seq;
+		}
+		while (block && sgu_q_done < seq && mach_absolute_time() < deadline) {
+			(void)lck_mtx_sleep_deadline(&sgu_q_lock, LCK_SLEEP_DEFAULT, (event_t)&sgu_q_done, THREAD_UNINT, deadline);
+		}
+		int done = sgu_q_done >= seq ? 0 : ETIMEDOUT;
+		lck_mtx_unlock(&sgu_q_lock);
+		return done;
 	}
 	lck_mtx_lock(&sg_lock);
 	if (seq == 0) {
