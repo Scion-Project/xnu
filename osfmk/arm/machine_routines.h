@@ -289,6 +289,8 @@ unsigned int ml_get_cluster_count(void);
 int ml_get_boot_cpu_number(void);
 
 int ml_get_cpu_number(uint32_t phys_id);
+/* the device tree's number for the core with this MPIDR (HakiOS, patch 1504: ml_mpidr_mt_aff1) */
+uint32_t ml_phys_id_from_mpidr(uint64_t mpidr);
 
 unsigned int ml_get_cpu_number_local(void);
 
