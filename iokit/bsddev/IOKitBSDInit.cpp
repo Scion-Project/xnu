@@ -812,6 +812,10 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 	{
 		extern void starlte_touch_probe(void);
 		starlte_touch_probe();
+		/* Boot-arg tmu=1|2: the TMU's temperatures, read only (bsd/dev/hakios.exynos_tmu.c), before the
+		 * governor that reads them; off: nothing mapped, nothing read. */
+		extern void hakios_exynos_tmu_start(void);
+		hakios_exynos_tmu_start();
 		/* Boot-arg cpufreq_gov=1: the CPU governor (bsd/dev/hakios.exynos_cpufreq.c); off: nothing. */
 		extern bool hakios_exynos_cpufreq_gov_start(void);
 		(void)hakios_exynos_cpufreq_gov_start();
