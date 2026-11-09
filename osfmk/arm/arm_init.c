@@ -436,7 +436,19 @@ arm_init(
 		/*
 		 * Select the advertised kernel page size.
 		 */
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+		/*
+		 * sweet: keep the 4 KiB hardware page size at any RAM size. Above
+		 * 1 GiB stock XNU switches to 16 KiB VM pages over 4 KiB hardware
+		 * pages (TEST_PAGE_RATIO_4, last used on A7/A8), which panics
+		 * intermittently here ("unaligned pmap_enter", S7 and S9 at
+		 * 1.5 GiB); every iOS 18 fix in this series was made and tested
+		 * with 4 KiB kernel pages under 16 KiB user maps.
+		 */
+		if (false) {
+#else
 		if (args->memSize > 1ULL * 1024 * 1024 * 1024) {
+#endif
 			/*
 			 * arm64 device with > 1GB of RAM:
 			 * kernel uses 16KB pages.
