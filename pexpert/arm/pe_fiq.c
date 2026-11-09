@@ -259,24 +259,52 @@ a5xelte_send_self_ipi(void)
 	a5_gic_write32(a5_gicd_base, 0xf00, (2U << 24) | 1U);
 }
 
+#if defined(HEROLTE)
+/* GIC CPU-interface bit of each logical CPU (banked ITARGETSR0). */
+static uint8_t a5_gic_cpu_masks[SWEET_SMP_MAX_CPUS];
+
+void
+a5xelte_send_ipi(unsigned int logical)
+{
+	if (logical >= SWEET_SMP_MAX_CPUS || a5_gic_cpu_masks[logical] == 0) {
+		panic("herolte: GICv2 target CPU%u unavailable", logical);
+	}
+	__builtin_arm_dsb(DSB_ISHST);
+	a5_gic_write32(a5_gicd_base, 0xf00,
+	    ((uint32_t)a5_gic_cpu_masks[logical] << 16) | 1U);
+}
+#endif
+
 void
 pe_init_fiq(void)
 {
-	DTEntry entry;
-	const void *reg;
-	unsigned int size;
-	if (SecureDTLookupEntry(NULL, "/arm-io/gic", &entry) != kSuccess ||
-	    SecureDTGetProperty(entry, "reg", &reg, &size) != kSuccess ||
-	    size < 4 * sizeof(uint64_t)) {
-		panic("a5xelte: missing GICv2 reg in ADT");
+	/* Runs on every CPU. The boot CPU maps the controller before any
+	 * secondary starts; SecureDT iterators are not safe on secondaries. */
+	if (!a5_gicd_base) {
+		DTEntry entry;
+		const void *reg;
+		unsigned int size;
+		if (SecureDTLookupEntry(NULL, "/arm-io/gic", &entry) != kSuccess ||
+		    SecureDTGetProperty(entry, "reg", &reg, &size) != kSuccess ||
+		    size < 4 * sizeof(uint64_t)) {
+			panic("a5xelte: missing GICv2 reg in ADT");
+		}
+		const uint64_t *r = reg;
+		vm_offset_t soc = pe_arm_get_soc_base_phys();
+		a5_gicd_base = ml_io_map(soc + r[0], r[1]);
+		a5_gicc_base = ml_io_map(soc + r[2], r[3]);
 	}
-	const uint64_t *r = reg;
-	vm_offset_t soc = pe_arm_get_soc_base_phys();
-	a5_gicd_base = ml_io_map(soc + r[0], r[1]);
-	a5_gicc_base = ml_io_map(soc + r[2], r[3]);
 	if (!a5_gicd_base || !a5_gicc_base) {
 		panic("a5xelte: cannot map GICv2");
 	}
+#if defined(HEROLTE)
+	unsigned int logical = ml_get_cpu_number_local();
+	uint8_t mask = a5_gic_read32(a5_gicd_base, 0x800) & 0xff;
+	if (logical >= SWEET_SMP_MAX_CPUS || mask == 0 || (mask & (mask - 1)) != 0) {
+		panic("herolte: invalid GICv2 CPU%u target mask 0x%x", logical, mask);
+	}
+	a5_gic_cpu_masks[logical] = mask;
+#endif
 	/* INTID 27 is the virtual timer PPI; SGI 1 is the local self signal. */
 	a5_gic_write32(a5_gicd_base, 0x080,
 	    a5_gic_read32(a5_gicd_base, 0x080) | (1U << 27) | (1U << 1));

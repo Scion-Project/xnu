@@ -316,11 +316,14 @@ LEXT(sweet_secondary_entry)
 	mov		x1, #3
 	msr		CNTHCTL_EL2, x1
 	msr		CNTVOFF_EL2, xzr
+	/* GICv2 on A5XELTE/HEROLTE has no ICC_SRE system-register interface. */
+#if !defined(A5XELTE)
 	/* Permit ICC_SRE_EL1 and GIC CPU interface system-register access. */
 	mrs		x1, ICC_SRE_EL2
 	orr		x1, x1, #1
 	orr		x1, x1, #8
 	msr		ICC_SRE_EL2, x1
+#endif
 	/* Known Armv8 SCTLR RES1 bits, M/C/I off, little endian. */
 	MOV64	x1, 0x30d00800
 	msr		SCTLR_EL1, x1
