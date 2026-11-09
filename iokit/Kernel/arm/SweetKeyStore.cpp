@@ -33,7 +33,8 @@
  *     device at every screen-off (8, 32), which failed;
  *   - lock (8, 32) does nothing and succeeds, as it does with no passcode;
  *   - the configuration (30, 31), the bag's UUID (23), the generation (40), assertion promote (100),
- *     prewarm (115), verify password (42) and "can the SE be reset in restore mode" (107) answer;
+ *     prewarm (115), verify password (42), "can the SE be reset in restore mode" (107) and
+ *     securityd's "enable cache flow" (160) answer;
  *   - "the first-unlock notification has been posted" (102, 103) is remembered.
  * Selectors that need a Secure Enclave or a paired device (135 beacon keys, 57 remote peers) still
  * answer kIOReturnUnsupported.
@@ -78,6 +79,7 @@ enum {
 	kAKSAssertPromote    = 100,
 	kAKSSESupportInRMIsSet = 107,   /* aks_se_support_in_rm_is_set: out scalar */
 	kAKSPrewarm          = 115,
+	kAKSEnableCacheFlow  = 160,     /* aks_enable_cache_flow (securityd) */
 	kAKSUnloadSessionBags = 55,
 	kAKSNotifyStateSet   = 102,
 	kAKSNotifyStateIsSet = 103,
@@ -389,6 +391,7 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 		case kAKSLockDeviceNow:
 		case kAKSAssertPromote:
 		case kAKSPrewarm:
+		case kAKSEnableCacheFlow:       /* no class key is ever dropped here, so there is no cache to flow */
 		case kAKSVerifyPassword:        /* no passcode: nothing to compare with */
 			args->scalarOutputCount = 0;
 			break;
