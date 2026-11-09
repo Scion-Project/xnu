@@ -825,6 +825,17 @@ AppleCLCD::swap(const uint8_t *rec, uint32_t size)
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
 	/* with the GPU's chain queue (sweetspeed&262144): the frame is drawn once every chain queued by now is done */
 	uint64_t seq = starlte_gpu_user_seq();
+	/*
+	 * And at most two frames are in flight: this swap returns once the chains of the swap before it are done. The
+	 * window server draws the next frame while the GPU works on this one (the overlap the queue is for), but it
+	 * cannot run further ahead: with nothing to hold it, a scene the GPU needs more than a refresh for would fill
+	 * the queue (256 chains, a dozen frames) and every touch would be answered that many frames late.
+	 */
+	static uint64_t prevSwapSeq;
+	uint64_t prev = __atomic_exchange_n(&prevSwapSeq, seq, __ATOMIC_RELAXED);
+	if (prev != 0 && prev != seq) {
+		(void)starlte_gpu_user_wait_seq(prev, true);
+	}
 #else
 	uint64_t seq = 0;
 #endif
