@@ -526,15 +526,15 @@ LEXT(start_first_cpu)
 
 #if defined(A5XELTE)
 	/* Earliest XNU-owned physical marker in preserved Samsung log RAM. */
-	MOV64	x10, 0x469ff100
+	MOV64	x10, A5XELTE_MARKER_PA
 	MOV64	x11, 0x3145544c45554e58
 	str		x11, [x10]
 	dsb		sy
 	/* XNU-owned green entry block on the Exynos DECON scanout buffer. */
-	MOV64	x10, 0x6705d0c0
+	MOV64	x10, (A5XELTE_FB_PA+88*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xff00ff00
 	mov		x12, #21
-	mov		x15, #4320
+	mov		x15, #A5XELTE_FB_STRIDE
 La5_entry_row:
 	mov		x14, x10
 	mov		x13, #36
@@ -719,18 +719,18 @@ Lkernelcache_base_found:
 	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
 
 #if defined(A5XELTE)
-	/* Five 2 MiB blocks map the 1080x1920 scanout buffer VA=PA.
+	/* A5XELTE_FB_BLOCKS 2 MiB blocks map the scanout buffer VA=PA.
 	 * Its L1 index differs from isolated XNU RAM, so this uses one extra
 	 * bootstrap L2 page. Mark it write-combined for DECON DMA visibility. */
-	MOV64	x0, 0x67000000
+	MOV64	x0, A5XELTE_FB_PA
 	mov		x4, x0
-	mov		x5, #5
+	mov		x5, #A5XELTE_FB_BLOCKS
 	create_bootstrap_mapping x0, x4, x5, x1, x2, x6, x10, x11, x12, x13
-	MOV64	x10, 0x67000000
+	MOV64	x10, A5XELTE_FB_PA
 	and		x11, x10, #(ARM_TT_L2_INDEX_MASK)
 	lsr		x11, x11, #(ARM_TT_L2_SHIFT)
 	add		x12, x2, x11, lsl #TTE_SHIFT
-	mov		x13, #5
+	mov		x13, #A5XELTE_FB_BLOCKS
 La5_fb_attr:
 	ldr		x11, [x12]
 	bic		x11, x11, #(ARM_TTE_BLOCK_ATTRINDXMASK)
@@ -897,10 +897,10 @@ common_start:
 
 #if defined(A5XELTE)
 	/* Blue block: the 4 KiB MMU is active and the framebuffer alias works. */
-	MOV64	x10, 0x6707ecc0
+	MOV64	x10, (A5XELTE_FB_PA+120*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xff0000ff
 	mov		x12, #21
-	mov		x15, #4320
+	mov		x15, #A5XELTE_FB_STRIDE
 La5_mmu_row:
 	mov		x14, x10
 	mov		x13, #36
@@ -941,10 +941,10 @@ La5_mmu_pixel:
 
 #if defined(A5XELTE)
 	/* fp_enabled: write directly to the DECON scanout alias. */
-	MOV64	x10, 0x670a08c0
+	MOV64	x10, (A5XELTE_FB_PA+152*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xff00ffff
 	mov	x12, #21
-	mov	x15, #4320
+	mov	x15, #A5XELTE_FB_STRIDE
 La5_fp_enabled_row:
 	mov	x14, x10
 	mov	x13, #36
@@ -976,10 +976,10 @@ La5_fp_enabled_pixel:
 
 #if defined(A5XELTE)
 	/* tunables_done: write directly to the DECON scanout alias. */
-	MOV64	x10, 0x670c24c0
+	MOV64	x10, (A5XELTE_FB_PA+184*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xffff00ff
 	mov	x12, #21
-	mov	x15, #4320
+	mov	x15, #A5XELTE_FB_STRIDE
 La5_tunables_done_row:
 	mov	x14, x10
 	mov	x13, #36
@@ -1022,10 +1022,10 @@ La5_tunables_done_pixel:
 
 #if defined(A5XELTE)
 	/* arm_init_jump: write directly to the DECON scanout alias. */
-	MOV64	x10, 0x670e40c0
+	MOV64	x10, (A5XELTE_FB_PA+216*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xffffff00
 	mov	x12, #21
-	mov	x15, #4320
+	mov	x15, #A5XELTE_FB_STRIDE
 La5_arm_init_jump_row:
 	mov	x14, x10
 	mov	x13, #36
@@ -1108,8 +1108,8 @@ arm_init_tramp:
 La5_draw_text:
 	adrp	x3, EXT(iso_font)@page
 	add	x3, x3, EXT(iso_font)@pageoff
-	MOV64	x4, 0x67000000
-	mov	x5, #4320
+	MOV64	x4, A5XELTE_FB_PA
+	mov	x5, #A5XELTE_FB_STRIDE
 	madd	x4, x2, x5, x4
 	add	x4, x4, x1, lsl #2
 La5_text_next_char:
@@ -1125,7 +1125,7 @@ La5_text_column:
 	lsl	w11, w11, w10
 	tst	w9, w11
 	b.eq	La5_text_skip_pixel
-	mov	x13, #8640
+	mov	x13, #(2*A5XELTE_FB_STRIDE)
 	madd	x12, x8, x13, x4
 	add	x12, x12, x10, lsl #3
 	mov	w14, #-1
