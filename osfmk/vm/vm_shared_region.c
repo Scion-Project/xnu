@@ -849,6 +849,11 @@ vm_shared_region_create(
 		goto done;
 	}
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* Lab bring-up: the 16 KiB-signed iOS cache runs on 4 KiB VM pages. */
+	vm_map_cs_enforcement_set(sub_map, false);
+	vm_map_cs_enforcement_set(config_map, false);
+#else
 	/* shared regions should always enforce code-signing */
 	vm_map_cs_enforcement_set(sub_map, true);
 	assert(vm_map_cs_enforcement(sub_map));
@@ -856,6 +861,7 @@ vm_shared_region_create(
 	vm_map_cs_enforcement_set(config_map, true);
 	assert(vm_map_cs_enforcement(config_map));
 	assert(pmap_get_vm_map_cs_enforced(vm_map_pmap(config_map)));
+#endif
 
 	assert(!sub_map->disable_vmentry_reuse);
 	sub_map->is_nested_map = TRUE;

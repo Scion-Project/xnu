@@ -366,7 +366,12 @@ cs_validate_codedirectory(const CS_CodeDirectory *cd, size_t length)
 	if (ntohl(cd->magic) != CSMAGIC_CODEDIRECTORY) {
 		return EBADEXEC;
 	}
-	if ((cd->pageSize != PAGE_SHIFT_4K) && (cd->pageSize != PAGE_SHIFT)) {
+	if ((cd->pageSize != PAGE_SHIFT_4K) && (cd->pageSize != PAGE_SHIFT)
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+	    /* Accept the 16 KiB iOS signatures as metadata on 4 KiB pages. */
+	    && (cd->pageSize != 14)
+#endif
+	    ) {
 		printf("disallowing unsupported code signature page shift: %u\n", cd->pageSize);
 		return EBADEXEC;
 	}
@@ -6119,6 +6124,12 @@ cs_validate_page(
 	*validated_p = VMP_CS_ALL_FALSE;
 	*tainted_p = VMP_CS_ALL_FALSE;
 	*nx_p = VMP_CS_ALL_FALSE;
+
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* 16 KiB hash units cannot be checked from one 4 KiB VM page; the
+	 * lab boot leaves pages unvalidated (cs_enforcement_disable=1). */
+	return;
+#endif
 
 	for (offset_in_page = 0;
 	    offset_in_page < PAGE_SIZE;
