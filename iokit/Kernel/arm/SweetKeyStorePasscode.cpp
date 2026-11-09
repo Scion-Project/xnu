@@ -953,7 +953,7 @@ sks_dispatch(uint32_t selector, IOExternalMethodArguments *args, bool *changed, 
 	case 35:        /* aks_get_extended_device_state */
 		blocked = sks_blocked();
 		args->scalarOutputCount = 0;
-		return sweet_aks_struct_out(args, der, sks_der_device_state(der, blocked,
+		return sweet_aks_struct_out(args, der, (uint32_t)sks_der_device_state(der, blocked,
 		    sks_state_flags(gSKS.record.hasPasscode, gSKS.locked, gSKS.unlockedOnce),
 		    gSKS.record.hasPasscode ? gSKS.record.failedAttempts : 0,
 		    sks_lock_state(gSKS.record.hasPasscode, gSKS.locked),
@@ -1000,7 +1000,7 @@ sks_dispatch(uint32_t selector, IOExternalMethodArguments *args, bool *changed, 
 		return gSKS.record.hasPasscode && gSKS.locked ? kIOReturnNotPermitted : kIOReturnSuccess;
 	case 31:
 		args->scalarOutputCount = 0;
-		return sweet_aks_struct_out(args, der, sks_der_configuration(der, gSKS.record.gracePeriod));
+		return sweet_aks_struct_out(args, der, (uint32_t)sks_der_configuration(der, gSKS.record.gracePeriod));
 	case 30:
 		args->scalarOutputCount = 0;
 		return sks_set_configuration(args);
