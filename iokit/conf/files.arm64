@@ -18,6 +18,7 @@ iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitc
 iokit/Kernel/arm/StarbiteMali.cpp                                optional iokitcpp
 iokit/Kernel/arm/A5XELTEGPU.cpp                                 optional iokitcpp
 iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
+iokit/Kernel/arm/StarbiteAccelerator.cpp                         optional iokitcpp
 iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
 iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
 iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp

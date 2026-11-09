@@ -95,6 +95,11 @@ const char * gIOKernelConfigTables =
     "     'IOProviderClass' = IOResources;"
     "     'IOMatchCategory' = SweetBattery;"
     "   },"
+    "   {"
+    "     'IOClass'         = StarbiteAccelerator;"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = StarbiteAccelerator;"
+    "   },"
 #endif
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
     "   {"
