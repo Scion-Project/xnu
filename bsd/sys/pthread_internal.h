@@ -34,7 +34,7 @@
 
 struct ksyn_waitq_element {
 #if __LP64__
-	#if defined(ARM64_BOARD_CONFIG_SWEET)
+	#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 	/* libpthread-514.100.2 includes the trailing kwe_uth pointer. */
 	char opaque[56];
 #else
