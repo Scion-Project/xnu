@@ -104,6 +104,12 @@
 #include <sys/kdebug.h>
 
 #include "iso_font.c"
+
+/* the boot screen (scion_splash.c) */
+extern void scion_splash_init(void);
+extern boolean_t scion_splash_putc(char c);
+extern void scion_splash_late(void);
+extern boolean_t scion_splash_text_taken(void);
 #if defined(XNU_TARGET_OS_OSX)
 #include "progress_meter_data.c"
 #endif
@@ -437,8 +443,10 @@ gc_enable( boolean_t enable )
 
 		VCPUTC_LOCK_UNLOCK();
 
-		gc_ops.clear_screen(gc_x, gc_y, 0, vinfo.v_rows, 2);
-		gc_ops.show_cursor(gc_x, gc_y);
+		if (!scion_splash_text_taken()) {       /* (the boot screen keeps what the loader drew) */
+			gc_ops.clear_screen(gc_x, gc_y, 0, vinfo.v_rows, 2);
+			gc_ops.show_cursor(gc_x, gc_y);
+		}
 
 		gc_ops.enable(TRUE);
 		gc_enabled           = TRUE;
@@ -1233,9 +1241,12 @@ vcputc_options(char c, __unused bool poll)
 	if (gc_initialized && gc_enabled) {
 		VCPUTC_LOCK_LOCK();
 		if (gc_enabled) {
-			gc_hide_cursor(gc_x, gc_y);
-			gc_putchar(c);
-			gc_show_cursor(gc_x, gc_y);
+			/* the boot screen (splash=1) takes the text; see scion_splash.c */
+			if (!scion_splash_putc(c)) {
+				gc_hide_cursor(gc_x, gc_y);
+				gc_putchar(c);
+				gc_show_cursor(gc_x, gc_y);
+			}
 		}
 #if SCHED_HYGIENE_DEBUG
 		abandon_preemption_disable_measurement();
@@ -2929,6 +2940,7 @@ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
 		}
 	}
 
+	scion_splash_init();
 	graphics_now = gc_graphics_boot && !gc_desire_text;
 	switch (op) {
 	case kPEGraphicsMode:
@@ -2941,6 +2953,7 @@ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
 		break;
 
 	case kPEAcquireScreen:
+		scion_splash_late();
 		if (gc_acquired) {
 			break;
 		}

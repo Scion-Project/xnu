@@ -47,6 +47,7 @@ extern "C" void hakios_vgpu3d_display_surface(uint32_t sid);       /* bsd/dev/ha
 extern "C" bool hakios_vgpu3d_host_owns(uint32_t sid);
 
 extern "C" void hakios_tl(const char * format, ...) __printflike(1, 2);
+extern "C" void scion_splash_end(void);    /* the boot screen (splash=1) is over with the first frame */
 extern "C" void hakios_display_power(int on);   /* GenericARMPE.cpp (patch 1517) */
 extern "C" int hakios_panel_brightness(int level);       /* drivers/display/panel/hakios.backlight.cpp: 0 if a panel driver took it, else ENODEV */
 extern "C" void hakios_backlight_publish(IOService * display);  /* the same: AppleARMBacklight, with boot-arg backlight= */
@@ -1233,6 +1234,7 @@ IOMobileFramebuffer::record(MiniIOSurface * s)
 
 	if (fFirstFrame == 0) {
 		fFirstFrame = now;
+		scion_splash_end();
 	}
 	if (fRecBase == NULL || fRecDone || s->info.width < fWidth || s->info.height < fHeight) {
 		return;
@@ -2400,6 +2402,7 @@ IOMobileFramebuffer::scanBegin(bool covered)
 	fScanTarget = t;
 	if (!fScanSaid) {
 		fScanSaid = true;
+		scion_splash_end();
 		scanSay("MiniIOMobileFramebuffer: scan-out: the first frame drawn into buffer %u (%#llx, %ux%u)%s; mode %d\n", t,
 		    fScanPhys[t], fScanWidth, fScanHeight, covered ? "" : ", what is shown copied in first", fScanMode);
 	}
