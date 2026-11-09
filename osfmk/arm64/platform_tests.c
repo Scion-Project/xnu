@@ -1346,6 +1346,12 @@ arm64_pan_test()
 {
 	bool values_match = false;
 	vm_offset_t priv_addr = 0;
+	extern uint32_t hakios_pan_off;
+
+	if (hakios_pan_off) {
+		T_LOG("PAN is off (patch 1509: pan=0, or a core without it): not tested.");
+		return KERN_SUCCESS;
+	}
 
 	T_LOG("Testing PAN.");
 

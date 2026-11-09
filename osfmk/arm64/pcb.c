@@ -156,6 +156,10 @@ machine_switch_pmap_and_extended_context(thread_t old, thread_t new)
 	machine_thread_switch_cpu_data(old, new);
 }
 
+#if __ARM_PAN_AVAILABLE__
+extern uint32_t hakios_pan_off;         /* osfmk/arm/arm_init.c (patch 1509) */
+#endif
+
 /*
  * Routine: machine_switch_context
  *
@@ -168,7 +172,7 @@ machine_switch_context(thread_t old,
 	thread_t retval;
 
 #if __ARM_PAN_AVAILABLE__
-	if (__improbable(__builtin_arm_rsr("pan") == 0)) {
+	if (__improbable(!hakios_pan_off && __builtin_arm_rsr("pan") == 0)) {
 		panic("context switch with PAN disabled");
 	}
 #endif
@@ -511,7 +515,7 @@ machine_stack_handoff(thread_t old,
 	vm_offset_t  stack;
 
 #if __ARM_PAN_AVAILABLE__
-	if (__improbable(__builtin_arm_rsr("pan") == 0)) {
+	if (__improbable(!hakios_pan_off && __builtin_arm_rsr("pan") == 0)) {
 		panic("stack handoff with PAN disabled");
 	}
 #endif

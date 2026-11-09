@@ -82,12 +82,18 @@ __options_decl(copyio_flags_t, uint32_t, {
 	COPYIO_ATOMIC                   = 0x0010,
 });
 
+#if __ARM_PAN_AVAILABLE__
+extern uint32_t hakios_pan_off;         /* osfmk/arm/arm_init.c (patch 1509): no PAN instruction at all */
+#endif
+
 static inline void
 user_access_enable(void)
 {
 #if __ARM_PAN_AVAILABLE__
-	assert(__builtin_arm_rsr("pan") != 0);
-	__builtin_arm_wsr("pan", 0);
+	if (!hakios_pan_off) {
+		assert(__builtin_arm_rsr("pan") != 0);
+		__builtin_arm_wsr("pan", 0);
+	}
 #endif  /* __ARM_PAN_AVAILABLE__ */
 
 }
@@ -96,7 +102,9 @@ static inline void
 user_access_disable(void)
 {
 #if __ARM_PAN_AVAILABLE__
-	__builtin_arm_wsr("pan", 1);
+	if (!hakios_pan_off) {
+		__builtin_arm_wsr("pan", 1);
+	}
 #endif  /* __ARM_PAN_AVAILABLE__ */
 
 }

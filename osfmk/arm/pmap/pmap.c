@@ -13852,7 +13852,10 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
 
 		/* Disable PAN; pmap shouldn't be the kernel pmap. */
 #if __ARM_PAN_AVAILABLE__
-		__builtin_arm_wsr("pan", 0);
+		extern uint32_t hakios_pan_off;
+		if (!hakios_pan_off) {
+			__builtin_arm_wsr("pan", 0);
+		}
 #endif /* __ARM_PAN_AVAILABLE__ */
 	}
 
@@ -13871,7 +13874,10 @@ pmap_test_access(pmap_t pmap, vm_map_address_t va, bool should_fault, bool is_wr
 
 	if (pmap != NULL) {
 #if __ARM_PAN_AVAILABLE__
-		__builtin_arm_wsr("pan", 1);
+		extern uint32_t hakios_pan_off;
+		if (!hakios_pan_off) {
+			__builtin_arm_wsr("pan", 1);
+		}
 #endif /* __ARM_PAN_AVAILABLE__ */
 
 		pmap_switch(old_pmap);
