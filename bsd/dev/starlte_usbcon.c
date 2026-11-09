@@ -90,34 +90,21 @@ loader_log_line(const char *line)
 void loader_return(void);
 extern void starlte_return_to_recovery(void);
 void loader_return(void) { starlte_return_to_recovery(); }
+/* hakios_wifi_stop/_report, hakios_sta_console_scan, hakios_net_console_*: the Wi-Fi drivers' own (bsd/dev/starlte_wifi.c) */
 void hakios_var_save_on_return(void);
 void hakios_var_save_on_return(void) {}
 void hakios_ufs_summary(const char *when, int how);
 void hakios_ufs_summary(__unused const char *when, __unused int how) {}
 void hakios_adreno_stop(void);
 void hakios_adreno_stop(void) {}
-void hakios_wifi_stop(void);
-void hakios_wifi_stop(void) {}
-void hakios_wifi_report(bool first);
-void hakios_wifi_report(__unused bool first) {}
-void hakios_sta_console_scan(void);
-void hakios_sta_console_scan(void) {}
 #define STUB_ARG(fn) void fn(const char *arg); void fn(__unused const char *arg) { printf("usb: " #fn ": not on this kernel\n"); }
 STUB_ARG(hakios_bt_console)
-STUB_ARG(hakios_net_console_ping)
-STUB_ARG(hakios_net_console_dns)
-STUB_ARG(hakios_net_console_tcp)
-STUB_ARG(hakios_net_console_names)
 STUB_ARG(hakios_input_console_touch)
 STUB_ARG(hakios_input_console_button)
 STUB_ARG(hakios_abox_console)
 STUB_ARG(hakios_cs47l93_console)
 STUB_ARG(hakios_ssp_console)
 STUB_ARG(hakios_max77705_usb_console)
-void hakios_net_console_ip(void);
-void hakios_net_console_ip(void) {}
-void hakios_net_console_stat(void);
-void hakios_net_console_stat(void) {}
 void hakios_adsp_stop(void);
 void hakios_adsp_stop(void) {}
 void hakios_max77705_usb_close(void);

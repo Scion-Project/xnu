@@ -121,6 +121,12 @@ bsd/dev/hakios.exynos_cpufreq.c	optional scion_generic_arm64
 bsd/dev/hakios.exynos_tmu.c	optional scion_generic_arm64
 bsd/dev/hakios.scion_gov.c	optional scion_generic_arm64
 bsd/dev/hakios.exynos_pcie.c	optional scion_generic_arm64
+bsd/dev/hakios.brcmfmac.c	optional scion_generic_arm64
+bsd/dev/hakios.lx.c	optional scion_generic_arm64
+bsd/dev/hakios.net.c	optional scion_generic_arm64
+bsd/dev/hakios.sta.c	optional scion_generic_arm64
+bsd/dev/hakios.apple80211.c	optional scion_generic_arm64
+bsd/dev/starlte_wifi.c	optional scion_generic_arm64
 bsd/dev/hakios.exynos_dpu.c	optional scion_generic_arm64
 bsd/dev/hakios.s6e3ha8.c	optional scion_generic_arm64
 bsd/dev/herolte_battery.c	optional scion_generic_arm64
