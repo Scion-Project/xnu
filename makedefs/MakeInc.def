@@ -1155,8 +1155,12 @@ LD_KERNEL_LIBS	   = -lcc_kext
 LD_KERNEL_ARCHIVES = $(LDFLAGS_KERNEL_SDK) -lfirehose_kernel
 
 # Link binary support library
+# sweet: the generic boards build the open-source asm and pmap instead
+# (nos_arm_asm, nos_arm_pmap); the KDK has no lib<board>.os.<config>.a for them.
 ifneq ($(CURRENT_MACHINE_CONFIG),NONE)
+ifeq ($(filter SWEET A5XELTE HEROLTE STARLTE,$(CURRENT_MACHINE_CONFIG)),)
         LDFLAGS_KERNEL_ONLY += -rdynamic -Wl,-force_load,$(KDKROOT)/System/Library/KernelSupport/lib$(CURRENT_MACHINE_CONFIG).os.$(CURRENT_KERNEL_CONFIG).a
+endif
 endif
 
 #
