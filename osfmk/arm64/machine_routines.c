@@ -2181,6 +2181,32 @@ ml_release_deferred_pages(void)
 }
 
 /*
+ * HakiOS (patch 1512, xnu-12377): the boot loader's extra RAM [first, end) to the VM, each page made as ml_static_mfree()
+ * makes its own (canonical: found by vm_page_find_canonical() through the radix tree below vm_pages_first_pnum), queued
+ * with them until the physical aperture is final, then released by ml_release_deferred_pages(). vm_page_bootstrap()
+ * counted every page of max_mem not free then as wired, these with them: they are taken off again, as ml_static_mfree()
+ * does for its pages.
+ */
+void hakios_extra_ram_give(ppnum_t first, ppnum_t end);
+void
+hakios_extra_ram_give(ppnum_t first, ppnum_t end)
+{
+	for (ppnum_t ppn = first; ppn < end; ppn++) {
+		if (__probable(!ml_static_mfree_queue_up)) {
+			vm_page_create_canonical(ppn);
+		} else {
+			vm_page_t m = vm_page_create(ppn, true, Z_WAITOK);
+
+			vm_page_list_push(&ml_static_mfree_pre_slide_list, m);
+		}
+	}
+	vm_page_lockspin_queues();
+	vm_page_wire_count -= (unsigned int)(end - first);
+	vm_page_wire_count_initial -= (unsigned int)(end - first);
+	vm_page_unlock_queues();
+}
+
+/*
  *	Routine:        ml_static_mfree
  *	Function:
  */
