@@ -97,7 +97,10 @@ sweet_trace_path_arg(int code, const uint64_t *arg)
 	case SYS_mkdir: case SYS_rmdir: case SYS_getattrlist: case SYS_setattrlist:
 	case SYS_getxattr: case SYS_setxattr: case SYS_listxattr: case SYS_fsctl:
 	case SYS_stat64: case SYS_lstat64: case SYS_statfs64:
+	case 398:       /* open_nocancel (libc's opendir, CFBundle) */
 		return (user_addr_t)arg[0];
+	case 464:       /* openat_nocancel */
+		return (user_addr_t)arg[1];
 	case SYS_openat: case SYS_renameat: case SYS_faccessat: case SYS_fchmodat:
 	case SYS_fchownat: case SYS_fstatat64: case SYS_unlinkat: case SYS_readlinkat:
 	case SYS_mkdirat: case SYS_getattrlistat:
