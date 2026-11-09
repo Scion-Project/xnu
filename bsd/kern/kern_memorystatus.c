@@ -3269,6 +3269,30 @@ memstat_set_memlimits_locked(proc_t p, int32_t active_limit,
 	if (default_inactive_limit && inactive_limit == default_inactive_limit) {
 		options |= MEMLIMIT_INACTIVE_FATAL;
 	}
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/*
+	 * sweet: boot-arg sweetmemscale=N multiplies every per-process limit
+	 * (capped at 2 GiB). The limits are tuned for devices that render and
+	 * decode images on the GPU; with CoreAnimation's CPU renderer daemons
+	 * such as iconservicesagent (6 MB) were jetsam-killed in a loop.
+	 */
+	{
+		static int32_t sweet_memscale = -1;
+		if (sweet_memscale < 0) {
+			int32_t v = 1;
+			PE_parse_boot_argn("sweetmemscale", &v, sizeof(v));
+			sweet_memscale = (v >= 1 && v <= 16) ? v : 1;
+		}
+		if (sweet_memscale > 1) {
+			if (active_limit > 0) {
+				active_limit = MIN(active_limit * sweet_memscale, 2048);
+			}
+			if (inactive_limit > 0) {
+				inactive_limit = MIN(inactive_limit * sweet_memscale, 2048);
+			}
+		}
+	}
+#endif
 
 	memorystatus_log_debug(
 		"memorystatus: setting memlimit for %s [%d], "
