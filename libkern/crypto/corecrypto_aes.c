@@ -32,7 +32,7 @@
 #include <corecrypto/ccaes.h>
 #include <kern/debug.h>
 
-#if defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 /* SWEET has a built-in portable AES provider for the legacy CBC/ECB API. */
 extern const struct ccmode_cbc sweet_aes_cbc_encrypt;
 extern const struct ccmode_cbc sweet_aes_cbc_decrypt;

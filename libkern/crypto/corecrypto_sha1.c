@@ -16,7 +16,7 @@ setCount(SHA1_CTX *ctx, uint64_t count)
 	ctx->c.b64[0] = count;
 }
 
-#if defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 /*
  * SWEET has no corecrypto kext (g_crypto_funcs stays NULL). SHA-1 uses
  * BearSSL's portable implementation (libkern/crypto/sweet_sha1.c), with

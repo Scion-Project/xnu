@@ -17,7 +17,7 @@ setCount(MD5_CTX *ctx, uint64_t count)
 }
 
 /* Copy a ccdigest ctx into a legacy MD5 context */
-#if defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 /*
  * SWEET has no corecrypto kext (g_crypto_funcs stays NULL). MD5 uses
  * BearSSL's portable implementation (libkern/crypto/sweet_md5.c), with

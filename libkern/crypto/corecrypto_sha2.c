@@ -34,7 +34,7 @@
 
 #if defined(CRYPTO_SHA2)
 
-#if defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 /*
  * SWEET has no corecrypto kext, so g_crypto_funcs stays NULL. SHA-256 uses
  * XNU's built-in implementation directly, as the SWEET PRNG does; this also
@@ -84,7 +84,7 @@ SHA256_Final(void *digest, SHA256_CTX *ctx)
 	ccdigest_final(di, ctx->ctx, digest);
 }
 
-#if defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 #include "sweet_bearssl/inc/bearssl_hash.h"
 
 _Static_assert(sizeof(br_sha384_context) <= sizeof(SHA512_CTX),
