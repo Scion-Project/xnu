@@ -223,8 +223,80 @@ pe_init_fiq()
 #endif /* SWEET */
 }
 #else
+#if defined(A5XELTE)
+/* Exynos7580 GIC-400: distributor and CPU interface, both non-secure Group 1. */
+static vm_offset_t a5_gicd_base;
+static vm_offset_t a5_gicc_base;
+
+static uint32_t
+a5_gic_read32(vm_offset_t base, unsigned int offset)
+{
+	return *(volatile uint32_t *)(base + offset);
+}
+
+static void
+a5_gic_write32(vm_offset_t base, unsigned int offset, uint32_t value)
+{
+	*(volatile uint32_t *)(base + offset) = value;
+}
+
+uint32_t
+a5xelte_irq_ack(void)
+{
+	return a5_gic_read32(a5_gicc_base, 0x00c);
+}
+
+void
+a5xelte_irq_eoi(uint32_t iar)
+{
+	a5_gic_write32(a5_gicc_base, 0x010, iar);
+}
+
+void
+a5xelte_send_self_ipi(void)
+{
+	__builtin_arm_dsb(DSB_ISHST);
+	a5_gic_write32(a5_gicd_base, 0xf00, (2U << 24) | 1U);
+}
+
+void
+pe_init_fiq(void)
+{
+	DTEntry entry;
+	const void *reg;
+	unsigned int size;
+	if (SecureDTLookupEntry(NULL, "/arm-io/gic", &entry) != kSuccess ||
+	    SecureDTGetProperty(entry, "reg", &reg, &size) != kSuccess ||
+	    size < 4 * sizeof(uint64_t)) {
+		panic("a5xelte: missing GICv2 reg in ADT");
+	}
+	const uint64_t *r = reg;
+	vm_offset_t soc = pe_arm_get_soc_base_phys();
+	a5_gicd_base = ml_io_map(soc + r[0], r[1]);
+	a5_gicc_base = ml_io_map(soc + r[2], r[3]);
+	if (!a5_gicd_base || !a5_gicc_base) {
+		panic("a5xelte: cannot map GICv2");
+	}
+	/* INTID 27 is the virtual timer PPI; SGI 1 is the local self signal. */
+	a5_gic_write32(a5_gicd_base, 0x080,
+	    a5_gic_read32(a5_gicd_base, 0x080) | (1U << 27) | (1U << 1));
+	for (unsigned int i = 0; i < 32; i += 4) {
+		a5_gic_write32(a5_gicd_base, 0x400 + i, 0xa0a0a0a0U);
+	}
+	a5_gic_write32(a5_gicd_base, 0x100, (1U << 27) | (1U << 1));
+	a5_gic_write32(a5_gicc_base, 0x004, 0xff); /* GICC_PMR */
+	a5_gic_write32(a5_gicc_base, 0x008, 0);    /* GICC_BPR */
+	a5_gic_write32(a5_gicc_base, 0x000,
+	    a5_gic_read32(a5_gicc_base, 0x000) | 1U);
+	a5_gic_write32(a5_gicd_base, 0x000,
+	    a5_gic_read32(a5_gicd_base, 0x000) | 1U);
+	__builtin_arm_dsb(DSB_SY);
+	__builtin_arm_isb(ISB_SY);
+}
+#else
 void
 pe_init_fiq()
 {
 }
+#endif /* A5XELTE */
 #endif

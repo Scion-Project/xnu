@@ -34,17 +34,25 @@
 
 const char * gIOKernelConfigTables =
     "("
-#if defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
     "   {"
     "     'IOClass'         = SweetPlatformExpert;"
     "     'IOProviderClass' = IOPlatformExpertDevice;"
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+    "     'IONameMatch'     = 'samsung,a5xelte';"
+#else
     "     'IONameMatch'     = 'xiaomi,sweet';"
+#endif
     "     'IOProbeScore'    = 10000:32;"
     "   },"
     "   {"
     "     'IOClass'         = SweetCPU;"
     "     'IOProviderClass' = IOPlatformDevice;"
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+    "     'IONameMatch'     = 'arm,cortex-a53';"
+#else
     "     'IONameMatch'     = 'qcom,kryo470';"
+#endif
     "     'IOProbeScore'    = 10000:32;"
     "   },"
     "   {"
@@ -62,6 +70,7 @@ const char * gIOKernelConfigTables =
     "     'IOProviderClass' = IOResources;"
     "     'IOMatchCategory' = IOCoreSurfaceRoot;"
     "   },"
+#if !defined(ARM64_BOARD_CONFIG_A5XELTE)
     "   {"
     "     'IOClass'         = AppleCLCD;"
     "     'IOProviderClass' = IOPlatformDevice;"
@@ -82,6 +91,7 @@ const char * gIOKernelConfigTables =
     "     'IOProviderClass' = IOResources;"
     "     'IOMatchCategory' = SweetBattery;"
     "   },"
+#endif
 #endif
     "   {"
     "     'IOClass'         = IOPanicPlatform;"

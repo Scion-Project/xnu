@@ -3009,28 +3009,38 @@ sleh_irq(arm_saved_state_t *state)
 #endif
 
 
-#if defined(SWEET)
+#if defined(A5XELTE) || defined(SWEET)
 	/*
-	 * sweet: TrustZone owns GIC Group 0, so the timer and IPIs that other
-	 * ARM64 targets take as FIQs arrive here as Group 1 IRQs.
+	 * The non-secure timer and IPIs arrive as Group 1 IRQs.
 	 */
-	uint64_t iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
+	uint64_t iar;
+#if defined(A5XELTE)
+	extern uint32_t a5xelte_irq_ack(void);
+	extern void a5xelte_irq_eoi(uint32_t);
+	iar = a5xelte_irq_ack();
+	#define A5_IRQ_EOI(value) a5xelte_irq_eoi((uint32_t)(value))
+	const uint32_t timer_intid = A5XELTE_VTIMER_INTID;
+#else
+	iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
+	#define A5_IRQ_EOI(value) __builtin_arm_wsr64("ICC_EOIR1_EL1", (value))
+	const uint32_t timer_intid = sweet_vtimer_intid;
+#endif
 	uint32_t intid = (uint32_t)(iar & 0xFFFFFF);
 
 	if (intid >= 1020 && intid <= 1023) {
 		return; /* spurious */
 	}
-	if (intid == sweet_vtimer_intid) {
+	if (intid == timer_intid) {
 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_TIMER);
 		cdp->cpu_decrementer = -1; /* Large */
 		INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_TIMER);
 		rtclock_intr(TRUE);
 		INTERRUPT_MASKED_DEBUG_END();
-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
+		A5_IRQ_EOI(iar);
 	} else if (intid < 16) {
 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_IPI);
 		/* Ack before handling so an IPI raised meanwhile is not lost */
-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
+		A5_IRQ_EOI(iar);
 		__builtin_arm_isb(ISB_SY);
 		cpu_signal_handler();
 	} else {
@@ -3041,8 +3051,9 @@ sleh_irq(arm_saved_state_t *state)
 			    cdp->interrupt_nub,
 			    intid);
 		}
-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
+		A5_IRQ_EOI(iar);
 	}
+	#undef A5_IRQ_EOI
 	__builtin_arm_isb(ISB_SY);
 #else
 	sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
