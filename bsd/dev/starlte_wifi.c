@@ -18,8 +18,9 @@
  *   gic_v3_spi_*()           the GIC calls of INTx (brcmfmac=5): not on this tree yet; attaching fails, so
  *                            hakios_wifi_option() makes brcmfmac_poll 1 unless given: the chip is polled.
  *   hakios_virtio_net_init() QEMU's virtio network link: none on the phone.
- *   starlte_wifi_init()      from IOKitBSDInit, where stage 1 was started: en0's options read (hakios_net_init()),
- *                            then the link (wifi_pcie=N; 6 hands the chip to brcmfmac, brcmfmac=N).
+ *   starlte_wifi_init()      from IOKitBSDInit, where stage 1 was started: a thread that waits for the root filesystem and
+ *                            wifi_delay=<s> (default 60: the USB console is up by then), then reads en0's options
+ *                            (hakios_net_init()) and starts the link (wifi_pcie=N; 6 hands the chip to brcmfmac, brcmfmac=N).
  *
  * Nothing runs without wifi_pcie=N: off by default.
  */
@@ -28,6 +29,7 @@
 #include <kern/clock.h>
 #include <kern/kalloc.h>
 #include <kern/locks.h>
+#include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
@@ -215,16 +217,41 @@ hakios_wifi_option(const char *name)
 void hakios_virtio_net_init(void);
 void hakios_virtio_net_init(void) {}
 
+/*
+ * The start, late: on a thread that waits for the root filesystem and then wifi_delay seconds (default 60), so that the USB
+ * console is up and every line of the PCIe bring-up is seen as it is said (a bus that stops on an unclocked block stops the
+ * phone with it, and nothing said before the console came up would be seen). wifi_delay=0 starts at once.
+ */
 void hakios_net_init(void);
+static void
+starlte_wifi_thread(__unused void *arg, __unused wait_result_t wr)
+{
+	uint32_t steps = 0, delay_s = 60;
+
+	PE_parse_boot_argn("wifi_pcie", &steps, sizeof(steps));
+	PE_parse_boot_argn("wifi_delay", &delay_s, sizeof(delay_s));
+	if (delay_s != 0) {
+		(void)root_there();
+		printf("wifi: wifi_pcie=%u: the link is brought up in %u s (wifi_delay)\n", steps, delay_s);
+		IOSleep(delay_s * 1000);
+	}
+	printf("wifi: wifi_pcie=%u: en0's options read, then the link (hakios.exynos_pcie.c)\n", steps);
+	hakios_net_init();
+	hakios_exynos_pcie_init();
+}
+
 void starlte_wifi_init(void);
 void
 starlte_wifi_init(void)
 {
 	uint32_t steps = 0;
+	thread_t thread;
 
 	if (!PE_parse_boot_argn("wifi_pcie", &steps, sizeof(steps)) || steps == 0) {
 		return;
 	}
-	hakios_net_init();
-	hakios_exynos_pcie_init();
+	if (kernel_thread_start(starlte_wifi_thread, NULL, &thread) == KERN_SUCCESS) {
+		thread_set_thread_name(thread, "starlte-wifi");
+		thread_deallocate(thread);
+	}
 }
