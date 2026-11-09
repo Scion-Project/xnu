@@ -995,6 +995,14 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 		thread->machine.el0_synchronous_trap = true;
 	}
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* sweet: soft M3 pins (sweetm3unpin=N ms, sweet_a64e.c): release a pinned thread N ms later */
+	if (is_user && __improbable(thread->bound_processor != PROCESSOR_NULL)) {
+		extern void sweet_m3_unpin_check(thread_t);
+		sweet_m3_unpin_check(thread);
+	}
+#endif
+
 	switch (class) {
 	case ESR_EC_SVC_64:
 		if (!is_saved_state64(state) || !is_user) {
@@ -1332,6 +1340,8 @@ handle_uncategorized(arm_saved_state_t *state)
 			if (little != PROCESSOR_NULL) {
 				sweet_m3_pins++;
 				thread_bind(little);
+				extern void sweet_m3_pin_note(thread_t);
+				sweet_m3_pin_note(current_thread());
 				thread_block(THREAD_CONTINUE_NULL);
 				return;
 			}
