@@ -928,6 +928,20 @@ bsd_init(void)
 	IOSecureBSDRoot(rootdevice);
 
 	mountlist.tqh_first->mnt_flag |= MNT_ROOTFS;
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* iOS 27 on STARLTE: boot-arg sweetacl=1: ACLs evaluated on the root (iOS's container dirs are
+	 * mode 000 + an ACL; HFS only honours ACLs with extended security on the mount) */
+	{
+		int acl = 0;
+		if (PE_parse_boot_argn("sweetacl", &acl, sizeof(acl)) && acl) {
+			extern void vfs_setextendedsecurity(mount_t mp);
+			extern int vfs_extendedsecurity(mount_t mp);
+			int before = vfs_extendedsecurity(mountlist.tqh_first);
+			vfs_setextendedsecurity(mountlist.tqh_first);
+			printf("SWEET ACL: root extended security %d -> %d\n", before, vfs_extendedsecurity(mountlist.tqh_first));
+		}
+	}
+#endif
 
 	bsd_init_kprintf("calling VFS_ROOT\n");
 	/* Get the vnode for '/'.  Set fdp->fd_fd.fd_cdir to reference it. */
