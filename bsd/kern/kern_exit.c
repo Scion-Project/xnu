@@ -2084,7 +2084,7 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 		subcode = ut->uu_subcode;
 		etype = ut->uu_exception;
 
-#if defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 		if (p == current_proc()) {
 			extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
 			sweet_crash_log(p->p_comm, proc_getpid(p), WTERMSIG(rv),

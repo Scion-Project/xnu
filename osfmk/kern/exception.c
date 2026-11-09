@@ -960,7 +960,7 @@ exception_triage(
 	return exception_triage_thread(exception, code, codeCnt, thread);
 }
 
-#if defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 #include <vm/vm_shared_region.h>
 #include <vm/vm_shared_region_xnu.h>  /* 11417: vm_shared_region_get/deallocate, struct vm_shared_region */
 #include <vm/vm_map_internal.h>      /* 11417: vm_map_region_recurse_64 */
@@ -1051,6 +1051,9 @@ static void
 sweet_crash_strings(const char *name)
 {
 	static char names[128];
+	#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+	static int a5_scans;
+	#endif
 	char *buf;
 	vm_map_t map = current_map();
 	vm_map_offset_t addr = 0;
@@ -1077,6 +1080,12 @@ sweet_crash_strings(const char *name)
 	if (!found) {
 		return;
 	}
+	#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* Keep repeated service crashes from flooding a single-core boot. */
+	if (a5_scans++ >= 4) {
+		return;
+	}
+	#endif
 	buf = kalloc_data(65536, Z_WAITOK);
 	if (buf == NULL) {
 		return;
@@ -1182,7 +1191,7 @@ sweet_sample_task(const char *name, int pid, task_t task)
 	task_unlock(task);
 }
 
-#endif /* ARM64_BOARD_CONFIG_SWEET */
+#endif /* ARM64_BOARD_CONFIG_SWEET || ARM64_BOARD_CONFIG_A5XELTE */
 
 kern_return_t
 bsd_exception(
