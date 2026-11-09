@@ -5396,7 +5396,7 @@ IOService::publishHiddenMedia(IOService * parent)
 	bool                wasHiding;
 
 	iomediaClass = OSMetaClass::getMetaClassWithName(gIOMediaKey);
-#if !defined(ARM64_BOARD_CONFIG_SWEET)
+#if !defined(ARM64_BOARD_CONFIG_SWEET) && !defined(ARM64_BOARD_CONFIG_A5XELTE)
 	assert(iomediaClass);
 #endif
 
@@ -5407,7 +5407,7 @@ IOService::publishHiddenMedia(IOService * parent)
 	}
 	UNLOCKNOTIFY();
 
-#if defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 	/* SWEET has no IOStorageFamily: without the IOMedia class no media exists to unhide. */
 	if (!iomediaClass) {
 		wasHiding = false;
@@ -5458,7 +5458,7 @@ IOService::setRootMedia(IOService * root)
 	bool unhide;
 
 	ioblockstoragedriverClass = OSMetaClass::getMetaClassWithName(gIOBlockStorageDriverKey);
-#if defined(ARM64_BOARD_CONFIG_SWEET)
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 	/*
 	 * SWEET has no IOStorageFamily, so no service can be a block storage
 	 * driver: the root (e.g. a RAM disk) is not block media, as for image boot.
