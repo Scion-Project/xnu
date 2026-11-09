@@ -807,15 +807,36 @@ retry_src_fault:
 		 */
 #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 		if (slide_info_page_size > PAGE_SIZE) {
+			/*
+			 * Copy the source page and let it go before its neighbours in the 16 KiB
+			 * slide page are faulted in: holding it busy meanwhile deadlocked two
+			 * threads paging in different pieces of one slide page.
+			 */
+			void *copy = kalloc_data(PAGE_SIZE, Z_WAITOK | Z_NOFAIL);
+			bcopy((const void *)src_vaddr, copy, PAGE_SIZE);
+			vm_object_lock(src_page_object);
+			vm_page_wakeup_done(src_page_object, src_page);
+			src_page = VM_PAGE_NULL;
+			vm_object_paging_end(src_page_object);
+			vm_object_unlock(src_page_object);
+			if (top_page != VM_PAGE_NULL) {
+				vm_object_lock(src_top_object);
+				VM_PAGE_FREE(top_page);
+				vm_object_paging_end(src_top_object);
+				vm_object_unlock(src_top_object);
+				top_page = VM_PAGE_NULL;
+			}
 			kr = sweet_sr_slide_subpage(pager, src_top_object, &fault_info,
-			    offset + cur_offset, src_vaddr, dst_vaddr, slide_info_page_size,
+			    offset + cur_offset, (vm_offset_t)copy, dst_vaddr, slide_info_page_size,
 			    slide_start_address);
+			kfree_data(copy, PAGE_SIZE);
 			if (kr != KERN_SUCCESS) {
 				shared_region_pager_slid_error++;
 				retval = KERN_MEMORY_ERROR;
 			} else {
 				shared_region_pager_slid++;
 			}
+			continue;       /* (the source page is already cleaned up) */
 		} else
 #endif
 		for (offset_in_page = 0;
