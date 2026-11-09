@@ -18,6 +18,9 @@
  *   gic_v3_spi_*()           the GIC calls of INTx (brcmfmac=5): not on this tree yet; attaching fails, so
  *                            hakios_wifi_option() makes brcmfmac_poll 1 unless given: the chip is polled.
  *   hakios_virtio_net_init() QEMU's virtio network link: none on the phone.
+ *   network                  also from the device tree: /chosen "hakios-wifi-network" (name, newline, passphrase), which
+ *                            scion-kernel tools/ios27/wifi/adt-wifi-network.py puts into a test image's ADT; kept by the
+ *                            kernel and removed from the registry (iokit/Kernel/starlte_wifi_dt.cpp), never logged.
  *   starlte_wifi_init()      from IOKitBSDInit, where stage 1 was started: a thread that waits for the root filesystem and
  *                            wifi_delay=<s> (default 60: the USB console is up by then), then reads en0's options
  *                            (hakios_net_init()) and starts the link (wifi_pcie=N; 6 hands the chip to brcmfmac, brcmfmac=N).
@@ -33,6 +36,7 @@
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 #include <sys/errno.h>
 #include <sys/fcntl.h>
 #include <sys/proc.h>
@@ -48,6 +52,10 @@
 
 static LCK_GRP_DECLARE(starlte_wifi_group, "starlte-wifi");
 static LCK_MTX_DECLARE(files_lock, &starlte_wifi_group);
+
+/* the network to join given in the device tree (/chosen "hakios-wifi-network": name, newline, passphrase), kept here */
+static uint8_t dt_network[200];
+static uint64_t dt_network_length;
 
 static struct {
 	char name[64];
@@ -127,6 +135,10 @@ hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_o
 	if (dir == NULL || strcmp(dir, "fw") != 0 || name == NULL || name[0] == 0 || strchr(name, '/') != NULL ||
 	    strlen(name) >= sizeof(kept[0].name)) {
 		return NULL;
+	}
+	if (strcmp(name, "network") == 0 && dt_network_length != 0) {
+		*size = dt_network_length;          /* (never said: it holds a passphrase) */
+		return dt_network;
 	}
 	lck_mtx_lock(&files_lock);
 	for (unsigned i = 0; i < WIFI_FILES_KEPT; i++) {
@@ -240,12 +252,27 @@ starlte_wifi_thread(__unused void *arg, __unused wait_result_t wr)
 	hakios_exynos_pcie_init();
 }
 
+void starlte_wifi_dt_forget(void);     /* iokit/Kernel/starlte_wifi_dt.cpp */
 void starlte_wifi_init(void);
 void
 starlte_wifi_init(void)
 {
 	uint32_t steps = 0;
 	thread_t thread;
+	DTEntry chosen;
+	void const *value;
+	unsigned int size;
+
+	/* a test image's network to join (scion-kernel tools/ios27/wifi/adt-wifi-network.py): kept, then out of the registry */
+	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+	    SecureDTGetProperty(chosen, "hakios-wifi-network", &value, &size) == kSuccess && size != 0) {
+		dt_network_length = size <= sizeof(dt_network) ? size : 0;
+		if (dt_network_length != 0) {
+			memcpy(dt_network, value, size);
+		}
+		starlte_wifi_dt_forget();
+		printf("wifi: the device tree names a network to join (%u bytes, kept for brcmfmac=8; taken out of the registry)\n", size);
+	}
 
 	if (!PE_parse_boot_argn("wifi_pcie", &steps, sizeof(steps)) || steps == 0) {
 		return;
