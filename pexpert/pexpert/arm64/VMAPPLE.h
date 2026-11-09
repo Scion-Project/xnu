@@ -44,6 +44,7 @@
  * registers itself (see SCION_NATIVE_PAC in arm64/pac_asm.h). The keys are
  * one set per boot, shared by EL0 and EL1: there are no per-process keys.
  */
+#define SCION_NO_APPLE_IMPDEF_REGS 1 /* a non-Apple CPU has no Apple implementation-defined registers */
 #else
 #define HAS_PARAVIRTUALIZED_PAC   1
 #endif

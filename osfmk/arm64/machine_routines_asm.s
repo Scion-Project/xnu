@@ -1663,7 +1663,7 @@ Lwfi_inst:
 	dsb		sy
 	isb		sy
 	wfi
-#if NO_CPU_OVRD
+#if NO_CPU_OVRD && !SCION_NO_APPLE_IMPDEF_REGS
 	// Clear any spurious IPIs received during CPU shutdown
 	mov     x9, #0x1
 	msr     S3_5_C15_C1_1, x9
