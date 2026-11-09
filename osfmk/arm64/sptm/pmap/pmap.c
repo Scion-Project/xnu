@@ -7568,7 +7568,9 @@ void
 pmap_sync_page_attributes_phys(
 	ppnum_t pp)
 {
-	flush_dcache((vm_offset_t) (pp << PAGE_SHIFT), PAGE_SIZE, TRUE);
+	/* ptoa() widens before the shift: pp << PAGE_SHIFT is a 32-bit shift and drops the high bits of physical
+	 * addresses at or above 4 GiB (all of DRAM on boards whose memory starts there), which phystokv() then rejects. */
+	flush_dcache((vm_offset_t) ptoa(pp), PAGE_SIZE, TRUE);
 }
 
 #if CONFIG_COREDUMP
