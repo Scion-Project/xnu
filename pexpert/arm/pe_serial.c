@@ -872,7 +872,11 @@ fbcon_probe(void)
 	uint32_t const *val;
 	unsigned int size;
 
+	#if defined(A5XELTE)
+	if (SecureDTFindEntry("name", "a5xelte-fbcon", &entry) != kSuccess ||
+#else
 	if (SecureDTFindEntry("name", "sweet-fbcon", &entry) != kSuccess ||
+#endif
 	    SecureDTGetProperty(entry, "reg", (void const **)&reg, &size) != kSuccess || size < 16) {
 		return;
 	}
