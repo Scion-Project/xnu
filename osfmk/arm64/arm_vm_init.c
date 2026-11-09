@@ -1862,6 +1862,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	/*
 	 * Get the virtual and physical kernel-managed memory base from boot_args.
 	 */
+	sweet_early_mark(8, "arm_vm_init entered");
 	gVirtBase = args->virtBase;
 	gPhysBase = args->physBase;
 #if KASAN
@@ -1901,6 +1902,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 #endif
 
 	// Slide the physical aperture to a random page-aligned location within the slide range
+	sweet_early_mark(9, "arm_vm_init: first early_random");
 	uint64_t physmap_slide = early_random() & ARM64_PHYSMAP_SLIDE_MASK & ~((uint64_t)PAGE_MASK);
 	assert(physmap_slide < ARM64_PHYSMAP_SLIDE_RANGE);
 
@@ -1948,9 +1950,17 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 #endif
 #endif
 	if (dynamic_memory_begin > VM_MAX_KERNEL_ADDRESS) {
+#if defined(A5XELTE)
+		panic("Unsupported memory configuration %lx: virt %llx phys %llx top %llx physmap %llx static_end %llx dyn %llx max %llx",
+		    mem_size, (uint64_t)gVirtBase, (uint64_t)gPhysBase, (uint64_t)args->topOfKernelData,
+		    (uint64_t)physmap_base, (uint64_t)static_memory_end, (uint64_t)dynamic_memory_begin,
+		    (uint64_t)VM_MAX_KERNEL_ADDRESS);
+#else
 		panic("Unsupported memory configuration %lx", mem_size);
+#endif
 	}
 
+	sweet_early_mark(21, "arm_vm_init: physmap layout set");
 	boot_tte = (tt_entry_t *)&bootstrap_pagetables;
 	boot_ttep = kvtophys((vm_offset_t)boot_tte);
 
@@ -1994,6 +2004,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	cpu_tte = (tt_entry_t *)alloc_ptpage(TRUE);
 	cpu_ttep = kvtophys((vm_offset_t)cpu_tte);
 	bzero(cpu_tte, ARM_PGBYTES);
+	sweet_early_mark(22, "arm_vm_init: cpu_tte allocated");
 	avail_end = gPhysBase + mem_size;
 	assert(!(avail_end & PAGE_MASK));
 
@@ -2011,6 +2022,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	 *   the so called physical aperture should be statically mapped
 	 */
 	init_ptpages(cpu_tte, gVirtBase, dynamic_memory_begin, TRUE, ARM_TTE_TABLE_AP(ARM_TTE_TABLE_AP_USER_NA));
+	sweet_early_mark(23, "arm_vm_init: static tables built");
 
 #if defined(ARM_LARGE_MEMORY)
 	/*
@@ -2126,6 +2138,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	edata = (vm_offset_t) segDATAB + segSizeDATA;
 	end_kern = round_page(segHIGHESTKC ? segHIGHESTKC : getlastkerneladdr()); /* Force end to next page */
 
+	sweet_early_mark(24, "arm_vm_init: kernel segments found");
 	vm_set_page_size();
 
 	vm_kernel_base = segTEXTB;
@@ -2160,7 +2173,9 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	vm_prelink_sdata = segPRELINKDATAB;
 	vm_prelink_edata = segPRELINKDATAB + segSizePRELINKDATA;
 
+	sweet_early_mark(25, "arm_vm_init: calling arm_vm_prot_init");
 	arm_vm_prot_init(args);
+	sweet_early_mark(26, "arm_vm_init: arm_vm_prot_init done");
 
 	/*
 	 * Initialize the page tables for the low globals:
@@ -2204,14 +2219,20 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	/* phystokv() must still refer to the bootstrap aperture here. */
 	sweet_early_map_final();
 #endif
+	sweet_early_mark(27, "arm_vm_init: calling arm_vm_physmap_init");
 	arm_vm_physmap_init(args);
 	set_mmu_ttb_alternate(cpu_ttep & TTBR_BADDR_MASK);
+	sweet_early_mark(28, "arm_vm_init: TTBR1 switched");
 
 	ml_enable_monitor();
 
 #if defined(SWEET) && !defined(A5XELTE)
 	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
 	sweet_early_relocate(SWEET_EARLY_FB_VA);
+#elif defined(A5XELTE)
+	/* The early console writes the scanout through TTBR0's VA=PA map. */
+	sweet_early_mark(29, "arm_vm_init: dropping TTBR0, early console off");
+	sweet_early_disable();
 #endif
 	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
 

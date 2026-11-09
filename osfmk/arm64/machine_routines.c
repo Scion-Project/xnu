@@ -3441,6 +3441,13 @@ ml_unsafe_kernel_text_init(void)
 		_unsafe_kernel_text_initialized = true;
 		_unsafe_kernel_text = (0 == *(const int *)value);
 	}
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* sweet: no iBoot property and no CTRR here; kernel text is not locked. */
+	if (!_unsafe_kernel_text_initialized) {
+		_unsafe_kernel_text_initialized = true;
+		_unsafe_kernel_text = true;
+	}
+#endif
 }
 STARTUP(TUNABLES, STARTUP_RANK_FIRST, ml_unsafe_kernel_text_init);
 
@@ -3452,3 +3459,15 @@ ml_unsafe_kernel_text(void)
 	return false;
 }
 #endif /* DEVELOPMENT || DEBUG || CONFIG_DTRACE || CONFIG_CSR_FROM_DT */
+
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * sweet: Apple's closed per-SoC library reads the fuses for this. Answer as a
+ * retail (production-fused) device, so kern.eng_sample_dev_fused stays 0.
+ */
+boolean_t
+ml_device_is_prod_fused(void)
+{
+	return TRUE;
+}
+#endif

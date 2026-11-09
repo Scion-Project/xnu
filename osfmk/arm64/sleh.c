@@ -2693,6 +2693,23 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
 			}
 		}
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+		/* 12377 port: why copyio faults on user memory fail (launchd, boot h/i). */
+		if (recover && (fault_addr & TTBR_SELECTOR) == 0) {
+			static int sweet_copyio_fault_logs;
+			if (sweet_copyio_fault_logs++ < 8) {
+				printf("SWEET COPYIO FAULT: addr 0x%llx type %d code 0x%x result %d map pgshift %d voids %d\n",
+				    (uint64_t)fault_addr, fault_type, fault_code, result,
+				    VM_MAP_PAGE_SHIFT(map),
+#if CONFIG_MAP_RANGES
+				    (int)vm_map_in_user_range_voids(map, fault_addr, 1)
+#else
+				    -1
+#endif
+				    );
+			}
+		}
+#endif
 		if (recover) {
 			/*
 			 *  Handle guard object faults during copyio() routines
@@ -3039,9 +3056,9 @@ sleh_irq(arm_saved_state_t *state)
 	if (intid == timer_intid) {
 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_TIMER);
 		cdp->cpu_decrementer = -1; /* Large */
-		INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_TIMER);
+		ml_interrupt_masked_debug_start(rtclock_intr, DBG_INTR_TYPE_TIMER);
 		rtclock_intr(TRUE);
-		INTERRUPT_MASKED_DEBUG_END();
+		ml_interrupt_masked_debug_end();
 		A5_IRQ_EOI(iar);
 	} else if (intid < 16) {
 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_IPI);

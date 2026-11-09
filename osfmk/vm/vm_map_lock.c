@@ -41,6 +41,26 @@
 #include <vm/vm_object_internal.h>
 #include <vm/vm_stackshot_utils_xnu.h>
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/* 12377 port: which guard-object check rejects a user range, and with what. */
+static void
+sweet_vmgo_reject(int site, vm_map_entry_t entry, vm_map_address_t start, vm_map_address_t end)
+{
+	static int logs;
+	if (logs++ >= 8) {
+		return;
+	}
+	vm_guard_object_chunk_t chunk = vms_chunk(entry->vme_chunk);
+	printf("SWEET VMGO REJECT %d: entry 0x%llx-0x%llx chunk 0x%llx-0x%llx bitmap 0x%llx req 0x%llx-0x%llx\n",
+	    site, (uint64_t)entry->vme_start, (uint64_t)entry->vme_end,
+	    (uint64_t)vmgo_chunk_start(chunk), (uint64_t)vmgo_chunk_end(chunk),
+	    (uint64_t)vmgo_bitmap(chunk), (uint64_t)start, (uint64_t)end);
+}
+#define SWEET_VMGO_REJECT(site, e, s, x) sweet_vmgo_reject(site, e, s, x)
+#else
+#define SWEET_VMGO_REJECT(site, e, s, x) ((void)0)
+#endif
+
 uint64_t vm_map_lookup_and_lock_object_copy_slowly_count = 0;
 uint64_t vm_map_lookup_and_lock_object_copy_slowly_size = 0;
 uint64_t vm_map_lookup_and_lock_object_copy_slowly_max = 0;
@@ -2659,6 +2679,7 @@ __vmrl_atomic_lock_and_iunlock(vm_map_lock_ctx_t vml_ctx)
 		    VME_IN_CHUNK(entry) &&
 		    vmgo_chunk_start(vms_chunk(entry->vme_chunk)) < end &&
 		    !vm_guard_object_check_op_range(entry, start, end)) {
+			SWEET_VMGO_REJECT(1, entry, start, end);
 			kr = KERN_INVALID_GUARD_OBJECT_SLOT;
 			release_assert(!vmrl_is_kernel_pmap(flags));
 			break;
@@ -2684,6 +2705,7 @@ __vmrl_atomic_lock_and_iunlock(vm_map_lock_ctx_t vml_ctx)
 			    VME_IN_CHUNK(VME_PREV(entry)) &&
 			    vmgo_chunk_end(vms_chunk(VME_PREV(entry)->vme_chunk)) > start &&
 			    !vm_guard_object_check_op_range(VME_PREV(entry), start, end)) {
+				SWEET_VMGO_REJECT(2, VME_PREV(entry), start, end);
 				kr = KERN_INVALID_GUARD_OBJECT_SLOT;
 				release_assert(!vmrl_is_kernel_pmap(flags));
 				break;
@@ -2941,6 +2963,7 @@ restart:
 		if (VME_IN_CHUNK(next_entry) &&
 		    !vm_guard_object_check_op_range(next_entry,
 		    vml_ctx->__original_req_start, end)) {
+			SWEET_VMGO_REJECT(3, next_entry, vml_ctx->__original_req_start, end);
 			kr = KERN_INVALID_GUARD_OBJECT_SLOT;
 			release_assert(!vmrl_is_kernel_pmap(flags));
 			goto out_abort;
@@ -3745,4 +3768,5 @@ vm_map_found_entry_ex_unlock(
  */
 #if DEVELOPMENT || DEBUG
 #include <vm/vm_map_lock_tests.c>
+
 #endif /* DEVELOPMENT || DEBUG */

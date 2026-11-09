@@ -1912,6 +1912,19 @@ pmap_construct_io_pte(pmap_paddr_t paddr, pt_entry_t tmplate)
 }
 #endif /* XNU_MONITOR */
 
+/*
+ * sweet (12377 port): 12377 maps write-combined / RT pages that lie outside
+ * the kernel-managed DRAM as Device-GRE. On the Exynos boards the
+ * framebuffer, the panic region (/pram) and the Mali buffers are ordinary
+ * RAM outside that range; as device memory, DC ZVA (bzero) takes an
+ * alignment fault. Keep them Normal Non-Cacheable, as xnu-11417 did.
+ */
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+#define pmap_wcomb_normal(pa) ((void)(pa), true)
+#else
+#define pmap_wcomb_normal(pa) is_dram_addr(pa)
+#endif
+
 vm_map_address_t
 pmap_map_bd_with_options(
 	vm_map_address_t virt,
@@ -1944,7 +1957,7 @@ pmap_map_bd_with_options(
 
 	switch (options & PMAP_MAP_BD_MASK) {
 	case PMAP_MAP_BD_WCOMB:
-		if (is_dram_addr(start)) {
+		if (pmap_wcomb_normal(start)) {
 			mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
 		} else {
 #if HAS_FEAT_XS
@@ -6001,7 +6014,7 @@ wimg_to_pte(unsigned int wimg, pmap_paddr_t pa)
 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
 		break;
 	case VM_WIMG_RT:
-		if (is_dram_addr(pa)) {
+		if (pmap_wcomb_normal(pa)) {
 			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_RT);
 		} else {
 #if HAS_FEAT_XS
@@ -6041,7 +6054,7 @@ wimg_to_pte(unsigned int wimg, pmap_paddr_t pa)
 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
 		break;
 	case VM_WIMG_WCOMB:
-		if (is_dram_addr(pa)) {
+		if (pmap_wcomb_normal(pa)) {
 			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
 		} else {
 #if HAS_FEAT_XS

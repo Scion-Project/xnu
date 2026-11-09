@@ -977,40 +977,49 @@ exception_triage(
 void sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subcode);
 /* sweet (0309): which mapping holds addr (descending into the shared
  * region submap), and the first 32 bytes there. */
+/*
+ * 12377: the VM map locks are range/entry locks now, so look the address up
+ * through vm_map_region_recurse_64 (it locks and descends itself). Returns
+ * the region holding addr, or the next one above it.
+ */
+static kern_return_t
+sweet_crash_region(vm_map_t map, uint64_t addr, natural_t depth,
+    mach_vm_address_t *start, mach_vm_size_t *size, struct vm_region_submap_info_64 *info)
+{
+	mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+	*start = addr;
+	*size = 0;
+	return vm_map_region_recurse_64(map, vm_sanitize_wrap_addr_ref(start),
+	           (vm_map_size_ut *)size, &depth, info, &count);
+}
+
 static void
 sweet_crash_where(const char *name, const char *what, uint64_t addr)
 {
 	vm_map_t map = current_map();
-	vm_map_entry_t entry;
+	struct vm_region_submap_info_64 info;
+	mach_vm_address_t start;
+	mach_vm_size_t size;
 	uint64_t data[4] = { 0 };
 	int rc = copyin((user_addr_t)addr, data, sizeof(data));
-	vm_map_lock_read(map);
-	if (!vm_map_lookup_entry(map, (vm_map_offset_t)addr, &entry)) {
-		vm_map_unlock_read(map);
+	if (sweet_crash_region(map, addr, 0, &start, &size, &info) != KERN_SUCCESS || start > addr) {
 		printf("CRASH %s %s 0x%llx: not mapped\n", name, what, addr);
 		return;
 	}
 	printf("CRASH %s %s 0x%llx in 0x%llx-0x%llx prot %d/%d tag %d off 0x%llx%s copyin %d: %016llx %016llx %016llx %016llx\n",
-	    name, what, addr, (uint64_t)entry->vme_start, (uint64_t)entry->vme_end,
-	    entry->protection, entry->max_protection, (int)VME_ALIAS(entry),
-	    (uint64_t)VME_OFFSET(entry), entry->is_sub_map ? " SUBMAP" : "", rc,
+	    name, what, addr, (uint64_t)start, (uint64_t)(start + size),
+	    info.protection, info.max_protection, (int)info.user_tag,
+	    (uint64_t)info.offset, info.is_submap ? " SUBMAP" : "", rc,
 	    data[0], data[1], data[2], data[3]);
-	if (entry->is_sub_map) {
-		vm_map_t sub = VME_SUBMAP(entry);
-		vm_map_offset_t saddr = addr - entry->vme_start + VME_OFFSET(entry);
-		vm_map_entry_t se;
-		vm_map_lock_read(sub);
-		if (vm_map_lookup_entry(sub, saddr, &se)) {
-			printf("CRASH %s %s submap 0x%llx in 0x%llx-0x%llx prot %d/%d off 0x%llx object %p%s\n",
-			    name, what, (uint64_t)saddr, (uint64_t)se->vme_start, (uint64_t)se->vme_end,
-			    se->protection, se->max_protection, (uint64_t)VME_OFFSET(se),
-			    se->is_sub_map ? NULL : (void *)VME_OBJECT(se), se->is_sub_map ? " SUBMAP" : "");
+	if (info.is_submap) {
+		if (sweet_crash_region(map, addr, 1, &start, &size, &info) == KERN_SUCCESS && start <= addr) {
+			printf("CRASH %s %s submap 0x%llx-0x%llx prot %d/%d off 0x%llx object 0x%x\n",
+			    name, what, (uint64_t)start, (uint64_t)(start + size),
+			    info.protection, info.max_protection, (uint64_t)info.offset, info.object_id);
 		} else {
-			printf("CRASH %s %s submap 0x%llx: hole\n", name, what, (uint64_t)saddr);
+			printf("CRASH %s %s submap: hole\n", name, what);
 		}
-		vm_map_unlock_read(sub);
 	}
-	vm_map_unlock_read(map);
 }
 
 static void sweet_crash_strings(const char *name);
@@ -1063,23 +1072,17 @@ sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subc
 	sweet_crash_where(name, "x19", get_saved_state_reg(ss, 19));
 
 	if (sig == 11 || sig == 10) {
-		/* Which mapping the faulting address is in, or which two it falls between. */
+		/* Which mapping the faulting address is in, or the next one above it. */
 		uint64_t far = (uint64_t)saved_state64(ss)->far;
-		vm_map_t map = current_map();
-		vm_map_entry_t entry;
-		vm_map_lock_read(map);
-		bool inside = vm_map_lookup_entry(map, (vm_map_offset_t)far, &entry);
-		for (int i = 0; i < 2 && entry != vm_map_to_entry(map); i++) {
+		struct vm_region_submap_info_64 info;
+		mach_vm_address_t start;
+		mach_vm_size_t size;
+		if (sweet_crash_region(current_map(), far, 0, &start, &size, &info) == KERN_SUCCESS) {
 			printf("CRASH %s map%s 0x%llx-0x%llx prot %d/%d tag %d\n", name,
-			    inside && i == 0 ? " (far inside)" : (i == 0 ? " before far" : " after far"),
-			    (uint64_t)entry->vme_start, (uint64_t)entry->vme_end, entry->protection,
-			    entry->max_protection, (int)VME_ALIAS(entry));
-			if (inside) {
-				break;
-			}
-			entry = entry->vme_next;
+			    start <= far ? " (far inside)" : " after far",
+			    (uint64_t)start, (uint64_t)(start + size), info.protection,
+			    info.max_protection, (int)info.user_tag);
 		}
-		vm_map_unlock_read(map);
 	}
 	if (sig == 6 || sig == 5) {
 		sweet_crash_strings(name);

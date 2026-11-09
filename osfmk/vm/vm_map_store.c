@@ -1765,6 +1765,16 @@ vm_guard_object_should_fallback(
 	vm_map_size_t           size,
 	vm_map_offset_t         mask)
 {
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/*
+	 * sweet: no guard objects, kernel or user. The 4 KiB-page kernel faults
+	 * user (16 KiB-page) memory one 16 KiB page from the 4 KiB-aligned fault
+	 * address; the guard-object range check then sees the fault spill into
+	 * the next slot (launchd: req 0x10217d000-0x102181000 against a slot
+	 * ending at 0x102180000) and fails it with KERN_INVALID_GUARD_OBJECT_SLOT.
+	 */
+	return true;
+#endif
 	/*
 	 * Various things that do not support or do not need guard objects:
 	 *

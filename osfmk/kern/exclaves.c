@@ -3328,7 +3328,9 @@ STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, exclaves_requirement_startup);
 
 #endif /* CONFIG_EXCLAVES */
 
-#if __has_include(<Tightbeam/tightbeam.h>)
+/* sweet: the generic boards do not link Apple's closed libTightbeam (0009). */
+#if __has_include(<Tightbeam/tightbeam.h>) && \
+    !defined(ARM64_BOARD_CONFIG_SWEET) && !defined(ARM64_BOARD_CONFIG_A5XELTE)
 
 #include <Tightbeam/tightbeam.h>
 
