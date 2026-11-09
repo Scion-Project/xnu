@@ -498,11 +498,26 @@ bsd_rooted_ramdisk(void)
 static void
 sweet_prewarm_thread(__unused void *arg, __unused wait_result_t wr)
 {
-	static const char *const files[] = {
+	/*
+	 * With sbgl=0 on the command line CoreAnimation composites on Metal: backboardd then loads the Metal plug-in and
+	 * PanVK (38 MB outside the shared cache) instead of the GL stack, and spent 4 to 6 s of its start in dlopen() of
+	 * them while every other daemon started too; chronod gave up waiting for the render server's displays meanwhile.
+	 */
+	static const char *const gl_files[] = {
 		"/usr/local/starbite/lib/libOSMesa.8.dylib", "/usr/local/starbite/lib/libsbgl.dylib",
 		"/usr/lib/s.dylib", "/usr/lib/m.dylib", "/usr/libexec/backboardd",
 		"/System/Library/CoreServices/SpringBoard.app/SpringBoard",
 	};
+	static const char *const metal_files[] = {
+		"/System/Library/Extensions/StarbiteMetal.bundle/libvulkan_panfrost.dylib",
+		"/System/Library/Extensions/StarbiteMetal.bundle/StarbiteMetal",
+		"/usr/lib/s.dylib", "/usr/lib/m.dylib", "/usr/libexec/backboardd",
+		"/System/Library/CoreServices/SpringBoard.app/SpringBoard",
+	};
+	_Static_assert(sizeof(gl_files) == sizeof(metal_files), "one count for both lists");
+	uint32_t sbgl = 1;
+	bool metal = PE_parse_boot_argn("sbgl", &sbgl, sizeof(sbgl)) && sbgl == 0;
+	const char *const *files = metal ? metal_files : gl_files;
 	const int chunk = 1024 * 1024;
 	char *buf = kalloc_data(chunk, Z_WAITOK);
 	if (buf == NULL) {
@@ -510,7 +525,7 @@ sweet_prewarm_thread(__unused void *arg, __unused wait_result_t wr)
 	}
 	uint64_t t0 = mach_absolute_time(), total = 0, ns = 0;
 	unsigned found = 0;
-	for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+	for (unsigned i = 0; i < sizeof(gl_files) / sizeof(gl_files[0]); i++) {
 		vnode_t vp = NULLVP;
 		if (vnode_lookup(files[i], 0, &vp, vfs_context_kernel()) != 0) {
 			continue;
@@ -531,8 +546,8 @@ sweet_prewarm_thread(__unused void *arg, __unused wait_result_t wr)
 	}
 	kfree_data(buf, chunk);
 	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
-	printf("SWEET PREWARM: %u files, %llu KiB read into the page cache in %llu ms\n", found, total >> 10,
-	    ns / 1000000);
+	printf("SWEET PREWARM: %u files (%s compositor), %llu KiB read into the page cache in %llu ms\n", found,
+	    metal ? "Metal" : "GL", total >> 10, ns / 1000000);
 }
 
 static void
