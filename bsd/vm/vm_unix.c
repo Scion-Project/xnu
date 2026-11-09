@@ -2483,7 +2483,12 @@ map_with_linking_np(
 	}
 
 	/* some older devs have s/w page size > h/w page size, no need to support them */
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* sweet: 4 KiB kernel pages, 16 KiB fixup pages; vm_dyld_pager.c handles both. */
+	if (info_hdr->mwli_page_size != PAGE_SIZE && info_hdr->mwli_page_size != 0x4000) {
+#else
 	if (info_hdr->mwli_page_size != PAGE_SIZE) {
+#endif
 		/* no printf, since this is expected on some devices */
 		kr = KERN_INVALID_ARGUMENT;
 		goto done;
