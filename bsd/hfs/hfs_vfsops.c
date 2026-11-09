@@ -2622,6 +2622,10 @@ hfs_init(__unused struct vfsconf *vfsp)
 
 	journal_init();
 
+	/* HakiOS: built in, so what the kext's start() did after vfs_fsadd() is done here */
+	hfs_init_zones();
+	hfs_sysctl_register();
+
 	return (0);
 }
 
