@@ -229,8 +229,8 @@
 145	AUE_NULL	ALL	{ int nosys(void); }   { old setrlimit }
 146	AUE_NULL	ALL	{ int nosys(void); }   { old killpg }
 147	AUE_SETSID	ALL	{ int setsid(void); }
-148	AUE_NULL	ALL	{ int nosys(void); }   { old setquota }
-149	AUE_NULL	ALL	{ int nosys(void); }   { old qquota }
+148	AUE_PIPE	ALL	{ int pipe2(user_addr_t fildes, int flags); }
+149	AUE_DUP2	ALL	{ int sys_dup3(u_int from, u_int to, int flags); }
 150	AUE_NULL	ALL	{ int nosys(void); }   { old getsockname }
 151	AUE_GETPGID	ALL	{ int getpgid(pid_t pid); }
 152	AUE_SETPRIVEXEC	ALL	{ int setprivexec(int flag); }
@@ -309,8 +309,8 @@
 212	AUE_NULL	ALL	{ int nosys(void); } { old ATgetrsp }
 213	AUE_NULL	ALL	{ int nosys(void); } 	{ Reserved for AppleTalk }
 
-214	AUE_NULL	ALL	{ int nosys(void); }
-215	AUE_NULL	ALL	{ int nosys(void); }
+214	AUE_FCHFLAGS	ALL	{ int fchflagsat(int fd, user_addr_t path, int flags, int flag); }
+215	AUE_UMASK	ALL	{ int getumask(void); }
 
 ; System Calls 216 - 230 are reserved for calls to support HFS/HFS Plus
 ; file system semantics. Currently, we only use 215-227.  The rest is
@@ -351,8 +351,8 @@
 243	AUE_INITGROUPS	ALL	{ int initgroups(u_int gidsetsize, gid_t *gidset, int gmuid) NO_SYSCALL_STUB; }
 244	AUE_POSIX_SPAWN	ALL	{ int posix_spawn(pid_t *pid, const char *path, const struct _posix_spawn_args_desc *adesc, char **argv, char **envp) NO_SYSCALL_STUB; }
 245	AUE_FFSCTL	ALL	{ int ffsctl(int fd, u_long cmd, caddr_t data, u_int options); }
-246	AUE_NULL	ALL	{ int nosys(void); }
-247	AUE_NULL	ALL	{ int nosys(void); } { old nfsclnt }
+246	AUE_NULL	ALL	{ int aio_readv(user_addr_t aiocbp); }
+247	AUE_NULL	ALL	{ int aio_writev(user_addr_t aiocbp); }
 
 #if NFSSERVER	/* XXX */
 248	AUE_FHOPEN	ALL	{ int fhopen(const struct fhandle *u_fhp, int flags); } 
@@ -360,7 +360,7 @@
 248	AUE_NULL	ALL	{ int nosys(void); } 
 #endif
 
-249	AUE_NULL	ALL	{ int nosys(void); }
+249	AUE_FSCTL	ALL	{ int fsctlat(int fd, const char *path, u_long cmd, caddr_t data, u_int options); }
 250	AUE_MINHERIT	ALL	{ int minherit(caddr_ut addr, size_ut len, int inherit); }
 #if SYSV_SEM
 251	AUE_SEMSYS	ALL	{ int semsys(u_int which, int a2, int a3, int a4, int a5) NO_SYSCALL_STUB; }
@@ -530,7 +530,7 @@
 349	AUE_NULL	ALL	{ int __pthread_fchdir(int fd); }
 350	AUE_AUDIT	ALL	{ int audit(void *record, int length); }
 351	AUE_AUDITON	ALL	{ int auditon(int cmd, void *data, int length); }
-352	AUE_NULL	ALL	{ int nosys(void); }
+352	AUE_FTRUNCATE	ALL	{ int guarded_ftruncate_np(int fd, const guardid_t *guard, off_t length); }
 353	AUE_GETAUID	ALL	{ int getauid(au_id_t *auid); }
 354	AUE_SETAUID	ALL	{ int setauid(au_id_t *auid); }
 355	AUE_NULL	ALL	{ int nosys(void); }	{ old getaudit }

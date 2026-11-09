@@ -78,6 +78,7 @@
 #include <sys/filedesc.h>
 #include <sys/kernel.h>
 #include <sys/file_internal.h>
+#include <sys/guarded.h>
 #include <sys/stat.h>
 #include <sys/vnode_internal.h>
 #include <sys/mount_internal.h>
@@ -7974,6 +7975,52 @@ chflags(__unused proc_t p, struct chflags_args *uap, __unused int32_t *retval)
 }
 
 /*
+ * Scion (Darwin 27 interface): fchflagsat(2), chflags(2) relative to a directory descriptor, with
+ * AT_SYMLINK_NOFOLLOW and AT_SYMLINK_NOFOLLOW_ANY.
+ */
+int
+fchflagsat(__unused proc_t p, struct fchflagsat_args *uap, __unused int32_t *retval)
+{
+	vnode_t vp;
+	vfs_context_t ctx = vfs_context_current();
+	int error;
+	struct nameidata nd;
+	uint32_t wantparent = 0;
+
+#if CONFIG_FILE_LEASES
+	wantparent = WANTPARENT;
+#endif
+
+	if (uap->flag & ~(AT_SYMLINK_NOFOLLOW | AT_SYMLINK_NOFOLLOW_ANY)) {
+		return EINVAL;
+	}
+	AUDIT_ARG(fd, uap->fd);
+	AUDIT_ARG(fflags, uap->flags);
+	NDINIT(&nd, LOOKUP, OP_SETATTR, ((uap->flag & AT_SYMLINK_NOFOLLOW) ? 0 : FOLLOW) | AUDITVNPATH1 | wantparent,
+	    UIO_USERSPACE, uap->path, ctx);
+	if (uap->flag & AT_SYMLINK_NOFOLLOW_ANY) {
+		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
+	error = nameiat(&nd, uap->fd);
+	if (error) {
+		return error;
+	}
+	vp = nd.ni_vp;
+
+#if CONFIG_FILE_LEASES
+	vnode_breakdirlease(nd.ni_dvp, false, O_WRONLY);
+	vnode_put(nd.ni_dvp);
+#endif
+
+	nameidone(&nd);
+
+	/* we don't vnode_put() here because chflags1 does internally */
+	error = chflags1(vp, uap->flags, ctx);
+
+	return error;
+}
+
+/*
  * Change flags of a file given a file descriptor.
  */
 /* ARGSUSED */
@@ -8837,27 +8884,51 @@ truncate(proc_t p, struct truncate_args *uap, __unused int32_t *retval)
  * Truncate a file given a file descriptor.
  */
 /* ARGSUSED */
+static int scion_ftruncate_common(proc_t p, int fd, off_t length, const guardid_t *guard, int32_t *retval);
+
 int
 ftruncate(proc_t p, struct ftruncate_args *uap, int32_t *retval)
+{
+	AUDIT_ARG(fd, uap->fd);
+	return scion_ftruncate_common(p, uap->fd, uap->length, NULL, retval);
+}
+
+/*
+ * Scion (Darwin 27 interface): guarded_ftruncate_np(2), ftruncate(2) on a guarded descriptor, checked with its guard
+ * as guarded_pwrite_np(2) is.
+ */
+int
+guarded_ftruncate_np(proc_t p, struct guarded_ftruncate_np_args *uap, int32_t *retval)
+{
+	guardid_t uguard;
+	int error;
+
+	AUDIT_ARG(fd, uap->fd);
+	if ((error = copyin(uap->guard, &uguard, sizeof(uguard))) != 0) {
+		return error;
+	}
+	return scion_ftruncate_common(p, uap->fd, uap->length, &uguard, retval);
+}
+
+static int
+scion_ftruncate_common(proc_t p, int fd, off_t length, const guardid_t *guard, int32_t *retval)
 {
 	vnode_t vp = NULLVP;
 	struct fileproc *fp;
 	bool need_vnode_put = false;
 	int error;
 
-	AUDIT_ARG(fd, uap->fd);
-
-	if ((error = truncate_validate_common(p, uap->length))) {
+	if ((error = truncate_validate_common(p, length))) {
 		return error;
 	}
 
-	if ((error = fp_lookup(p, uap->fd, &fp, 0))) {
+	if ((error = (guard != NULL ? fp_lookup_guarded(p, fd, *guard, &fp, 0) : fp_lookup(p, fd, &fp, 0)))) {
 		return error;
 	}
 
 	switch (FILEGLOB_DTYPE(fp->fp_glob)) {
 	case DTYPE_PSXSHM:
-		error = pshm_truncate(p, fp, uap->fd, uap->length, retval);
+		error = pshm_truncate(p, fp, fd, length, retval);
 		goto out;
 	case DTYPE_VNODE:
 		break;
@@ -8893,7 +8964,7 @@ ftruncate(proc_t p, struct ftruncate_args *uap, int32_t *retval)
 
 	AUDIT_ARG(vnpath, vp, ARG_VNODE1);
 
-	error = truncate_internal(vp, uap->length, fp->fp_glob->fg_cred,
+	error = truncate_internal(vp, length, fp->fp_glob->fg_cred,
 	    vfs_context_current(), false);
 	if (!error) {
 		fp->fp_glob->fg_flag |= FWASWRITTEN;
@@ -8904,7 +8975,7 @@ out:
 		vnode_put(vp);
 	}
 
-	file_drop(uap->fd);
+	file_drop(fd);
 	return error;
 }
 
@@ -11246,6 +11317,18 @@ int
 umask(proc_t p, struct umask_args *uap, int32_t *retval)
 {
 	return umask1(p, uap->newmask, UMASK_NOXSECURITY, retval);
+}
+
+/*
+ * Scion (Darwin 27 interface): getumask(2), the file-creation mask, unchanged.
+ */
+int
+getumask(proc_t p, __unused struct getumask_args *uap, int32_t *retval)
+{
+	proc_fdlock(p);
+	*retval = p->p_fd.fd_cmask;
+	proc_fdunlock(p);
+	return 0;
 }
 
 #define REVOKE_MOUNTED_DEVICE_ENTITLEMENT                               \
@@ -13735,6 +13818,70 @@ fsctl(proc_t p, struct fsctl_args *uap, __unused int32_t *retval)
 	}
 
 	if ((error = namei(&nd))) {
+		goto done;
+	}
+	vp = nd.ni_vp;
+	nameidone(&nd);
+
+#if CONFIG_MACF
+	error = mac_mount_check_fsctl(ctx, vnode_mount(vp), uap->cmd);
+	if (error) {
+		goto done;
+	}
+#endif
+
+	error = fsctl_internal(p, &vp, uap->cmd, (user_addr_t)uap->data, uap->options, ctx);
+
+done:
+	if (vp) {
+		vnode_put(vp);
+	}
+	return error;
+}
+
+/*
+ * Scion (Darwin 27 interface): fsctlat(2), fsctl(2) relative to a directory descriptor.
+ */
+/* ARGSUSED */
+int
+fsctlat(proc_t p, struct fsctlat_args *uap, __unused int32_t *retval)
+{
+	int error;
+	struct nameidata nd;
+	uint32_t nameiflags;
+	vnode_t vp = NULL;
+	vfs_context_t ctx = vfs_context_current();
+
+	AUDIT_ARG(fd, uap->fd);
+	AUDIT_ARG(cmd, (int)uap->cmd);
+	AUDIT_ARG(value32, uap->options);
+	/* Get the vnode for the file we are getting info on:  */
+	nameiflags = 0;
+	//
+	// if we come through fsctl() then the file is by definition not open.
+	// therefore for the FSIOC_FD_ONLY_OPEN_ONCE selector we return an error
+	// lest the caller mistakenly thinks the only open is their own (but in
+	// reality it's someone elses).
+	//
+	if (uap->cmd == FSIOC_FD_ONLY_OPEN_ONCE) {
+		return EINVAL;
+	}
+	if ((uap->options & (FSOPT_NOFOLLOW | FSOPT_NOFOLLOW_ANY)) == 0) {
+		nameiflags |= FOLLOW;
+	}
+	if (uap->cmd == FSIOC_FIRMLINK_CTL) {
+		nameiflags |= (CN_FIRMLINK_NOFOLLOW | NOCACHE);
+	}
+	NDINIT(&nd, LOOKUP, OP_FSCTL, nameiflags | AUDITVNPATH1,
+	    UIO_USERSPACE, uap->path, ctx);
+	if (uap->options & FSOPT_NOFOLLOW_ANY) {
+		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
+	if (uap->options & FSOPT_UNIQUE) {
+		nd.ni_flag |= NAMEI_UNIQUE;
+	}
+
+	if ((error = nameiat(&nd, uap->fd))) {
 		goto done;
 	}
 	vp = nd.ni_vp;

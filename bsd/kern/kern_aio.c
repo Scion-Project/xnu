@@ -3473,3 +3473,19 @@ workq_aio_entry_remove_locked(struct proc *p, aio_workq_entry *entryp)
 
 	return true;
 }
+
+/*
+ * Scion (Darwin 27 interface): aio_readv(2) and aio_writev(2) are in the table so that a Darwin 27 library gets an
+ * error rather than SIGSYS; vectored asynchronous I/O is not provided yet.
+ */
+int
+aio_readv(__unused proc_t p, __unused struct aio_readv_args *uap, __unused int *retval)
+{
+	return ENOTSUP;
+}
+
+int
+aio_writev(__unused proc_t p, __unused struct aio_writev_args *uap, __unused int *retval)
+{
+	return ENOTSUP;
+}

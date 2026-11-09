@@ -388,8 +388,29 @@ expand_pipespace(struct pipe *p, int target_size)
  */
 
 /* ARGSUSED */
+static int scion_pipe_common(proc_t p, int flags, int32_t *retval);
+
 int
 pipe(proc_t p, __unused struct pipe_args *uap, int32_t *retval)
+{
+	return scion_pipe_common(p, 0, retval);
+}
+
+/*
+ * Scion (Darwin 27 interface): pipe2(2) as iOS 27's libsystem_kernel calls it: the two descriptors come back
+ * in retval[0] and retval[1] as for pipe(2) (the library stores them), with O_CLOEXEC, O_CLOFORK and O_NONBLOCK.
+ */
+int
+pipe2(proc_t p, struct pipe2_args *uap, int32_t *retval)
+{
+	if (uap->flags & ~(O_CLOEXEC | O_CLOFORK | O_NONBLOCK)) {
+		return EINVAL;
+	}
+	return scion_pipe_common(p, uap->flags, retval);
+}
+
+static int
+scion_pipe_common(proc_t p, int flags, int32_t *retval)
 {
 	struct fileproc *rf, *wf;
 	struct pipe *rpipe, *wpipe;
@@ -409,7 +430,7 @@ pipe(proc_t p, __unused struct pipe_args *uap, int32_t *retval)
 	if (error) {
 		goto freepipes;
 	}
-	rf->f_flag = FREAD;
+	rf->f_flag = FREAD | ((flags & O_NONBLOCK) ? FNONBLOCK : 0);
 	rf->f_ops = &pipeops;
 	fp_set_data(rf, rpipe);
 
@@ -418,7 +439,7 @@ pipe(proc_t p, __unused struct pipe_args *uap, int32_t *retval)
 		fp_free(p, retval[0], rf);
 		goto freepipes;
 	}
-	wf->f_flag = FWRITE;
+	wf->f_flag = FWRITE | ((flags & O_NONBLOCK) ? FNONBLOCK : 0);
 	wf->f_ops = &pipeops;
 	fp_set_data(wf, wpipe);
 
@@ -438,6 +459,14 @@ pipe(proc_t p, __unused struct pipe_args *uap, int32_t *retval)
 	mac_pipe_label_associate(kauth_cred_get(), rpipe);
 	mac_pipe_set_label(wpipe, mac_pipe_label(rpipe));
 #endif
+	if (flags & O_CLOEXEC) {
+		rf->fp_flags |= FP_CLOEXEC;
+		wf->fp_flags |= FP_CLOEXEC;
+	}
+	if (flags & O_CLOFORK) {
+		rf->fp_flags |= FP_CLOFORK;
+		wf->fp_flags |= FP_CLOFORK;
+	}
 	proc_fdlock_spin(p);
 	procfdtbl_releasefd(p, retval[0], NULL);
 	procfdtbl_releasefd(p, retval[1], NULL);
