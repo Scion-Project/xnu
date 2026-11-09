@@ -102,6 +102,13 @@ extern int proc_selfpid(void);
 #define SWEET_SPEED_BOOTLOG 8
 #define SWEET_SPEED_PINLOG  16
 
+/*
+ * The hang watchdog's sign of life from user space (boot-arg sweetwdog, bsd/dev/herolte_ufs.c): the watchdog's check
+ * sets this to 0, the next system call or Mach trap from user space (sleh.c handle_svc) sets it back to 1. Read-mostly:
+ * 1 for good while the watchdog is off, written at most once per check and CPU while it is on.
+ */
+volatile uint32_t sweet_wdog_mark = 1;
+
 uint32_t sweet_speed_flags(void);
 static uint32_t sweet_speed_value;
 static int sweet_speed_state;               /* 0 = boot-arg not read yet */
