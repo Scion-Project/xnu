@@ -721,7 +721,9 @@ kauth_acl_evaluate(kauth_cred_t cred, kauth_acl_eval_t eval)
 			    K_UUID_ARG(ace->ace_applicable), K_UUID_ARG(guid), applies ? "" : "not ");
 
 			if (!applies) {
-				error = !gotguid ? ENOENT : kauth_cred_ismember_guid(cred, &ace->ace_applicable, &applies);
+				/* iOS 27 on STARLTE: no identity resolver on iOS, so the caller's own GUID is unknown;
+				 * group membership (kern_credential.c translates compat group GUIDs) is still checked */
+				error = kauth_cred_ismember_guid(cred, &ace->ace_applicable, &applies);
 				/*
 				 * If we can't resolve group membership, we have to limit misbehaviour.
 				 * If the ACE is an 'allow' ACE, assume the cred is not a member (avoid
