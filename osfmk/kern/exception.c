@@ -975,6 +975,44 @@ exception_triage(
  * (crashing) thread.
  */
 void sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subcode);
+/* sweet (0309): which mapping holds addr (descending into the shared
+ * region submap), and the first 32 bytes there. */
+static void
+sweet_crash_where(const char *name, const char *what, uint64_t addr)
+{
+	vm_map_t map = current_map();
+	vm_map_entry_t entry;
+	uint64_t data[4] = { 0 };
+	int rc = copyin((user_addr_t)addr, data, sizeof(data));
+	vm_map_lock_read(map);
+	if (!vm_map_lookup_entry(map, (vm_map_offset_t)addr, &entry)) {
+		vm_map_unlock_read(map);
+		printf("CRASH %s %s 0x%llx: not mapped\n", name, what, addr);
+		return;
+	}
+	printf("CRASH %s %s 0x%llx in 0x%llx-0x%llx prot %d/%d tag %d off 0x%llx%s copyin %d: %016llx %016llx %016llx %016llx\n",
+	    name, what, addr, (uint64_t)entry->vme_start, (uint64_t)entry->vme_end,
+	    entry->protection, entry->max_protection, (int)VME_ALIAS(entry),
+	    (uint64_t)VME_OFFSET(entry), entry->is_sub_map ? " SUBMAP" : "", rc,
+	    data[0], data[1], data[2], data[3]);
+	if (entry->is_sub_map) {
+		vm_map_t sub = VME_SUBMAP(entry);
+		vm_map_offset_t saddr = addr - entry->vme_start + VME_OFFSET(entry);
+		vm_map_entry_t se;
+		vm_map_lock_read(sub);
+		if (vm_map_lookup_entry(sub, saddr, &se)) {
+			printf("CRASH %s %s submap 0x%llx in 0x%llx-0x%llx prot %d/%d off 0x%llx object %p%s\n",
+			    name, what, (uint64_t)saddr, (uint64_t)se->vme_start, (uint64_t)se->vme_end,
+			    se->protection, se->max_protection, (uint64_t)VME_OFFSET(se),
+			    se->is_sub_map ? NULL : (void *)VME_OBJECT(se), se->is_sub_map ? " SUBMAP" : "");
+		} else {
+			printf("CRASH %s %s submap 0x%llx: hole\n", name, what, (uint64_t)saddr);
+		}
+		vm_map_unlock_read(sub);
+	}
+	vm_map_unlock_read(map);
+}
+
 static void sweet_crash_strings(const char *name);
 
 void
@@ -1014,6 +1052,15 @@ sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subc
 		fp = frame[0];
 	}
 	printf("%s\n", line);
+	/* sweet (0309): all general registers, and where x0 / x19 point. */
+	for (unsigned i = 0; i < 29; i += 4) {
+		printf("CRASH %s x%u: %016llx %016llx %016llx %016llx\n", name, i,
+		    get_saved_state_reg(ss, i), get_saved_state_reg(ss, i + 1),
+		    i + 2 < 29 ? get_saved_state_reg(ss, i + 2) : 0,
+		    i + 3 < 29 ? get_saved_state_reg(ss, i + 3) : 0);
+	}
+	sweet_crash_where(name, "x0", get_saved_state_reg(ss, 0));
+	sweet_crash_where(name, "x19", get_saved_state_reg(ss, 19));
 
 	if (sig == 11 || sig == 10) {
 		/* Which mapping the faulting address is in, or which two it falls between. */

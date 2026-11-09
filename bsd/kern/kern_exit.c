@@ -2005,6 +2005,20 @@ proc_handle_critical_exit(proc_t p, int rv)
 		prefix_str = prefix_str_buf;
 	}
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/* sweet: proc_prepareexit's crash log comes after this panic; print it
+	 * for the critical process here, then save the console to flash. */
+	if (p == current_proc()) {
+		struct uthread *ut = current_uthread();
+		extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
+		sweet_crash_log(p->p_comm, proc_getpid(p), WTERMSIG(rv),
+		    ((uint64_t)ut->uu_exception << 32) | (uint32_t)ut->uu_code, ut->uu_subcode);
+	}
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+	extern void herolte_log_flush_now(void);
+	herolte_log_flush_now();
+#endif
+#endif
 	proc_crash_coredump(p);
 
 	sync(p, (void *)NULL, (int *)NULL);

@@ -296,6 +296,36 @@ mach_syscall(struct arm_saved_state *state)
 
 
 	retval = mach_call(&args);
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	{
+		extern int sweet_trace_left(void);
+		extern bool sweet_trace_match(const char *, int);
+		extern int proc_selfpid(void);
+		extern void proc_selfname(char *, int);
+		char comm[17];
+		proc_selfname(comm, sizeof(comm));
+		/* failing traps of the traced process are always logged (capped) */
+		static int err_left = 3000;
+		bool failed = retval != KERN_SUCCESS && call_number != 31 /* mach_msg_trap */ &&
+		    call_number != 47 /* mach_msg2_trap: timeouts are routine */;
+		if (call_number == 31 || call_number == 47) {
+			/* but a send failure is not */
+			failed = (retval & 0xfff00000) == 0x10000000 && retval != 0x10004003;
+		}
+		if (__improbable(sweet_trace_match(comm, proc_selfpid())) &&
+		    (sweet_trace_left() > 0 || (failed && err_left > 0 && err_left--))) {
+			/* vm_allocate (10) / vm_map (15): the address the kernel chose */
+			uint64_t out_addr = 0;
+			if ((call_number == 10 || call_number == 15) && retval == KERN_SUCCESS) {
+				(void)copyin((user_addr_t)args.arg2, &out_addr, sizeof(out_addr));
+			}
+			printf("TRAP %s(-%d)(0x%llx, 0x%llx, 0x%llx, 0x%llx) = 0x%x -> 0x%llx\n",
+			    mach_syscall_name_table[call_number], call_number,
+			    (uint64_t)args.arg1, (uint64_t)args.arg2, (uint64_t)args.arg3, (uint64_t)args.arg4, retval,
+			    out_addr);
+		}
+	}
+#endif
 
 skip_machcall:
 

@@ -1374,10 +1374,23 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
 	__builtin_unreachable();
 }
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/* sweet: set by the board (STARLTE: boot-arg sweetreboot) to save the panic
+ * log and reset instead of spinning; called once. */
+void (*sweet_panic_hook)(void) = NULL;
+#endif
+
 /* We rely on this symbol being visible in the debugger for triage automation */
 void __attribute__((noinline, optnone))
 panic_spin_forever(void)
 {
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	static bool sweet_panic_hook_ran;
+	if (sweet_panic_hook != NULL && !sweet_panic_hook_ran) {
+		sweet_panic_hook_ran = true;
+		sweet_panic_hook();
+	}
+#endif
 	for (;;) {
 #if defined(__arm__) || defined(__arm64__)
 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */

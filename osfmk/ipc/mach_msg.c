@@ -720,6 +720,12 @@ mach_msg_trap_send(
 		ipc_kmsg_free(kmsg);
 		return mr;
 	}
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	{
+		extern void sweet_msg_dump(const char *, mach_vm_address_t, mach_msg_size_t);
+		sweet_msg_dump(">", (mach_vm_address_t)send_uctx->send_msg_addr, send_uctx->send_msg_size);
+	}
+#endif
 
 	mr = ipc_kmsg_send(kmsg, options, msg_timeout);
 
