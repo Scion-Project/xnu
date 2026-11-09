@@ -175,6 +175,34 @@ kmwrite(dev_t dev, struct uio * uio, int ioflag)
 	int ret;
 	struct tty *tp = km_tty[minor(dev)];
 
+	/*
+	 * Boot-arg console_quiet=1: what user space writes to the console (launchd's own log, the
+	 * daemons' standard error, os_log mirrored there) is dropped; the kernel's printf and panics
+	 * are not written this way and still come out. Under a hypervisor every console byte is a
+	 * trap to the VMM: on the Pixel (AVF), launchd's log of SpringBoard's failed lookups kept the
+	 * host's console thread a quarter busy. Kept: a line of the GPU's own reports, a few a minute
+	 * (userland/src/gfx's "gfx: ...", eagl.c's "hakios-gl: after ..."; each is one write of its own),
+	 * so that where a frame's time goes is in every boot's log; and the timeline's "tl: ..." lines,
+	 * which nothing writes without boot-arg touch_lat=1 (tools/latency.py).
+	 */
+	static int quiet = -1;
+	if (quiet < 0) {
+		uint32_t v = 0;
+		quiet = PE_parse_boot_argn("console_quiet", &v, sizeof(v)) && v != 0;
+	}
+	if (quiet) {
+		char head[18] = "";
+		user_size_t len = uio_curriovlen(uio);
+		bool kept = uio_isuserspace(uio) && len >= 5 &&
+		    copyin(uio_curriovbase(uio), head, len < sizeof(head) ? (size_t)len : sizeof(head)) == 0 &&
+		    (strncmp(head, "gfx: ", 5) == 0 || strncmp(head, "tl: ", 4) == 0 ||
+		    (len >= 17 && strncmp(head, "hakios-gl: after ", 17) == 0));
+		if (!kept) {
+			uio_update(uio, uio_resid(uio));
+			return 0;
+		}
+	}
+
 	tty_lock(tp);
 	ret = (*linesw[tp->t_line].l_write)(tp, uio, ioflag);
 	tty_unlock(tp);
