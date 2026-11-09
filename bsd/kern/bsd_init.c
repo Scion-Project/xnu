@@ -484,6 +484,66 @@ bsd_rooted_ramdisk(void)
  * of the tro_ucred field so that the uthread structure can be
  * used like any other.
  */
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/*
+ * Boot-arg sweetspeed&128: read the big dylibs outside the shared cache that backboardd and SpringBoard load (the GL
+ * stack: libOSMesa is 16 MB) into the page cache as soon as the root is mounted. On a cold boot backboardd spent more
+ * than 10 s in dyld fix-ups of them (docs/ios27/NIGHT.md).
+ */
+static void
+sweet_prewarm_thread(__unused void *arg, __unused wait_result_t wr)
+{
+	static const char *const files[] = {
+		"/usr/local/starbite/lib/libOSMesa.8.dylib", "/usr/local/starbite/lib/libsbgl.dylib",
+		"/usr/lib/s.dylib", "/usr/lib/m.dylib", "/usr/libexec/backboardd",
+		"/System/Library/CoreServices/SpringBoard.app/SpringBoard",
+	};
+	const int chunk = 1024 * 1024;
+	char *buf = kalloc_data(chunk, Z_WAITOK);
+	if (buf == NULL) {
+		return;
+	}
+	uint64_t t0 = mach_absolute_time(), total = 0, ns = 0;
+	unsigned found = 0;
+	for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+		vnode_t vp = NULLVP;
+		if (vnode_lookup(files[i], 0, &vp, vfs_context_kernel()) != 0) {
+			continue;
+		}
+		found++;
+		for (off_t off = 0;; off += chunk) {
+			int resid = 0;
+			if (vn_rdwr(UIO_READ, vp, buf, chunk, off, UIO_SYSSPACE, IO_NOAUTH,
+			    vfs_context_ucred(vfs_context_kernel()), &resid, kernproc) != 0) {
+				break;
+			}
+			total += (uint64_t)(chunk - resid);
+			if (resid != 0) {
+				break;
+			}
+		}
+		vnode_put(vp);
+	}
+	kfree_data(buf, chunk);
+	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+	printf("SWEET PREWARM: %u files, %llu KiB read into the page cache in %llu ms\n", found, total >> 10,
+	    ns / 1000000);
+}
+
+static void
+sweet_prewarm_start(void)
+{
+	extern uint32_t sweet_speed_flags(void);
+	thread_t th;
+	if ((sweet_speed_flags() & 128) == 0) {
+		return;
+	}
+	if (kernel_thread_start(sweet_prewarm_thread, NULL, &th) == KERN_SUCCESS) {
+		thread_deallocate(th);
+	}
+}
+#endif
+
 void
 bsd_init(void)
 {
@@ -1108,6 +1168,9 @@ bsd_init(void)
 	if (mountroot_post_hook != NULL) {
 		mountroot_post_hook();
 	}
+#endif
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	sweet_prewarm_start();
 #endif
 
 #if 0 /* not yet */

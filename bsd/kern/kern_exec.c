@@ -5362,6 +5362,29 @@ bad:
 		}
 
 #if CONFIG_PROC_RESOURCE_LIMITS
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		/*
+		 * boot-arg sweetspeed&32 logs launchd's spawn resource limits; sweetspeed&256 drops the kqworkloop limits (their
+		 * hard-limit notification has no receiver here, so the "fatal port" kills the daemon at once from its own
+		 * context: runningboardd, lsd, SpringBoard restarts at boot; docs/ios27/NIGHT.md).
+		 */
+		extern uint32_t sweet_speed_flags(void);
+		static int sweet_lim_left = 150;
+		uint32_t sweet_sbx = sweet_speed_flags();
+		if (imgp->ip_px_sa != NULL && sweet_lim_left > 0 && (sweet_sbx & 32) != 0 &&
+		    (px_sa.psa_port_soft_limit | px_sa.psa_port_hard_limit | px_sa.psa_filedesc_soft_limit |
+		    px_sa.psa_filedesc_hard_limit | px_sa.psa_kqworkloop_soft_limit | px_sa.psa_kqworkloop_hard_limit) != 0) {
+			sweet_lim_left--;
+			printf("SWEET LIMITS: %s[%d] port %u/%u fd %u/%u kqwl %u/%u thr %u%s\n", p->p_comm, proc_getpid(p),
+			    px_sa.psa_port_soft_limit, px_sa.psa_port_hard_limit, px_sa.psa_filedesc_soft_limit,
+			    px_sa.psa_filedesc_hard_limit, px_sa.psa_kqworkloop_soft_limit, px_sa.psa_kqworkloop_hard_limit,
+			    (unsigned)px_sa.psa_thread_limit, (sweet_sbx & 256) ? " (kqwl dropped)" : "");
+		}
+		if ((sweet_sbx & 256) != 0) {
+			px_sa.psa_kqworkloop_soft_limit = 0;
+			px_sa.psa_kqworkloop_hard_limit = 0;
+		}
+#endif
 		if (imgp->ip_px_sa != NULL && (px_sa.psa_port_soft_limit > 0 || px_sa.psa_port_hard_limit > 0)) {
 			task_set_port_space_limits(new_task, (uint32_t)px_sa.psa_port_soft_limit,
 			    (uint32_t)px_sa.psa_port_hard_limit);

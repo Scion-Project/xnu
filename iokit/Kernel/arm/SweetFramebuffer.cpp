@@ -55,6 +55,72 @@ extern "C" uint64_t a5xelte_power_pressed_at;   /* bsd/dev/a5xelte_keys.c */
 #include <kern/clock.h>
 #include <kern/thread.h>
 #include <sys/proc.h>
+extern "C" uint32_t sweet_speed_flags(void);     /* boot-arg sweetspeed (osfmk/arm64/sweet_a64e.c) */
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/* the S6E3HA8 panel brightness (bsd/dev/hakios.s6e3ha8.c; on with boot-arg sweetspeed&512) */
+extern "C" void hakios_s6e3ha8_init(void);
+extern "C" int hakios_panel_brightness(int level);
+extern "C" int hakios_panel_brightness_nits(uint32_t nits);
+/* iOS 27 IOMobileFramebufferSwapSetBrightness (IOMobileFramebuffer kern_SwapSetBrightness): the swap record (the
+ * framebuffer object + 0x18) carries a "brightness set" byte at +0x354 and the brightness, a double, at +0x35e.
+ * A change goes to the panel (sweetspeed&512): <= 1.0 taken as a fraction, else as nits. Integer decode, no FP in here. */
+static uint32_t sweet_fb_sbx;
+static uint64_t sweet_fb_last_brightness = ~0ULL;
+static void
+sweet_fb_swap_brightness(const uint8_t *rec)
+{
+	uint64_t bits;
+	if ((sweet_fb_sbx & 512) == 0 || rec[0x354] == 0) {
+		return;
+	}
+	memcpy(&bits, rec + 0x35e, sizeof(bits));
+	if (bits == sweet_fb_last_brightness) {
+		return;
+	}
+	sweet_fb_last_brightness = bits;
+	/* value * 1000 as an integer (positive normal doubles only) */
+	uint64_t milli = 0;
+	int exp = (int)((bits >> 52) & 0x7ff) - 1023;
+	if ((bits >> 63) == 0 && exp >= -20 && exp < 40) {
+		uint64_t mant = (bits & ((1ULL << 52) - 1)) | (1ULL << 52);
+		int shift = 52 - exp;
+		milli = shift > 0 ? (mant * 1000) >> shift : 0;
+		if (shift > 0 && shift >= 64) {
+			milli = 0;
+		}
+	}
+	int level;
+	if (milli <= 1000) {
+		/* (a floor of 16/255 so a misread value never leaves the panel black) */
+		int want = (int)(milli * 255 / 1000);
+		want = want < 16 ? 16 : want;
+		level = hakios_panel_brightness(want) == 0 ? want : -1;
+	} else {
+		level = hakios_panel_brightness_nits((uint32_t)(milli / 1000 < 5 ? 5 : milli / 1000));
+	}
+	static unsigned said;
+	if (said < 60) {
+		said++;
+		IOLog("SWEET FB: swap brightness %llu.%03llu (raw %#llx) -> panel level %d\n", milli / 1000, milli % 1000,
+		    bits, level);
+	}
+}
+static bool
+sweet_fb_is_brightness(const char *key)
+{
+	static const char want[] = "brightness";
+	for (unsigned i = 0; i < sizeof(want); i++) {
+		char c = key[i];
+		if (c >= 'A' && c <= 'Z') {
+			c = (char)(c - 'A' + 'a');
+		}
+		if (c != want[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+#endif
 
 #if defined(ARM64_BOARD_CONFIG_HEROLTE)
 static void sweet_fb_copy_init(void);
@@ -111,6 +177,26 @@ enum {
 /* relbuf state (defined with sweet_fb_swap_id() further down) */
 static int sweet_fb_relbuf;
 static uint32_t sweet_fb_relbuf_sent;
+/*
+ * sweetfb_cav=1 (default off): CoreAnimation pacing aids for iOS 27.
+ * iOS 27 backboardd does not pace on IOMFB vsync (type 5) or FrameInfo (type 3): IOMFBServer
+ * drives renders from its own CADisplayTimer, period = AppleInternalDisplay::heartbeat_rate()
+ * (1/60 s unless "IOMFBDisplayRefresh" says otherwise). CA::WindowServer::Server::render_for_time
+ * clamps the next update to >= now + 0.1 s (10 Hz) whenever CA's own display power state is not
+ * "on" (RequestPowerChange(0) was its last word; a5fb_keep_on keeps the panel lit, CA still
+ * throttles). With the boot-arg:
+ *  - "IOMFBDisplayRefresh" = { displayMinRefreshInterval = 2^32/60 (1/60 s in 2^-32 s),
+ *    displayRefreshStepMachTime = 16.667 ms in mach ticks } is published;
+ *  - once a second: "SWEET FB CAV: <n> swaps/s, CA power <on|off>" (CA power = last sel 12 arg);
+ *  - every sel 12 call with its uptime; the swap record's brightness fields when they change.
+ */
+static int sweet_fb_cav;
+static uint32_t sweet_fb_cav_swaps;             /* SwapEnd calls since the last rate line */
+static int sweet_fb_cav_power = -1;             /* last RequestPowerChange argument, -1 none yet */
+/* iOS 27 SwapEnd record = IOMFB's fb + 0x18 (kern_SwapEnd sends 0x6e0 bytes from there);
+ * kern_SwapSetBrightness stores a double at fb + 0x376 and sets the byte at fb + 0x36c */
+#define SWEET_FB_REC27_BRIGHT_SET       0x354
+#define SWEET_FB_REC27_BRIGHT           0x35e
 static uint32_t sweet_fb_swap_id(const uint8_t *rec);
 #define SWEET_FB_NOTIFY_VSYNC           5
 #define SWEET_FB_VSYNC_US               16667
@@ -177,6 +263,7 @@ public:
 	uint32_t      fFadeStep;      /* fade-out steps done while off */
 
 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
 	void addClient(IOMobileFramebufferUserClient *client);
 	void removeClient(IOMobileFramebufferUserClient *client);
 	void swap(const uint8_t *rec, uint32_t size);
@@ -206,6 +293,7 @@ public:
 	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
 	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
+	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
 	IOReturn registerNotificationPort(mach_port_t port, UInt32 type,
 	    io_user_reference_t refCon) APPLE_KEXT_OVERRIDE;
 	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
@@ -354,11 +442,45 @@ AppleCLCD::start(IOService *provider)
 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
 	setProperty("external", false);
 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+	PE_parse_boot_argn("sweetfb_cav", &sweet_fb_cav, sizeof(sweet_fb_cav));
+	{
+		/* also on with boot-arg sweetspeed&2048 */
+		if ((sweet_speed_flags() & 2048) != 0) {
+			sweet_fb_cav = 1;
+		}
+	}
+	if (sweet_fb_cav) {
+		uint64_t step = 0;
+		nanoseconds_to_absolutetime(16666667ULL, &step);
+		OSDictionary *refresh = OSDictionary::withCapacity(2);
+		OSNumber *interval = OSNumber::withNumber((4294967296ULL + 30) / 60, 32);  /* 1/60 s, 2^-32 s units */
+		OSNumber *ticks = OSNumber::withNumber(step, 32);
+		if (refresh != NULL && interval != NULL && ticks != NULL) {
+			refresh->setObject("displayMinRefreshInterval", interval);
+			refresh->setObject("displayRefreshStepMachTime", ticks);
+			setProperty("IOMFBDisplayRefresh", refresh);
+		}
+		OSSafeReleaseNULL(interval);
+		OSSafeReleaseNULL(ticks);
+		OSSafeReleaseNULL(refresh);
+		IOLog("SWEET FB CAV: sweetfb_cav=1: IOMFBDisplayRefresh published (step %llu ticks), rate log on\n", step);
+	}
+	{
+		/* with async GPU submits (sweetspeed&64) the GPU present waits for the app's chain
+		 * itself (starlte_gpu.c sg_run): tell hakios-gl not to glFinish every frame. */
+		if ((sweet_speed_flags() & 64) != 0) {
+			setProperty("HakiosWaitsForGPU", true);
+		}
+	}
 	PE_parse_boot_argn("sweetfb_relbuf", &sweet_fb_relbuf, sizeof(sweet_fb_relbuf));
 	if (sweet_fb_relbuf) {
 		setProperty("SupportRelbufInfoCb", 1ULL, 32);
 		IOLog("SWEET FB: sweetfb_relbuf=1: SupportRelbufInfoCb published, relbuf info sent per swap\n");
 	}
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	sweet_fb_sbx = sweet_speed_flags();
+	hakios_s6e3ha8_init();
+#endif
 	registerService();
 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
@@ -375,6 +497,11 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 	AppleCLCD *fb = (AppleCLCD *)owner;
 	uint64_t now = mach_absolute_time();
 	uint64_t count = ++fb->fVsyncCount;
+	if (sweet_fb_cav && (count % 60) == 0) {
+		uint32_t n = __atomic_exchange_n(&sweet_fb_cav_swaps, 0, __ATOMIC_RELAXED);
+		IOLog("SWEET FB CAV: %u swaps/s, CA power %s\n", n,
+		    sweet_fb_cav_power < 0 ? "?" : sweet_fb_cav_power ? "on" : "OFF (CA clamps to 10 Hz)");
+	}
 	uint64_t values[6] = {
 		(uint32_t)count, (uint32_t)(count >> 32),
 		(uint32_t)now, (uint32_t)(now >> 32),
@@ -461,6 +588,23 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		}
 		fb->fPerfFrames = fb->fPerfBytes = fb->fPerfNS = fb->fPerfMaxNS = 0;
 		fb->fPerfWindowStart = finished;
+	}
+#endif
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* boot-arg sweetspeed&1024: a fixed 60 Hz cadence. Re-arming 16.7 ms after the present (as below) made the
+	 * tick ~19-20 ms plus timer slack, so backboardd's 41-52 swaps/s while swiping showed as 33-36 frames. */
+	if ((sweet_fb_sbx & 1024) != 0) {
+		static uint64_t interval, next;
+		uint64_t t = mach_absolute_time();
+		if (interval == 0) {
+			nanoseconds_to_absolutetime(16666667ULL, &interval);
+		}
+		next = next == 0 ? t + interval : next + interval;
+		if (next <= t + interval / 8) {
+			next = t + interval / 8;        /* late (a long present): no burst, just the next one soon */
+		}
+		sender->wakeAtTime(next);
+		return;
 	}
 #endif
 	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
@@ -645,6 +789,11 @@ sweet_fb_copy_rows(uintptr_t dst, uint64_t dstStride, uintptr_t src, uint64_t sr
 void
 AppleCLCD::swap(const uint8_t *rec, uint32_t size)
 {
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (size >= 0x366) {
+		sweet_fb_swap_brightness(rec);
+	}
+#endif
 	IOLockLock(fLock);
 	uint32_t replaced = fDirty ? sweet_fb_swap_id(fPending) : 0;
 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_MAX);
@@ -682,6 +831,20 @@ AppleCLCD::swap(const uint8_t *rec, uint32_t size)
 		IOLog("HEROLTE FB: rec %llu%s\n", sweet_fb_swap_count, n ? line : " end");
 	}
 #endif
+	if (sweet_fb_cav) {
+		__atomic_fetch_add(&sweet_fb_cav_swaps, 1, __ATOMIC_RELAXED);
+		static uint64_t lastBright = ~0ULL;
+		static unsigned brightLines;
+		if (size >= SWEET_FB_REC27_BRIGHT + 8 && rec[SWEET_FB_REC27_BRIGHT_SET] != 0) {
+			uint64_t bits;
+			memcpy(&bits, rec + SWEET_FB_REC27_BRIGHT, sizeof(bits));
+			if (bits != lastBright && brightLines < 200) {
+				brightLines++;
+				lastBright = bits;
+				IOLog("SWEET FB CAV: swap brightness (double bits) %#llx\n", bits);
+			}
+		}
+	}
 	if ((++sweet_fb_swap_count % 1000) == 0) {
 		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
 	}
@@ -1408,6 +1571,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 	case kSweetFBRequestPowerChange:
 		if (args->scalarInputCount >= 1) {
 			bool off = args->scalarInput[0] == 0;
+			if (sweet_fb_cav) {
+				uint64_t up = 0;
+				absolutetime_to_nanoseconds(mach_absolute_time(), &up);
+				sweet_fb_cav_power = off ? 0 : 1;
+				IOLog("SWEET FB CAV: RequestPowerChange(%llu) at %llu ms: CA renders %s\n", args->scalarInput[0],
+				    up / 1000000ULL, off ? "at most 10 Hz from now on (display off)" : "on vsync");
+			}
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
 			int keep_on = 0;
 			if (off && PE_parse_boot_argn("a5fb_keep_on", &keep_on, sizeof(keep_on)) && keep_on) {
@@ -1446,6 +1616,26 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 	if (args->structureOutputDescriptor == NULL && args->structureOutput != NULL) {
 		bzero(args->structureOutput, args->structureOutputSize);
 	}
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* (sweetspeed&512) every call of the rarer selectors with its scalar inputs when they change (300 lines in all):
+	 * to see which one carries brightness etc. on iOS 27 */
+	if ((sweet_fb_sbx & 512) != 0 && selector != 3 && selector != 4 && selector != 5 && selector != 6 && selector < 128) {
+		static uint64_t last[128][2];
+		static unsigned left = 300;
+		uint64_t a0 = args->scalarInputCount > 0 ? args->scalarInput[0] : 0;
+		uint64_t a1 = args->scalarInputCount > 1 ? args->scalarInput[1] : 0;
+		if (left > 0 && (a0 != last[selector][0] || a1 != last[selector][1])) {
+			char who[32];
+			left--;
+			last[selector][0] = a0;
+			last[selector][1] = a1;
+			proc_selfname(who, sizeof(who));
+			IOLog("SWEET FB ARGS: %s sel %u n %u: %#llx %#llx %#llx %#llx struct %u\n", who, selector,
+			    args->scalarInputCount, a0, a1, args->scalarInputCount > 2 ? args->scalarInput[2] : 0ULL,
+			    args->scalarInputCount > 3 ? args->scalarInput[3] : 0ULL, args->structureInputSize);
+		}
+	}
+#endif
 	if (selector >= 64 || !(sweet_fb_logged & (1ULL << selector))) {
 		if (selector < 64) {
 			sweet_fb_logged |= 1ULL << selector;
@@ -1458,4 +1648,63 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 	}
 	return ret;
 }
+
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/* brightness by property (sweetspeed&512) (IOConnectSetCFProperties / IORegistryEntrySetCFProperties): every key logged
+ * (first 64); a number under a key starting with "brightness" (0-1 or 0-255) goes to the panel. */
+static IOReturn
+sweet_fb_set_properties(const char *where, OSObject *properties)
+{
+	OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
+	static unsigned said;
+	bool taken = false;
+	char who[32] = "?";
+	if ((sweet_fb_sbx & 512) == 0) {
+		return kIOReturnUnsupported;    /* as IOService::setProperties */
+	}
+	if (dict == NULL) {
+		return kIOReturnBadArgument;
+	}
+	OSCollectionIterator *keys = OSCollectionIterator::withCollection(dict);
+	if (keys == NULL) {
+		return kIOReturnNoMemory;
+	}
+	proc_selfname(who, sizeof(who));
+	OSObject *next;
+	while ((next = keys->getNextObject()) != NULL) {
+		const OSSymbol *key = OSDynamicCast(OSSymbol, next);
+		if (key == NULL) {
+			continue;
+		}
+		OSNumber *number = OSDynamicCast(OSNumber, dict->getObject(key));
+		if (said < 64) {
+			said++;
+			if (number != NULL) {
+				IOLog("SWEET FB: %s %s sets %s = %llu\n", who, where, key->getCStringNoCopy(), number->unsigned64BitValue());
+			} else {
+				IOLog("SWEET FB: %s %s sets %s (%s)\n", who, where, key->getCStringNoCopy(),
+				    dict->getObject(key) ? dict->getObject(key)->getMetaClass()->getClassName() : "?");
+			}
+		}
+		if (number != NULL && sweet_fb_is_brightness(key->getCStringNoCopy())) {
+			uint64_t v = number->unsigned64BitValue();
+			taken = hakios_panel_brightness(v <= 1 ? (int)(v * 255) : v > 255 ? 255 : (int)v) == 0;
+		}
+	}
+	keys->release();
+	return taken ? kIOReturnSuccess : kIOReturnUnsupported;
+}
+
+IOReturn
+AppleCLCD::setProperties(OSObject *properties)
+{
+	return sweet_fb_set_properties("service", properties);
+}
+
+IOReturn
+IOMobileFramebufferUserClient::setProperties(OSObject *properties)
+{
+	return sweet_fb_set_properties("client", properties);
+}
+#endif
 #endif /* SWEET || A5XELTE */

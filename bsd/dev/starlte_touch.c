@@ -879,6 +879,50 @@ static const struct st_step st_script_tour[] = {
 	{ 335, 1, 0, 0, 0, 0 },                 /* home (shot 360) */
 };
 
+/*
+ * boot-arg sweetspeed&4096: the same input every boot, to compare frame rates: unlock,
+ * 20 home screen page swipes (60-90 s), Settings scrolled up and down (100-130 s), Home.
+ */
+static const struct st_step st_script_bench[] = {
+	{ 45, 1, 0, 0, 0, 0 },                  /* Home: unlock */
+	{ 55, 1, 0, 0, 0, 0 },                  /* Home again: first page of the home screen */
+	{ 60, 0, 1300, 1500, 150, 1500 }, { 62, 0, 150, 1500, 1300, 1500 },
+	{ 64, 0, 1300, 1500, 150, 1500 }, { 66, 0, 150, 1500, 1300, 1500 },
+	{ 68, 0, 1300, 1500, 150, 1500 }, { 70, 0, 150, 1500, 1300, 1500 },
+	{ 72, 0, 1300, 1500, 150, 1500 }, { 74, 0, 150, 1500, 1300, 1500 },
+	{ 76, 0, 1300, 1500, 150, 1500 }, { 78, 0, 150, 1500, 1300, 1500 },
+	{ 80, 0, 1300, 1500, 150, 1500 }, { 82, 0, 150, 1500, 1300, 1500 },
+	{ 84, 0, 1300, 1500, 150, 1500 }, { 86, 0, 150, 1500, 1300, 1500 },
+	{ 88, 0, 1300, 1500, 150, 1500 }, { 90, 0, 150, 1500, 1300, 1500 },
+	{ 95, 0, 556, 1406, 556, 1406 },        /* tap Settings */
+	{ 100, 0, 720, 2300, 720, 900 }, { 102, 0, 720, 900, 720, 2300 },
+	{ 104, 0, 720, 2300, 720, 900 }, { 106, 0, 720, 900, 720, 2300 },
+	{ 108, 0, 720, 2300, 720, 900 }, { 110, 0, 720, 900, 720, 2300 },
+	{ 112, 0, 720, 2300, 720, 900 }, { 114, 0, 720, 900, 720, 2300 },
+	{ 116, 0, 720, 2300, 720, 900 }, { 118, 0, 720, 900, 720, 2300 },
+	{ 120, 0, 720, 2300, 720, 900 }, { 122, 0, 720, 900, 720, 2300 },
+	{ 124, 0, 720, 2300, 720, 900 }, { 126, 0, 720, 900, 720, 2300 },
+	{ 128, 0, 720, 2300, 720, 900 }, { 130, 0, 720, 900, 720, 2300 },
+	{ 135, 1, 0, 0, 0, 0 },                 /* home screen */
+};
+
+/*
+ * boot-arg sweetspeed&8192: the brightness slider, blind. Unlock, Control Center (swipe down from the top right),
+ * vertical drags down then up at four columns of the middle band (one of them should be the brightness slider),
+ * ending bright; Home closes it. Canvas (x, y) -> panel (36 + 1.652 x, 1.652 y). Look for "SWEET FB: swap brightness".
+ */
+static const struct st_step st_script_bright[] = {
+	{ 45, 1, 0, 0, 0, 0 },                  /* Home: unlock */
+	{ 55, 1, 0, 0, 0, 0 },                  /* Home: first page */
+	{ 60, 0, 1380, 6, 1380, 1500 },         /* Control Center */
+	{ 66, 0, 812, 1156, 812, 1817 }, { 69, 0, 812, 1817, 812, 1156 },
+	{ 72, 0, 961, 1156, 961, 1817 }, { 75, 0, 961, 1817, 961, 1156 },
+	{ 78, 0, 1110, 1156, 1110, 1817 }, { 81, 0, 1110, 1817, 1110, 1156 },
+	{ 84, 0, 1258, 1156, 1258, 1817 }, { 87, 0, 1258, 1817, 1258, 1156 },
+	{ 90, 0, 664, 1156, 664, 1817 }, { 93, 0, 664, 1817, 664, 1156 },
+	{ 98, 1, 0, 0, 0, 0 },                  /* Home: closes it */
+};
+
 static void
 st_script_thread(void *arg, __unused wait_result_t wr)
 {
@@ -898,6 +942,8 @@ st_script_thread(void *arg, __unused wait_result_t wr)
 	case 2: script = (const struct st_step *)st_script_phone; count = sizeof(st_script_phone) / sizeof(st_script_phone[0]); break;
 	case 3: script = st_script_home; count = sizeof(st_script_home) / sizeof(st_script_home[0]); break;
 	case 4: script = st_script_tour; count = sizeof(st_script_tour) / sizeof(st_script_tour[0]); break;
+	case 5: script = st_script_bench; count = sizeof(st_script_bench) / sizeof(st_script_bench[0]); break;
+	case 6: script = st_script_bright; count = sizeof(st_script_bright) / sizeof(st_script_bright[0]); break;
 	default: script = (const struct st_step *)st_script; count = sizeof(st_script) / sizeof(st_script[0]); break;
 	}
 	for (unsigned i = 0; i < count; i++) {
@@ -929,6 +975,7 @@ st_script_thread(void *arg, __unused wait_result_t wr)
 		}
 		sweet_hid_touch(f, 0, x1, y1);
 	}
+	printf("STARLTE TOUCH: scripted input done\n");
 }
 
 void
@@ -937,8 +984,15 @@ starlte_touch_probe(void)
 	uint32_t on = 1;
 	thread_t thread;
 
-	uint32_t script = 0;
-	if (PE_parse_boot_argn("sweetswipe", &script, sizeof(script)) && script &&
+	extern uint32_t sweet_speed_flags(void);
+	uint32_t script = 0, sbx = sweet_speed_flags();
+	if ((sbx & 4096) != 0) {
+		script = 5;                     /* the bench input */
+	}
+	if ((sbx & 8192) != 0) {
+		script = 6;                     /* the brightness slider test */
+	}
+	if ((script != 0 || PE_parse_boot_argn("sweetswipe", &script, sizeof(script))) && script &&
 	    kernel_thread_start(st_script_thread, (void *)(uintptr_t)script, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}

@@ -123,7 +123,7 @@ void hakios_adsp_stop(void) {}
 void hakios_max77705_usb_close(void);
 void hakios_max77705_usb_close(void) {}
 int hakios_panel_brightness(int level);
-int hakios_panel_brightness(__unused int level) { return ENODEV; }
+/* the real one is bsd/dev/hakios.s6e3ha8.c now */
 /* hakios_exynos_cpufreq_touch(): the CPU governor's, bsd/dev/hakios.exynos_cpufreq.c (a no-op without cpufreq_gov=1) */
 int hakios_fb_scanned(uintptr_t *base, uint32_t *width, uint32_t *height, uint32_t *rowbytes, unsigned *index);
 int hakios_fb_scanned(__unused uintptr_t *base, __unused uint32_t *width, __unused uint32_t *height,

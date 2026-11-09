@@ -2075,6 +2075,21 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 	}
 #endif
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	{
+		/* how every process ends (boot-arg sweetspeed&32) */
+		extern int sweet_exitlog_on(void);
+		static int eleft = 400;
+		if (eleft > 0 && p != initproc && sweet_exitlog_on()) {
+			eleft--;
+			char *d = exit_reason_get_string_desc(p->p_exit_reason);
+			printf("SWEET EXIT: %s[%d] signal %d exit %d reason ns %d code 0x%llx: %s\n", p->p_comm,
+			    proc_getpid(p), WTERMSIG(rv), WEXITSTATUS(rv),
+			    p->p_exit_reason ? (int)p->p_exit_reason->osr_namespace : -1,
+			    p->p_exit_reason ? p->p_exit_reason->osr_code : 0ULL, d ? d : "-");
+		}
+	}
+#endif
 	if (task) {
 		corpse_source = vm_map_is_corpse_source(get_task_map(task));
 	}

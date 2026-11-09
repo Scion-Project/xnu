@@ -323,10 +323,17 @@ static bool sg_run_quiet;
 static unsigned sg_run_as;
 static unsigned sg_run_polls = 20000;
 
+/* an app chain may still be on the GPU (async submits, stage 6): finish it first. */
+static bool sgu_busy;
+static int sgu_retire_locked(bool block);
+
 /* Start the chain at GPU VA job_va on slot js, wait (bounded), log. */
 static bool
 sg_run(unsigned js, uint64_t job_va, uint32_t affinity, const char *what)
 {
+	if (sgu_busy) {
+		(void)sgu_retire_locked(true);
+	}
 	uint32_t slot = JS_BASE(js);
 	sg_wr(sg_gpu, MMU_IRQ_CLEAR, 0xffffffffu);
 	sg_wr(sg_gpu, JOB_IRQ_CLEAR, 0xffffffffu);
@@ -1070,6 +1077,143 @@ starlte_gpu_user_submit(uint64_t jc, uint32_t requirements)
 		    requirements, ok ? "done" : "FAILED", ns / 1000);
 	}
 	return ok ? 0 : (ns >= 1900ull * NSEC_PER_MSEC ? ETIMEDOUT : EIO);
+}
+
+/*
+ * Asynchronous submits. A client that asks for it (StarbiteMali SBM_ASYNC, boot-arg
+ * sbmasync=1) gets its chain started and the call back at once; the chain is finished ("retired")
+ * by whoever comes next: the next submit (one chain on the GPU at a time, in order), a wait (WAIT_BO,
+ * a fence, GEM_CLOSE) or the kernel's own jobs (sg_run, the present). Polled, as before: no IRQ.
+ */
+static unsigned sgu_busy_js;
+static uint64_t sgu_busy_t0, sgu_busy_jc;
+static uint32_t sgu_busy_req;
+static uint64_t sgu_seq_sub, sgu_seq_done;
+static uint64_t sgu_as_n, sgu_as_prev_waits, sgu_as_prev_ns, sgu_as_gpu_ns, sgu_as_gpu_max, sgu_as_t0;
+
+/* sg_lock held. 0: nothing on the GPU any more; EBUSY: still running (block false); EIO: failed. */
+static int
+sgu_retire_locked(bool block)
+{
+	if (!sgu_busy) {
+		return 0;
+	}
+	unsigned js = sgu_busy_js;
+	uint64_t deadline = 0;
+	nanoseconds_to_absolutetime(2000ull * NSEC_PER_MSEC, &deadline);
+	deadline += sgu_busy_t0;
+	uint32_t jirq = 0, mirq = 0, girq = 0;
+	for (unsigned spins = 0;; spins++) {
+		jirq = sg_rd(sg_gpu, JOB_IRQ_RAWSTAT);
+		mirq = sg_rd(sg_gpu, MMU_IRQ_RAWSTAT);
+		girq = sg_rd(sg_gpu, GPU_IRQ_RAWSTAT);
+		if ((jirq & ((1u << js) | (1u << (js + 16)))) || mirq || (girq & 0x81)) {
+			break;
+		}
+		if (!block) {
+			return EBUSY;
+		}
+		if (mach_absolute_time() >= deadline) {
+			break;
+		}
+		delay(spins < 1500 ? 1 : 20);
+	}
+	uint64_t ns = 0;
+	absolutetime_to_nanoseconds(mach_absolute_time() - sgu_busy_t0, &ns);
+	bool ok = (jirq & (1u << js)) && !(jirq & (1u << (js + 16))) && !mirq && !(girq & 0x81);
+	if (!ok) {
+		printf("STARLTE GPU USER: async chain %#llx req %#x FAILED after %llu us: irq=%#x mmu=%#x gpu=%#x "
+		    "js_status=%#x as_fault=%#x@%#x\n", sgu_busy_jc, sgu_busy_req, ns / 1000, jirq, mirq, girq,
+		    sg_rd(sg_gpu, JS_BASE(js) + 0x24), sg_rd(sg_gpu, ASN(1) + 0x1c), sg_rd(sg_gpu, ASN(1) + 0x20));
+	}
+	sg_wr(sg_gpu, JOB_IRQ_CLEAR, 0xffffffffu);
+	sg_wr(sg_gpu, MMU_IRQ_CLEAR, 0xffffffffu);
+	sgu_busy = false;
+	sgu_seq_done = sgu_seq_sub;
+	sgu_jobs++;
+	sgu_as_gpu_ns += ns;
+	if (ns > sgu_as_gpu_max) {
+		sgu_as_gpu_max = ns;
+	}
+	if (!ok) {
+		sgu_faults++;
+		sgu_recover();
+	}
+	return ok ? 0 : EIO;
+}
+
+int starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_t *seq);
+int starlte_gpu_user_wait_seq(uint64_t seq, bool block);
+
+/* Start the chain (after the one before it); async false: and wait for it, as starlte_gpu_user_submit. */
+int
+starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_t *seq)
+{
+	if (!sgu_ready) {
+		return ENODEV;
+	}
+	lck_mtx_lock(&sg_lock);
+	uint64_t t0 = mach_absolute_time(), ns = 0;
+	if (sgu_busy) {
+		(void)sgu_retire_locked(true);
+		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+		sgu_as_prev_waits++;
+		sgu_as_prev_ns += ns;
+	}
+	unsigned js = (requirements & 1) ? 0 : 1;
+	uint32_t slot = JS_BASE(js);
+	sg_wr(sg_gpu, MMU_IRQ_CLEAR, 0xffffffffu);
+	sg_wr(sg_gpu, JOB_IRQ_CLEAR, 0xffffffffu);
+	sg_wr(sg_gpu, slot + 0x40, (uint32_t)jc);                       /* HEAD_NEXT */
+	sg_wr(sg_gpu, slot + 0x44, (uint32_t)(jc >> 32));
+	sg_wr(sg_gpu, slot + 0x50, sgp_shaders);                        /* AFFINITY_NEXT */
+	sg_wr(sg_gpu, slot + 0x54, 0);
+	sg_wr(sg_gpu, slot + 0x58, (8u << 16) | (3u << 8) | (3u << 12) | 1u);   /* AS1, flushes, priority 8 */
+	sgu_busy_js = js;
+	sgu_busy_jc = jc;
+	sgu_busy_req = requirements;
+	sgu_busy_t0 = mach_absolute_time();
+	sg_wr(sg_gpu, slot + 0x60, 1);                                  /* COMMAND_NEXT START */
+	sgu_busy = true;
+	*seq = ++sgu_seq_sub;
+	int ret = 0;
+	if (!async) {
+		ret = sgu_retire_locked(true);
+	}
+	sgu_as_n++;
+	if (sgu_as_t0 == 0) {
+		sgu_as_t0 = t0;
+	}
+	uint64_t window = 0;
+	absolutetime_to_nanoseconds(t0 - sgu_as_t0, &window);
+	if (window >= 10ull * NSEC_PER_SEC && sgu_as_n >= 50) {
+		printf("STARLTE GPU ASYNC (%llu s): %llu chains, gpu avg %llu us (max %llu), next submit waited %llu x avg %llu us\n",
+		    window / NSEC_PER_SEC, sgu_as_n, sgu_as_gpu_ns / sgu_as_n / 1000, sgu_as_gpu_max / 1000, sgu_as_prev_waits,
+		    sgu_as_prev_waits ? sgu_as_prev_ns / sgu_as_prev_waits / 1000 : 0);
+		sgu_as_n = sgu_as_prev_waits = sgu_as_prev_ns = sgu_as_gpu_ns = sgu_as_gpu_max = 0;
+		sgu_as_t0 = t0;
+	}
+	lck_mtx_unlock(&sg_lock);
+	return ret;
+}
+
+/* Wait until chain `seq` (0: every chain submitted so far) is done. 0, or ETIMEDOUT (block false and still running). */
+int
+starlte_gpu_user_wait_seq(uint64_t seq, bool block)
+{
+	if (!sgu_ready) {
+		return 0;
+	}
+	lck_mtx_lock(&sg_lock);
+	if (seq == 0) {
+		seq = sgu_seq_sub;
+	}
+	if (seq > sgu_seq_done) {
+		(void)sgu_retire_locked(block);
+	}
+	int ret = seq <= sgu_seq_done ? 0 : ETIMEDOUT;
+	lck_mtx_unlock(&sg_lock);
+	return ret;
 }
 
 static void

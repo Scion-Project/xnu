@@ -30,6 +30,11 @@
 #include <sys/errno.h>
 
 #include "SweetSurface.h"
+#include <pexpert/pexpert.h>
+
+/* boot-arg sweetspeed&64 lets clients that ask (SBM_ASYNC) have their submits return at once */
+extern "C" uint32_t sweet_speed_flags(void);
+static bool sbm_async_ok;
 
 extern "C" void sweet_memstat_gpu_client(struct proc *p);  /* bsd/kern/kern_memorystatus.c */
 extern "C" void *get_bsdtask_info(task_t);
@@ -41,6 +46,8 @@ bool starlte_gpu_user_param(uint32_t param, uint64_t *value);
 bool starlte_gpu_user_map(uint64_t va, const uint64_t *pages, unsigned n);
 void starlte_gpu_user_unmap(uint64_t va, unsigned n);
 int starlte_gpu_user_submit(uint64_t jc, uint32_t requirements);
+int starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_t *seq);
+int starlte_gpu_user_wait_seq(uint64_t seq, bool block);
 void starbite_mali_publish(void);
 }
 
@@ -98,7 +105,7 @@ struct sbm_import_host {
 enum {
 	SBM_SUBMIT = 0, SBM_WAIT_BO = 1, SBM_CREATE_BO = 2, SBM_MMAP_BO = 3, SBM_GET_PARAM = 4,
 	SBM_GET_BO_OFFSET = 5, SBM_MADVISE = 8, SBM_GEM_CLOSE = 0x100, SBM_VERSION = 0x101,
-	SBM_LOG = 0x102, SBM_SURFACE = 0x103, SBM_IMPORT_HOST = 0x104,
+	SBM_LOG = 0x102, SBM_SURFACE = 0x103, SBM_IMPORT_HOST = 0x104, SBM_ASYNC = 0x105, SBM_WAIT_IDLE = 0x106,
 };
 
 #define SBM_MAX_BOS     8192u
@@ -113,6 +120,7 @@ struct sbm_bo {
 	uint32_t pages;
 	uint32_t surface;                       /* IOSurface ID of an imported buffer, else 0 */
 	bool host;                              /* the caller's own pages, wired for the GPU (IMPORT_HOST) */
+	uint64_t seq;                           /* last chain that named it (async submits) */
 };
 
 /*
@@ -216,6 +224,8 @@ class StarbiteMaliUserClient : public IOUserClient {
 	IOLock *fLock = NULL;
 	sbm_bo *fBos = NULL;            /* handle h is fBos[h - 1] */
 	uint32_t fCount = 0;
+	bool fAsync = false;
+	void markBOs(uint64_t list, uint32_t count, uint64_t seq);
 
 	IOReturn createBO(sbm_create_bo *a);
 	IOReturn importSurface(sbm_surface *a);
@@ -296,6 +306,26 @@ StarbiteMaliUserClient::closeBO(sbm_bo *bo)
 	bo->pages = 0;
 	bo->surface = 0;
 	bo->host = false;
+	bo->seq = 0;
+}
+
+/* Async submits: the buffers a chain names are not closed or waited for as idle before it is done. */
+void
+StarbiteMaliUserClient::markBOs(uint64_t list, uint32_t count, uint64_t seq)
+{
+	uint32_t h[128];
+	for (uint32_t i = 0; i < count;) {
+		uint32_t n = count - i < 128u ? count - i : 128u;
+		if (copyin(list + (uint64_t)i * 4u, h, n * sizeof(uint32_t)) != 0) {
+			return;
+		}
+		for (uint32_t j = 0; j < n; j++) {
+			if (sbm_bo *bo = lookup(h[j])) {
+				bo->seq = seq;
+			}
+		}
+		i += n;
+	}
 }
 
 IOReturn
@@ -560,6 +590,8 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 		sbm_surface surface;
 		sbm_import_host host;
 		char text[256];
+		int64_t timeout;
+		uint32_t flag;
 	} u;
 	size_t want;
 	switch (selector) {
@@ -575,6 +607,8 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 	case SBM_LOG: want = args->structureInputSize; break;
 	case SBM_SURFACE: want = sizeof(u.surface); break;
 	case SBM_IMPORT_HOST: want = sizeof(u.host); break;
+	case SBM_ASYNC: want = sizeof(u.flag); break;
+	case SBM_WAIT_IDLE: want = sizeof(u.timeout); break;
 	default:
 		return kIOReturnUnsupported;
 	}
@@ -596,12 +630,34 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 	IOLockLock(fLock);
 	switch (selector) {
 	case SBM_SUBMIT: {
-		int err = starlte_gpu_user_submit(u.submit.jc, u.submit.requirements);
+		int err;
+		if (fAsync) {
+			uint64_t seq = 0;
+			err = starlte_gpu_user_submit2(u.submit.jc, u.submit.requirements, true, &seq);
+			if (seq != 0) {
+				markBOs(u.submit.bo_handles, u.submit.bo_handle_count, seq);
+			}
+		} else {
+			err = starlte_gpu_user_submit(u.submit.jc, u.submit.requirements);
+		}
 		ret = err == 0 ? kIOReturnSuccess : err == ETIMEDOUT ? kIOReturnTimeout : kIOReturnIOError;
 		break;
 	}
-	case SBM_WAIT_BO:
-		ret = lookup(u.wait.handle) ? kIOReturnSuccess : kIOReturnBadArgument;
+	case SBM_WAIT_BO: {
+		sbm_bo *bo = lookup(u.wait.handle);
+		ret = bo ? kIOReturnSuccess : kIOReturnBadArgument;
+		if (bo != NULL && bo->seq != 0 && starlte_gpu_user_wait_seq(bo->seq, u.wait.timeout_ns != 0) != 0) {
+			ret = kIOReturnTimeout;
+		}
+		break;
+	}
+	case SBM_ASYNC:
+		fAsync = sbm_async_ok && u.flag != 0;
+		u.flag = fAsync;
+		break;
+	case SBM_WAIT_IDLE:
+		ret = starlte_gpu_user_wait_seq(0, u.timeout != 0) == 0 ? kIOReturnSuccess : kIOReturnTimeout;
+		want = 0;
 		break;
 	case SBM_CREATE_BO:
 		ret = createBO(&u.create);
@@ -626,6 +682,9 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 	case SBM_GEM_CLOSE: {
 		sbm_bo *bo = lookup(u.close.handle);
 		if (bo) {
+			if (bo->seq != 0) {
+				(void)starlte_gpu_user_wait_seq(bo->seq, true);
+			}
 			closeBO(bo);
 		}
 		ret = bo ? kIOReturnSuccess : kIOReturnBadArgument;
@@ -663,7 +722,7 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
  * its scrolling time in calls here): count and time of each call, all clients together, a line
  * every 10 s while calls come: "STARLTE GPU CALLS: submit N x avg us (max), create ..., close ...".
  */
-static uint64_t sbm_calls[5], sbm_call_ns[5], sbm_call_max[5], sbm_calls_since;
+static uint64_t sbm_calls[6], sbm_call_ns[6], sbm_call_max[6], sbm_calls_since;
 
 static unsigned
 sbm_call_kind(uint32_t selector)
@@ -673,6 +732,7 @@ sbm_call_kind(uint32_t selector)
 	case SBM_CREATE_BO: return 1;
 	case SBM_GEM_CLOSE: return 2;
 	case SBM_SURFACE: case SBM_IMPORT_HOST: return 3;
+	case SBM_WAIT_BO: case SBM_WAIT_IDLE: return 5;
 	default: return 4;
 	}
 }
@@ -698,10 +758,10 @@ StarbiteMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArgume
 	uint64_t window = 0;
 	absolutetime_to_nanoseconds(t1 - sbm_calls_since, &window);
 	if (window >= 10ull * NSEC_PER_SEC) {
-		static const char *names[5] = { "submit", "create", "close", "surface", "other" };
-		char line[400];
+		static const char *names[6] = { "submit", "create", "close", "surface", "other", "wait" };
+		char line[720];
 		int n = snprintf(line, sizeof(line), "STARLTE GPU CALLS (%llu s):", window / NSEC_PER_SEC);
-		for (unsigned i = 0; i < 5; i++) {
+		for (unsigned i = 0; i < 6; i++) {
 			n += snprintf(line + n, sizeof(line) - (size_t)n, " %s %llu x %llu us (max %llu), %llu ms;", names[i],
 			    sbm_calls[i], sbm_calls[i] ? sbm_call_ns[i] / sbm_calls[i] / 1000 : 0, sbm_call_max[i] / 1000,
 			    sbm_call_ns[i] / 1000000);
@@ -722,6 +782,9 @@ IOReturn
 StarbiteMaliUserClient::clientClose(void)
 {
 	IOLockLock(fLock);
+	if (fAsync) {
+		(void)starlte_gpu_user_wait_seq(0, true);
+	}
 	for (uint32_t i = 0; i < fCount; i++) {
 		if (fBos[i].mem != NULL) {
 			closeBO(&fBos[i]);
@@ -748,6 +811,8 @@ StarbiteMaliUserClient::free(void)
 void
 starbite_mali_publish(void)
 {
+	sbm_async_ok = (sweet_speed_flags() & 64) != 0;
+	IOLog("STARLTE GPU: StarbiteMali async submits %s (sweetspeed&64)\n", sbm_async_ok ? "allowed" : "off");
 	sbm_va_lock = IOLockAlloc();
 	StarbiteMali *service = OSTypeAlloc(StarbiteMali);
 	IOService *provider = IOService::getResourceService();

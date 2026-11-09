@@ -73,6 +73,7 @@
 
 #define SIGPROP         /* include signal properties table */
 #include <sys/param.h>
+#include <kern/backtrace.h>
 #include <sys/resourcevar.h>
 #include <sys/proc_internal.h>
 #include <sys/kauth.h>
@@ -1377,6 +1378,13 @@ sigaltstack(__unused proc_t p, struct sigaltstack_args *uap, __unused int32_t *r
 	return 0;
 }
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+static void sweet_sig_note(proc_t from, proc_t to, int sig, const char *how, uint64_t ns, uint64_t code);
+#define SWEET_SIG_NOTE(f, t, s, h, n, c) sweet_sig_note(f, t, s, h, n, c)
+#else
+#define SWEET_SIG_NOTE(f, t, s, h, n, c) do { } while (0)
+#endif
+
 int
 kill(proc_t cp, struct kill_args *uap, __unused int32_t *retval)
 {
@@ -1408,6 +1416,7 @@ kill(proc_t cp, struct kill_args *uap, __unused int32_t *retval)
 			return EPERM;
 		}
 		if (uap->signum) {
+			SWEET_SIG_NOTE(cp, p, uap->signum, "kill", 0, 0);
 			psignal(p, uap->signum);
 		}
 		proc_rele(p);
@@ -1559,6 +1568,38 @@ out_failed_copyin:
 	return exit_reason;
 }
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+#include <pexpert/pexpert.h>
+/* Diagnostics (boot-arg sweetspeed&32): who signals whom, and how processes end (kern_exit.c); a kernel backtrace of
+ * every SIGKILL a process sends itself (psignal_internal) */
+int sweet_exitlog_on(void);
+int
+sweet_exitlog_on(void)
+{
+	extern uint32_t sweet_speed_flags(void);
+	return (sweet_speed_flags() & 32) != 0;
+}
+
+static void
+sweet_sig_note(proc_t from, proc_t to, int sig, const char *how, uint64_t ns, uint64_t code)
+{
+	static int left = 400;
+	if (left <= 0 || !sweet_exitlog_on()) {
+		return;
+	}
+	if (sig != SIGKILL && sig != SIGTERM && sig != SIGABRT && sig != SIGQUIT && sig != SIGHUP && sig != SIGINT &&
+	    sig != SIGSTOP && sig != SIGSEGV && sig != SIGBUS) {
+		return;
+	}
+	left--;
+	printf("SWEET SIG: %s[%d] -> %s[%d] sig %d by %s (ns %llu code %#llx)\n", from ? from->p_comm : "?",
+	    from ? proc_getpid(from) : -1, to ? to->p_comm : "?", to ? proc_getpid(to) : -1, sig, how, ns, code);
+}
+#define SWEET_SIG_NOTE(f, t, s, h, n, c) sweet_sig_note(f, t, s, h, n, c)
+#else
+#define SWEET_SIG_NOTE(f, t, s, h, n, c) do { } while (0)
+#endif
+
 static int
 terminate_with_payload_internal(struct proc *cur_proc, int target_pid, uint32_t reason_namespace,
     uint64_t reason_code, user_addr_t payload, uint32_t payload_size,
@@ -1599,6 +1640,7 @@ terminate_with_payload_internal(struct proc *cur_proc, int target_pid, uint32_t 
 	    proc_getpid(target_proc), reason_namespace,
 	    reason_code, 0, 0);
 
+	SWEET_SIG_NOTE(cur_proc, target_proc, SIGKILL, "terminate_with_reason", reason_namespace, reason_code);
 	signal_reason = build_userspace_exit_reason(reason_namespace, reason_code, payload, payload_size,
 	    reason_string, (reason_flags | OS_REASON_FLAG_NO_CRASHED_TID));
 
@@ -2070,6 +2112,30 @@ psignal_internal(proc_t p, task_t task, thread_t thread, int flavor, int signum,
 
 	mask = sigmask(signum);
 	prop = sigprop[signum];
+	if ((signum == SIGKILL || signum == SIGTERM) && p != PROC_NULL) {
+		SWEET_SIG_NOTE(current_proc(), p, signum, "psignal", signal_reason ? signal_reason->osr_namespace : 0,
+		    signal_reason ? signal_reason->osr_code : 0);
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		{
+			/* kernel backtrace of self-sent SIGKILLs (boot-arg sweetspeed&32) */
+			static int btleft = 80;
+			extern int sweet_exitlog_on(void);
+			if (signum == SIGKILL && current_proc() == p && btleft > 0 && sweet_exitlog_on()) {
+				uintptr_t bt[12] = {0};
+				unsigned int n = backtrace(bt, 12, NULL, NULL);
+				btleft--;
+				printf("SWEET SIGBT: %s[%d] n %u: %lx %lx %lx %lx %lx %lx %lx %lx %lx %lx %lx %lx\n", p->p_comm,
+				    proc_getpid(p), n,
+				    (unsigned long)VM_KERNEL_UNSLIDE(bt[0]), (unsigned long)VM_KERNEL_UNSLIDE(bt[1]),
+				    (unsigned long)VM_KERNEL_UNSLIDE(bt[2]), (unsigned long)VM_KERNEL_UNSLIDE(bt[3]),
+				    (unsigned long)VM_KERNEL_UNSLIDE(bt[4]), (unsigned long)VM_KERNEL_UNSLIDE(bt[5]),
+				    (unsigned long)VM_KERNEL_UNSLIDE(bt[6]), (unsigned long)VM_KERNEL_UNSLIDE(bt[7]),
+				    (unsigned long)VM_KERNEL_UNSLIDE(bt[8]), (unsigned long)VM_KERNEL_UNSLIDE(bt[9]),
+				    (unsigned long)VM_KERNEL_UNSLIDE(bt[10]), (unsigned long)VM_KERNEL_UNSLIDE(bt[11]));
+			}
+		}
+#endif
+	}
 
 #if SIGNAL_DEBUG
 	if (rdebug_proc && (p != PROC_NULL) && (p == rdebug_proc)) {
