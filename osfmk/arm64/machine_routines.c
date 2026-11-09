@@ -1789,8 +1789,11 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 
 	os_atomic_or(&this_cpu_datap->cpu_flags, InitState, relaxed);
 
-#if !USE_APPLEARMSMP
+#if !USE_APPLEARMSMP && !defined(ARM64_BOARD_CONFIG_SWEET) && !defined(ARM64_BOARD_CONFIG_A5XELTE)
 	/*
+	 * sweet: SweetCPU::startAll boots the CPUs itself, once all are
+	 * registered and in logical order (as AppleARMSMP does).
+	 *
 	 * AppleARMCPU's external processor_start call is now a no-op, so
 	 * boot the processor directly when it's registered.
 	 *
