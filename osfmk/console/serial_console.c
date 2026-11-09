@@ -278,6 +278,9 @@ _cnputc(char c, bool poll)
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 extern void sweet_log_append(const char *c, int size);  /* bsd/dev/sweet_ufs.c */
 #endif
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+extern void a5xelte_log_append(const char *c, int size); /* bsd/dev/a5xelte_emmc.c */
+#endif
 #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 /*
  * Set by AppleCLCD (boot-arg sweetfb_noconsole=1) once the GUI presents:
@@ -292,6 +295,9 @@ _cnputs(char *c, int size, bool poll)
 {
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 	sweet_log_append(c, size);
+#endif
+#if defined(ARM64_BOARD_CONFIG_A5XELTE)
+	a5xelte_log_append(c, size);
 #endif
 #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 	if (sweet_console_muted && !panic_active()) {
