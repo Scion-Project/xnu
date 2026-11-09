@@ -101,6 +101,8 @@ sweet_trace_path_arg(int code, const uint64_t *arg)
 		return (user_addr_t)arg[0];
 	case 464:       /* openat_nocancel */
 		return (user_addr_t)arg[1];
+	case 202:       /* sysctl: a two-level name is sysctlbyname's {0, 3} lookup, the name string in newp */
+		return arg[1] == 2 ? (user_addr_t)arg[4] : 0;
 	case SYS_openat: case SYS_renameat: case SYS_faccessat: case SYS_fchmodat:
 	case SYS_fchownat: case SYS_fstatat64: case SYS_unlinkat: case SYS_readlinkat:
 	case SYS_mkdirat: case SYS_getattrlistat:
