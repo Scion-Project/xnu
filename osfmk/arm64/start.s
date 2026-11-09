@@ -145,6 +145,14 @@ LEXT(reset_vector)
 	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
 #if HAS_CLUSTER || defined(SWEET)
 	and		x0, x15, #0xFFFF					// Full Aff1:Aff0 (SWEET: core in Aff1)
+#if defined(STARLTE)
+	/* The Mongoose M3 cores have no MT bit: MPIDR 0x80000100..0x80000103,
+	 * the same Aff1:Aff0 as A55 core 1 (0x81000100). Their ADT reg carries
+	 * bit 16 (0x10100..0x10103, mkadt_starlte.py --big). */
+	tbnz	x15, #24, 1f
+	orr		x0, x0, #0x10000
+1:
+#endif
 #else
 	and		x0, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
 #endif
@@ -899,8 +907,14 @@ common_start:
 	isb		sy
 #if defined(STARLTE)
 	/* Cortex-A55: PSTATE.PAN off (SCTLR.SPAN keeps it off from here). The
-	 * A53-targeted assembler has no PAN name: msr PAN, #0 = 0xd500409f. */
+	 * A53-targeted assembler has no PAN name: msr PAN, #0 = 0xd500409f.
+	 * The Mongoose M3s (ARMv8.0) have no PAN, the msr would be undefined
+	 * there: only when ID_AA64MMFR1_EL1.PAN (S3_0_C0_C7_1 [23:20]) != 0. */
+	mrs		x0, S3_0_C0_C7_1
+	ubfx	x0, x0, #20, #4
+	cbz		x0, 1f
 	.long	0xd500409f
+1:
 	isb		sy
 #endif
 

@@ -1433,7 +1433,19 @@ ml_get_boot_cluster_type(void)
 int
 ml_get_cpu_number(uint32_t phys_id)
 {
+#if defined(STARLTE)
+	/* Callers pass an ADT reg (bit 31 clear) or a raw MPIDR (bit 31 RES1).
+	 * The Mongoose M3s' MPIDR has no MT bit and the same Aff1:Aff0 as A55
+	 * core 1; their reg carries bit 16 instead, as start.s does. */
+	if (phys_id & (1U << 31)) {
+		phys_id = (phys_id & (MPIDR_AFF1_MASK | MPIDR_AFF0_MASK)) |
+		    ((phys_id & (1U << 24)) ? 0 : 0x10000);
+	} else {
+		phys_id &= 0x10000 | MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
+	}
+#else
 	phys_id &= MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
+#endif
 
 	for (unsigned i = 0; i < topology_info.num_cpus; i++) {
 		if (topology_info.cpus[i].phys_id == phys_id) {
