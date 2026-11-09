@@ -2054,6 +2054,21 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 	if (p->p_crash_behavior != 0 || p == initproc) {
 		proc_handle_critical_exit(p, rv);
 	}
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	{
+		/* how the traced process (sweettracename=) ended: status and exit reason (first 30) */
+		extern bool sweet_trace_match(const char *, int);
+		static int left = 30;
+		if (left > 0 && p != initproc && sweet_trace_match(p->p_comm, proc_getpid(p))) {
+			left--;
+			char *d = exit_reason_get_string_desc(p->p_exit_reason);
+			printf("STARBITE EXIT: %s[%d] signal %d exit %d reason ns %d code 0x%llx: %s\n", p->p_comm,
+			    proc_getpid(p), WTERMSIG(rv), WEXITSTATUS(rv),
+			    p->p_exit_reason ? (int)p->p_exit_reason->osr_namespace : -1,
+			    p->p_exit_reason ? p->p_exit_reason->osr_code : 0ULL, d ? d : "-");
+		}
+	}
+#endif
 
 	if (task) {
 		corpse_source = vm_map_is_corpse_source(get_task_map(task));
