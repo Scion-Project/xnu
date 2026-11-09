@@ -415,3 +415,14 @@ SYSCTL_QUAD(_machdep, OID_AUTO, sim_stretched_io_ns, CTLFLAG_KERN | CTLFLAG_RW |
 #endif /* ML_IO_SIMULATE_STRETCHED_ENABLED */
 
 #endif /* ML_IO_TIMEOUTS_ENABLED */
+
+/*
+ * HakiOS (Galaxy S9, patch 1511): whether EL0's cache maintenance by VA is trapped and done by the kernel with a clean
+ * first (osfmk/arm/arm_init.c, hakios_ucache_apply()), and how many such instructions it has done (osfmk/arm64/sleh.c).
+ */
+extern uint32_t hakios_ucache_trap;
+extern uint64_t hakios_ucache_ops;
+SYSCTL_UINT(_machdep, OID_AUTO, hakios_ucache_trap, CTLFLAG_KERN | CTLFLAG_RD | CTLFLAG_LOCKED, &hakios_ucache_trap, 0,
+    "EL0 cache maintenance by VA trapped (SCTLR_EL1.UCI clear) for the Exynos M3s");
+SYSCTL_QUAD(_machdep, OID_AUTO, hakios_ucache_ops, CTLFLAG_KERN | CTLFLAG_RD | CTLFLAG_LOCKED, &hakios_ucache_ops,
+    "EL0 cache maintenance instructions done by the kernel with a clean first");
