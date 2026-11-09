@@ -180,12 +180,19 @@ static IOReturn
 sweet_aks_struct_out(IOExternalMethodArguments *args, const void *buf, uint32_t len)
 {
 	if (args->structureOutputDescriptor != NULL) {
-		if (len > args->structureOutputDescriptor->getLength()) {
+		/* a big buffer on the other side (the configuration's 32 KB) arrives as a memory descriptor: wire it first */
+		IOMemoryDescriptor *out = args->structureOutputDescriptor;
+		IOReturn ret;
+		if (len > out->getLength()) {
 			return kIOReturnNoSpace;
 		}
-		args->structureOutputDescriptor->writeBytes(0, buf, len);
-		args->structureOutputDescriptorSize = len;
-		return kIOReturnSuccess;
+		ret = out->prepare();
+		if (ret == kIOReturnSuccess) {
+			out->writeBytes(0, buf, len);
+			out->complete();
+			args->structureOutputDescriptorSize = len;
+		}
+		return ret;
 	}
 	if (args->structureOutput == NULL || len > args->structureOutputSize) {
 		return kIOReturnNoSpace;
@@ -269,11 +276,13 @@ static int32_t
 sweet_aks_struct_in(IOExternalMethodArguments *args, uint8_t *buf, uint32_t max)
 {
 	if (args->structureInputDescriptor != NULL) {
-		uint32_t len = (uint32_t)args->structureInputDescriptor->getLength();
-		if (len > max) {
+		IOMemoryDescriptor *in = args->structureInputDescriptor;
+		uint32_t len = (uint32_t)in->getLength();
+		if (len > max || in->prepare() != kIOReturnSuccess) {
 			return -1;
 		}
-		args->structureInputDescriptor->readBytes(0, buf, len);
+		len = (uint32_t)in->readBytes(0, buf, len);
+		in->complete();
 		return (int32_t)len;
 	}
 	if (args->structureInputSize > max) {
