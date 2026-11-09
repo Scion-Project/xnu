@@ -314,6 +314,8 @@
 #define USE_APPLEARMSMP                1
 
 #define NO_XNU_PLATFORM_ERROR_HANDLER  1
+/* Scion: CPU_OVRD's name comes from Apple's private register header, not in the open source; a VM has no such register */
+#define NO_CPU_OVRD                    1
 
 
 #endif  /* ARM64_BOARD_CONFIG_VMAPPLE */
