@@ -3674,6 +3674,8 @@ csops_audittoken(__unused proc_t p, struct csops_audittoken_args *uap, __unused 
  * ControlCenter ..., boot 151456). Copies of the entitlements handed to user space get
  * "com.apple.security.app-sandbox" renamed to "com.apple.security.app-sandboX" (same length, XML
  * and DER alike), so libsecinit sees an unsandboxed app. The signature itself is not touched.
+ * Only a process asking about itself (libsecinit) gets the renamed copy: hiding the key from
+ * WindowServer's checks of its clients left it spinning before its first frame (boot 152643).
  */
 static void
 sweet_strip_app_sandbox(uint8_t *buf, size_t len)
@@ -3964,7 +3966,9 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 		}
 
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
-		sweet_strip_app_sandbox((uint8_t *)start, length);
+		if (forself) {
+			sweet_strip_app_sandbox((uint8_t *)start, length);
+		}
 #endif
 		error = csops_copy_token(start, length, usize, uaddr);
 		kfree_data(start, length);
@@ -4014,7 +4018,9 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 				goto out;
 			}
 			memcpy(copy, start, length);
-			sweet_strip_app_sandbox(copy, length);
+			if (forself) {
+				sweet_strip_app_sandbox(copy, length);
+			}
 			error = csops_copy_token(copy, length, usize, uaddr);
 			kfree_data(copy, length);
 			goto out;
