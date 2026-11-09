@@ -117,6 +117,9 @@ bsd/dev/hakios.exynos_hsi2c.c		standard
 bsd/dev/starlte_gpu.c			standard
 bsd/dev/starlte_overlay.c		standard
 bsd/dev/starlte_sd.c			standard
+bsd/dev/hakios.exynos_acpm_dvfs.c	standard
+bsd/dev/hakios.exynos_cpufreq.c	standard
+bsd/dev/hakios.scion_gov.c		standard
 bsd/dev/herolte_battery.c		standard
 bsd/dev/herolte_gpu.c			standard
 bsd/dev/a5xelte_keys.c			standard

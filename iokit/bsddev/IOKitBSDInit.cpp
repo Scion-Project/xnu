@@ -812,6 +812,9 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 	{
 		extern void starlte_touch_probe(void);
 		starlte_touch_probe();
+		/* Boot-arg cpufreq_gov=1: the CPU governor (bsd/dev/hakios.exynos_cpufreq.c); off: nothing. */
+		extern bool hakios_exynos_cpufreq_gov_start(void);
+		(void)hakios_exynos_cpufreq_gov_start();
 		extern void starlte_smp_probe(void);   /* boot-arg starsmpprobe=1 */
 		starlte_smp_probe();
 		/* Mali-G72 read-only probe (bsd/dev/starlte_gpu.c), boot-arg stargpu=0 off. */

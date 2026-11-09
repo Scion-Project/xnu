@@ -64,6 +64,26 @@
 #include <pexpert/device_tree.h>
 #include <pexpert/arm64/board_config.h>
 #include <kern/smr.h>
+#include <kern/recount.h>
+#include <kern/processor.h>
+
+/*
+ * How long processor cpu_id has been idle since it started, in mach_absolute_time() units: the CPU governor's load
+ * (bsd/dev/hakios.exynos_cpufreq.c). From HakiOS/Scion (scion-kernel osfmk/arm64/machine_routines.c).
+ */
+bool ml_cpu_idle_time(int cpu_id, uint64_t *idle);
+
+bool
+ml_cpu_idle_time(int cpu_id, uint64_t *idle)
+{
+	struct recount_usage usage = { 0 };
+
+	if (cpu_id < 0 || cpu_id >= MAX_CPUS || processor_array[cpu_id] == PROCESSOR_NULL) {
+		return false;
+	}
+	recount_processor_usage(&processor_array[cpu_id]->pr_recount, &usage, idle);
+	return true;
+}
 
 #include <IOKit/IOPlatformExpert.h>
 #if HIBERNATION
