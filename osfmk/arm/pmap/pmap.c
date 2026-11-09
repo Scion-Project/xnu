@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <mach_assert.h>
 #include <mach_ldebug.h>
+#include <kern/backtrace.h>
 
 #include <mach/shared_region.h>
 #include <mach/vm_param.h>
@@ -5909,6 +5910,17 @@ pmap_enter_pte(pmap_t pmap, pt_entry_t *pte_p, pt_entry_t *old_pte, pt_entry_t n
 		 * As a result we require the exclusive pmap lock.
 		 */
 		pmap_assert_locked(pmap, PMAP_LOCK_EXCLUSIVE);
+#if defined(ARM64_BOARD_CONFIG_HEROLTE)
+		/* RAM in the second bank (>= 1.5 GiB) sometimes hits the unaligned
+		 * PTE panic in write_pte_fast: name the VA and the callers. */
+		if (((uintptr_t)pte_p) & 0x1f) {
+			uintptr_t bt[8] = { 0 };
+			(void)backtrace(bt, 8, NULL, NULL);
+			panic("HEROLTE: unaligned pmap_enter va=%#llx pte_p=%p pte=%#llx kernel=%d "
+			    "bt %#lx %#lx %#lx %#lx %#lx %#lx %#lx", (uint64_t)v, pte_p, (uint64_t)new_pte,
+			    pmap == kernel_pmap, bt[1], bt[2], bt[3], bt[4], bt[5], bt[6], bt[7]);
+		}
+#endif
 		*old_pte = *pte_p;
 		if (*old_pte == new_pte) {
 			/* Another thread completed this operation. Nothing to do here. */
