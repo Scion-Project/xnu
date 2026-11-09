@@ -876,4 +876,13 @@ arm_init_tramp:
 
 //#include	"globals_asm.h"
 
+#if SCION_NATIVE_PAC
+	/* scion_pac_keys (see PAC_INIT_KEY_STATE): written once, with the MMU off */
+	.section __DATA, __data
+	.align 4
+	.globl EXT(scion_pac_keys)
+LEXT(scion_pac_keys)
+	.space	(SCION_PAC_KEY_WORDS + 1) * 8, 0
+#endif /* SCION_NATIVE_PAC */
+
 /* vim: set ts=4: */

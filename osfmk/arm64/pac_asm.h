@@ -43,6 +43,10 @@
 
 #if defined(HAS_APPLE_PAC)
 
+#if SCION_NATIVE_PAC
+/* scion_pac_keys: IA, IB, DA, DB, GA (lo, hi each), then a nonzero "ready" word */
+#define SCION_PAC_KEY_WORDS	10
+#endif /* SCION_NATIVE_PAC */
 
 /* BEGIN IGNORE CODESTYLE */
 
@@ -146,6 +150,60 @@
  *   tmp2 - scratch register
  */
 .macro PAC_INIT_KEY_STATE	tmp, tmp2
+#if SCION_NATIVE_PAC
+	/*
+	 * The first CPU here fills scion_pac_keys from the virtual and physical
+	 * counters (a 64-bit mix per word) and marks it ready; every CPU, the
+	 * first included, then loads the five keys from it. This runs with the
+	 * MMU off, so the block is read and written in memory, not in a cache.
+	 * Clobbers x0-x5 (\tmp and \tmp2 are among them at the only call site).
+	 */
+	adrp	x4, EXT(scion_pac_keys)@page
+	add		x4, x4, EXT(scion_pac_keys)@pageoff
+	ldr		x0, [x4, #(SCION_PAC_KEY_WORDS * 8)]
+	cbnz	x0, 2f
+	mrs		x0, CNTPCT_EL0
+	mrs		x1, CNTVCT_EL0
+	eor		x0, x0, x1, ror #17
+	mov		x5, #0
+1:
+	MOV64	x1, 0x9e3779b97f4a7c15
+	add		x0, x0, x1
+	mov		x2, x0
+	eor		x2, x2, x2, lsr #30
+	MOV64	x1, 0xbf58476d1ce4e5b9
+	mul		x2, x2, x1
+	eor		x2, x2, x2, lsr #27
+	MOV64	x1, 0x94d049bb133111eb
+	mul		x2, x2, x1
+	eor		x2, x2, x2, lsr #31
+	mrs		x1, CNTPCT_EL0
+	eor		x2, x2, x1, lsl #41
+	str		x2, [x4, x5, lsl #3]
+	add		x5, x5, #1
+	cmp		x5, #(SCION_PAC_KEY_WORDS)
+	b.lo	1b
+	mov		x0, #1
+	str		x0, [x4, #(SCION_PAC_KEY_WORDS * 8)]
+	dsb		sy
+2:
+	ldp		x0, x1, [x4, #0]
+	msr		APIAKeyLo_EL1, x0
+	msr		APIAKeyHi_EL1, x1
+	ldp		x0, x1, [x4, #16]
+	msr		APIBKeyLo_EL1, x0
+	msr		APIBKeyHi_EL1, x1
+	ldp		x0, x1, [x4, #32]
+	msr		APDAKeyLo_EL1, x0
+	msr		APDAKeyHi_EL1, x1
+	ldp		x0, x1, [x4, #48]
+	msr		APDBKeyLo_EL1, x0
+	msr		APDBKeyHi_EL1, x1
+	ldp		x0, x1, [x4, #64]
+	msr		APGAKeyLo_EL1, x0
+	msr		APGAKeyHi_EL1, x1
+	isb		sy
+#endif /* SCION_NATIVE_PAC */
 #if HAS_PARAVIRTUALIZED_PAC
 #if HIBERNATION
 	#error PAC_INIT_KEY_STATE is not implemented for HAS_PARAVIRTUALIZED_PAC && HIBERNATION

@@ -37,7 +37,16 @@
 #define APPLEVIRTUALPLATFORM      1
 
 #define CPU_HAS_APPLE_PAC         1
+#if defined(SCION_NATIVE_PAC) && SCION_NATIVE_PAC
+/*
+ * Scion (AVF/crosvm, QEMU virt): there is no Apple hypervisor to take the
+ * VMAPPLE_PAC_* calls, so the kernel programs the architectural ARMv8.3 key
+ * registers itself (see SCION_NATIVE_PAC in arm64/pac_asm.h). The keys are
+ * one set per boot, shared by EL0 and EL1: there are no per-process keys.
+ */
+#else
 #define HAS_PARAVIRTUALIZED_PAC   1
+#endif
 #define HAS_GIC_V3                1
 #define HAS_ARM_FEAT_SSBS2        1
 #define HAS_ARM_FEAT_SME          1

@@ -107,6 +107,10 @@ Lcre_start_\@:
 	.globl EXT(ml_enable_user_jop_key)
 LEXT(ml_enable_user_jop_key)
 	ARM64_PROLOG
+#if SCION_NATIVE_PAC
+	mov		x0, #0
+	ret
+#endif /* SCION_NATIVE_PAC */
 #if HAS_PARAVIRTUALIZED_PAC
 	mov 	x2, x0
 	MOV64	x0, VMAPPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1
@@ -124,6 +128,9 @@ LEXT(ml_enable_user_jop_key)
 	.globl EXT(ml_disable_user_jop_key)
 LEXT(ml_disable_user_jop_key)
 	ARM64_PROLOG
+#if SCION_NATIVE_PAC
+	ret
+#endif /* SCION_NATIVE_PAC */
 #if HAS_PARAVIRTUALIZED_PAC
 	mov 	x2, x1
 	MOV64	x0, VMAPPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1
