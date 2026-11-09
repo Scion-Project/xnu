@@ -912,7 +912,7 @@ LDFLAGS_KERNEL_GEN = \
 	-Wl,-headerpad,152
 
 # LDFLAGS_KERNEL_SDK	= -L$(SDKROOT)/usr/local/lib/kernel -lfirehose_kernel
-LDFLAGS_KERNEL_SDK	= -L$(SDKROOT)/usr/local/lib/kernel -L$(SDKROOT)/usr/local/lib/kernel/platform
+LDFLAGS_KERNEL_SDK	= -L$(FAKEROOT_DIR)/usr/local/lib/kernel -lfirehose_kernel
 ifneq ($(KDKROOT),)
 LDFLAGS_KERNEL_SDK     += -L$(KDKROOT)/usr/local/lib/kernel/platform
 endif
@@ -1227,7 +1227,7 @@ INCFLAGS_IMPORT	= $(patsubst %, -I$(OBJROOT)/EXPORT_HDRS/%, $(COMPONENT_IMPORT_L
 INCFLAGS_EXTERN	= -I$(SRCROOT)/EXTERNAL_HEADERS
 INCFLAGS_GEN	= -I$(SRCROOT)/$(COMPONENT) -I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)
 INCFLAGS_LOCAL	= -I.
-INCFLAGS_SDK    = -I$(SDKROOT)/usr/local/include/kernel -I$(SDKROOT)/usr/local/include/iBoot -I$(SDKROOT)/$(KPINCDIR)/AppleFeatures
+INCFLAGS_SDK    = -I$(FAKEROOT_DIR)/usr/local/include/kernel -I$(SDKROOT)/usr/local/include/iBoot -I$(SDKROOT)/$(KPINCDIR)/AppleFeatures
 INCFLAGS_PLATFORM = -I$(SDKROOT)/$(KPINCDIR)/platform
 ifneq ($(KDKROOT),)
 INCFLAGS_SDK   += -I$(KDKROOT)/$(KPINCDIR) -I$(KDKROOT)/System/Library/KernelSupport
