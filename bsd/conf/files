@@ -109,6 +109,11 @@ bsd/dev/herolte_ufs.c			standard
 bsd/dev/herolte_touch.c			standard
 bsd/dev/starlte_touch.c			standard
 bsd/dev/starlte_smp.c			standard
+bsd/dev/hakios.dwc3.c			standard
+bsd/dev/hakios.exynos_usb.c		standard
+bsd/dev/starlte_usbcon.c		standard
+bsd/dev/starlte_muic.c			standard
+bsd/dev/hakios.exynos_hsi2c.c		standard
 bsd/dev/starlte_gpu.c			standard
 bsd/dev/starlte_overlay.c		standard
 bsd/dev/starlte_sd.c			standard
