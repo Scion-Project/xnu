@@ -89,6 +89,9 @@ extern int proc_selfpid(void);
  * (1048576, 2097152 and 4194304 are the data-protection work's.)
  *8388608 an IOSurface that is a snapshot of its maker's unwireable memory is compared with it again at the maker's locks,
  *        use counts and release, and brought up to date (iokit/Kernel/arm/SweetSurface.cpp sweet_surface_resnap)
+ * (16777216, 33554432 and 67108864 are the data-protection work's too.)
+ *134217728 a cap on the GPU buffers' wired memory: all clients 35 % of the memory, one client half of that; a buffer beyond
+ *        it is refused (iokit/Kernel/arm/StarbiteMali.cpp; sbm_cap_mb= and sbm_client_cap_mb= set the caps by hand)
  * The FP16 forms emulated under bit 2 now include FCCMP/FCCMPE/FCSEL H, FMOV/FABS/FNEG H and FABS/FNEG .4H/.8H (tools/ios27/perf/test/fp16t.c
  * checks them bit for bit); and, always on, a trap that was taken on an M3 but is handled after the thread migrated to an A55 is
  * retried (the A55 runs it) instead of ending in SIGILL.

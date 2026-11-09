@@ -213,6 +213,65 @@ sbm_count_pages(const sbm_bo *bo, int64_t sign)
 	OSAddAtomic64(sign * (int64_t)bo->pages, &sbm_live_pages[sbm_bo_kind(bo)]);
 }
 
+/*
+ * A cap on the buffers this driver makes (CREATE_BO: wired kernel memory, write-combined, that nothing can page out or
+ * reclaim). Every PanVK device wires 57 MiB when it is made (tiler heap, varyings, TLS) and textures follow: backboardd
+ * alone holds about 285 MiB while it composites on Metal, and several Metal clients at once (the poster renderers) had
+ * nothing to stop them from wiring the VM into a hard hang. With the cap a CREATE_BO beyond it fails (kIOReturnNoMemory:
+ * the client sees an allocation failure) instead.
+ *   boot-arg sweetspeed&134217728: on, with the defaults: all clients together 35 % of the memory, one client half of that
+ *   boot-args sbm_cap_mb=<MiB>, sbm_client_cap_mb=<MiB>: the two caps by hand (either one turns the cap on; 0 = that one off)
+ * Imported surfaces and host memory are not counted: they are another owner's pages, wired where they were made.
+ */
+extern "C" {
+void proc_selfname(char *buf, int size);
+int proc_selfpid(void);
+}
+static uint64_t sbm_cap_pages, sbm_client_cap_pages;   /* in 4 KiB pages; 0 = no cap */
+static uint64_t sbm_refused, sbm_refused_bytes;
+
+static void
+sbm_cap_init(void)
+{
+	uint32_t mb = 0, client_mb = 0;
+	bool by_hand = PE_parse_boot_argn("sbm_cap_mb", &mb, sizeof(mb));
+	bool client_by_hand = PE_parse_boot_argn("sbm_client_cap_mb", &client_mb, sizeof(client_mb));
+	if ((sweet_speed_flags() & 134217728) != 0) {
+		if (!by_hand) {
+			mb = (uint32_t)((max_mem >> 20) * 35 / 100);
+		}
+		if (!client_by_hand) {
+			client_mb = mb / 2;
+		}
+	}
+	sbm_cap_pages = (uint64_t)mb << 8;
+	sbm_client_cap_pages = (uint64_t)client_mb << 8;
+	IOLog("STARLTE GPU: buffer cap: all clients %u MiB, one client %u MiB (0 = none; memory %llu MiB; sweetspeed&134217728, "
+	    "sbm_cap_mb, sbm_client_cap_mb)\n", mb, client_mb, max_mem >> 20);
+}
+
+/* May this client (holding `mine` pages of buffers) have `pages` more? Says so when not (the first 10, then every 100th). */
+static bool
+sbm_cap_allows(uint64_t mine, uint32_t pages)
+{
+	uint64_t all = (uint64_t)sbm_live_pages[0];
+	bool over_all = sbm_cap_pages != 0 && all + pages > sbm_cap_pages;
+	bool over_mine = sbm_client_cap_pages != 0 && mine + pages > sbm_client_cap_pages;
+	if (!over_all && !over_mine) {
+		return true;
+	}
+	uint64_t n = (uint64_t)OSIncrementAtomic64((SInt64 *)&sbm_refused);
+	OSAddAtomic64((SInt64)pages * 4096, (SInt64 *)&sbm_refused_bytes);
+	if (n < 10 || (n % 100) == 0) {
+		char name[32];
+		proc_selfname(name, sizeof(name));
+		IOLog("STARLTE GPU: buffer of %u KiB REFUSED for %s[%d]: %s (all clients %llu of %llu MiB, this one %llu of %llu MiB; "
+		    "%llu refused so far)\n", pages * 4, name, proc_selfpid(), over_all ? "the cap for all clients" : "this client's cap",
+		    all >> 8, sbm_cap_pages >> 8, mine >> 8, sbm_client_cap_pages >> 8, n + 1);
+	}
+	return false;
+}
+
 class StarbiteMali : public IOService {
 	OSDeclareDefaultStructors(StarbiteMali);
 };
@@ -226,6 +285,7 @@ class StarbiteMaliUserClient : public IOUserClient {
 	sbm_bo *fBos = NULL;            /* handle h is fBos[h - 1] */
 	uint32_t fCount = 0;
 	bool fAsync = false;
+	uint64_t fBufferPages = 0;              /* buffers of its own (CREATE_BO), 4 KiB pages: for the per-client cap */
 	void markBOs(uint64_t list, uint32_t count, uint64_t seq);
 
 	IOReturn createBO(sbm_create_bo *a);
@@ -281,6 +341,9 @@ void
 StarbiteMaliUserClient::closeBO(sbm_bo *bo)
 {
 	sbm_count_pages(bo, -1);
+	if (bo->surface == 0 && !bo->host && fBufferPages >= bo->pages) {
+		fBufferPages -= bo->pages;
+	}
 	starlte_gpu_user_unmap(bo->va, bo->pages);
 	sbm_va_free(bo->va, (uint64_t)bo->pages * 0x1000);
 	OSSafeReleaseNULL(bo->map);
@@ -351,6 +414,9 @@ StarbiteMaliUserClient::createBO(sbm_create_bo *a)
 	/* whole 16 KiB pages: Mesa maps the buffer into a task with 16 KiB pages */
 	uint64_t bytes = ((uint64_t)a->size + 0x3fff) & ~0x3fffull;
 	uint32_t pages = (uint32_t)(bytes / 0x1000);
+	if (!sbm_cap_allows(fBufferPages, pages)) {
+		return kIOReturnNoMemory;
+	}
 	uint64_t va = sbm_va_alloc(bytes);
 	if (va == 0) {
 		return kIOReturnNoSpace;
@@ -387,6 +453,7 @@ StarbiteMaliUserClient::createBO(sbm_create_bo *a)
 	}
 	fBos[handle - 1] = (sbm_bo){ .mem = mem, .map = NULL, .va = va, .pages = pages };
 	sbm_count_pages(&fBos[handle - 1], 1);
+	fBufferPages += pages;
 	a->handle = handle;
 	a->offset = va;
 	return kIOReturnSuccess;
@@ -843,6 +910,7 @@ void
 starbite_mali_publish(void)
 {
 	sbm_async_ok = (sweet_speed_flags() & 64) != 0;
+	sbm_cap_init();
 	IOLog("STARLTE GPU: StarbiteMali async submits %s (sweetspeed&64)\n", sbm_async_ok ? "allowed" : "off");
 	sbm_va_lock = IOLockAlloc();
 	StarbiteMali *service = OSTypeAlloc(StarbiteMali);
