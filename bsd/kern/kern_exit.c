@@ -2066,6 +2066,11 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 			    proc_getpid(p), WTERMSIG(rv), WEXITSTATUS(rv),
 			    p->p_exit_reason ? (int)p->p_exit_reason->osr_namespace : -1,
 			    p->p_exit_reason ? p->p_exit_reason->osr_code : 0ULL, d ? d : "-");
+			if (WEXITSTATUS(rv) != 0 && current_proc() == p) {
+				/* where exit() was called from: the crash logger's user backtrace */
+				extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
+				sweet_crash_log(p->p_comm, proc_getpid(p), 0, (uint64_t)rv, 0);
+			}
 		}
 	}
 #endif
