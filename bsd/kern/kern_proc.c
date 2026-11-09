@@ -3665,6 +3665,37 @@ csops_audittoken(__unused proc_t p, struct csops_audittoken_args *uap, __unused 
 	           uap->usersize, uap->uaudittoken);
 }
 
+
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/*
+ * No App Sandbox on SWEET macOS (sweetappsandbox=1 keeps it): a sandboxed app's libsystem_secinit
+ * issues sandbox extensions while setting up its sandbox, our Sandbox policy stand-in answers
+ * ENOENT, and the app traps in its initializer (WallpaperAgent, NotificationCenter, WindowManager,
+ * ControlCenter ..., boot 151456). Copies of the entitlements handed to user space get
+ * "com.apple.security.app-sandbox" renamed to "com.apple.security.app-sandboX" (same length, XML
+ * and DER alike), so libsecinit sees an unsandboxed app. The signature itself is not touched.
+ */
+static void
+sweet_strip_app_sandbox(uint8_t *buf, size_t len)
+{
+	static int keep = -1;
+	if (keep < 0) {
+		keep = 0;
+		PE_parse_boot_argn("sweetappsandbox", &keep, sizeof(keep));
+	}
+	static const char key[] = "com.apple.security.app-sandbox";
+	const size_t n = sizeof(key) - 1;
+	if (keep || len < n) {
+		return;
+	}
+	for (size_t i = 0; i + n <= len; i++) {
+		if (buf[i] == 'c' && memcmp(buf + i, key, n) == 0) {
+			buf[i + n - 1] = 'X';
+		}
+	}
+}
+#endif
+
 static int
 csops_copy_token(const void *start, size_t length, user_size_t usize, user_addr_t uaddr)
 {
@@ -3932,6 +3963,9 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 			goto out;
 		}
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		sweet_strip_app_sandbox((uint8_t *)start, length);
+#endif
 		error = csops_copy_token(start, length, usize, uaddr);
 		kfree_data(start, length);
 		goto out;
@@ -3972,6 +4006,20 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 			}
 		}
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		{
+			uint8_t *copy = kalloc_data(length, Z_WAITOK);
+			if (copy == NULL) {
+				error = ENOMEM;
+				goto out;
+			}
+			memcpy(copy, start, length);
+			sweet_strip_app_sandbox(copy, length);
+			error = csops_copy_token(copy, length, usize, uaddr);
+			kfree_data(copy, length);
+			goto out;
+		}
+#endif
 		error = csops_copy_token(start, length, usize, uaddr);
 		goto out;
 	}
