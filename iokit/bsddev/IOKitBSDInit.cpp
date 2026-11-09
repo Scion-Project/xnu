@@ -815,6 +815,9 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		/* Boot-arg cpufreq_gov=1: the CPU governor (bsd/dev/hakios.exynos_cpufreq.c); off: nothing. */
 		extern bool hakios_exynos_cpufreq_gov_start(void);
 		(void)hakios_exynos_cpufreq_gov_start();
+		/* Boot-arg wifi_pcie=N (1-5): Scion's Wi-Fi stage 1, PCIe channel 0 to the BCM4361 (bsd/dev/hakios.exynos_pcie.c). */
+		extern void hakios_exynos_pcie_init(void);
+		hakios_exynos_pcie_init();
 		extern void starlte_smp_probe(void);   /* boot-arg starsmpprobe=1 */
 		starlte_smp_probe();
 		/* Mali-G72 read-only probe (bsd/dev/starlte_gpu.c), boot-arg stargpu=0 off. */
