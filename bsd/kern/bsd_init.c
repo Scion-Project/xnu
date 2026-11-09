@@ -1133,6 +1133,15 @@ bsdinit_task(void)
 
 	bsd_init_kprintf("bsd_do_post - done");
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* Starbite iOS overlay from the OS store, before launchd reads anything
+	 * (bsd/dev/starlte_overlay.c). */
+	{
+		extern void starlte_overlay_install(void);
+		starlte_overlay_install();
+	}
+#endif
+
 	load_init_program(p);
 	lock_trace = 1;
 }
