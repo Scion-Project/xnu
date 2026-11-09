@@ -354,6 +354,25 @@ LEXT(CleanPoC_DcacheRegion_Force)
 	b		EXT(CleanPoC_DcacheRegion_internal)
 #endif /* APPLE_ARM64_ARCH_FAMILY */
 
+#if defined(APPLE_ARM64_ARCH_FAMILY)
+/*
+ *	void CleanPoC_DcacheRegion_Force_nopreempt(vm_offset_t va, size_t length)
+ *	void CleanPoC_DcacheRegion_Force_nopreempt_nohid(vm_offset_t va, size_t length)
+ *
+ *		Scion: Apple links these from the binary support library of its KDK, which a build from the open
+ *		source does not have. Here both are the clean (and invalidate) to the Point of Coherency of
+ *		CleanPoC_DcacheRegion_internal, without the Apple CPU's HID controls.
+ */
+	.text
+	.align 2
+	.globl EXT(CleanPoC_DcacheRegion_Force_nopreempt)
+	.globl EXT(CleanPoC_DcacheRegion_Force_nopreempt_nohid)
+LEXT(CleanPoC_DcacheRegion_Force_nopreempt)
+LEXT(CleanPoC_DcacheRegion_Force_nopreempt_nohid)
+	ARM64_PROLOG
+	b		EXT(CleanPoC_DcacheRegion_internal)
+#endif /* APPLE_ARM64_ARCH_FAMILY */
+
 /*
  *	void FlushPoC_Dcache(void)
  *
