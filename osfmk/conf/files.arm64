@@ -43,6 +43,8 @@ osfmk/arm64/lz4_encode_arm64.s  standard
 osfmk/arm64/amcc_rorgn_scion.c optional nos_arm_asm
 # Scion: what else of the machine layer Apple links from its KDK's binary support library
 osfmk/arm64/machine_routines_scion.c optional nos_arm_asm
+# Scion: __chkstk_darwin with a BTI landing pad (SCION_NATIVE_PAC only; empty otherwise)
+osfmk/arm64/scion_chkstk.s optional nos_arm_asm
 osfmk/arm64/bcopy.s standard
 osfmk/arm64/bzero.s standard
 osfmk/arm/caches.c		standard
