@@ -1055,6 +1055,11 @@ starlte_reboot_early(void)
 	uint32_t secs = 0;
 	if (PE_parse_boot_argn("sweetreboot", &secs, sizeof(secs)) && secs != 0) {
 		starlte_reboot_setup();
+	} else {
+		/* The USB console's "return" resets through the PMU too (starlte_reboot_recovery): mapped here, at boot, with
+		 * or without sweetreboot, so that a command line without it still has its way out (9 Nov: a test cmdline
+		 * without sweetreboot left "return" printing "PMU mapping failed" in a loop). Nothing is written until asked. */
+		starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);
 	}
 }
 STARTUP(KMEM, STARTUP_RANK_LAST, starlte_reboot_early);
@@ -1110,6 +1115,9 @@ static void
 starlte_reboot_recovery(void)
 {
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (starlte_pmu_va == NULL) {
+		starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);   /* last try */
+	}
 	starlte_reset_to_recovery();
 	printf("HEROLTE LOG: PMU mapping failed, no reboot\n");
 #else
