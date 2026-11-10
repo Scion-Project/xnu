@@ -45,6 +45,7 @@
 #include <sys/vnode_internal.h>
 #include <sys/hakios.input.h>
 #include <sys/hakios.xnu.h>
+#include <vm/vm_kern_xnu.h>
 
 #define WIFI_DIR_DEFAULT        "/private/var/hakios/wifi/"
 #define WIFI_FILE_LARGEST       (4u << 20)
@@ -225,6 +226,52 @@ hakios_wifi_option(const char *name)
 	return value;
 }
 
+/*
+ * The radio's 44 MB in one physical piece (hakios.lx.c, lx_os_radio_memory(): kmem_alloc_contig()) is taken here at
+ * IOKitBSDInit, while memory is still in large pieces: a minute later (wifi_delay) it no longer is (9 Nov, phone 2: "lx: no
+ * 46137344 bytes of memory in one piece"). hakios.lx.o is compiled with kmem_alloc_contig_guard (what kmem_alloc_contig() calls) renamed to the one below
+ * (bsd/conf/Makefile.template), which hands the piece over when the size is the one taken, once, and asks the kernel
+ * otherwise. wifi_reserve_mb=<MB> (default 44; 0: none) with wifi_pcie=6 and brcmfmac=N.
+ */
+static vm_offset_t reserved;
+static vm_size_t reserved_size;
+static bool reserved_given;
+
+static void
+reserve_early(void)
+{
+	uint32_t steps = 0, mb = 44;
+
+	PE_parse_boot_argn("brcmfmac", &steps, sizeof(steps));
+	PE_parse_boot_argn("wifi_reserve_mb", &mb, sizeof(mb));
+	if (steps == 0 || mb == 0) {
+		return;
+	}
+	reserved_size = round_page((vm_size_t)mb << 20);
+	if (kmem_alloc_contig(kernel_map, &reserved, reserved_size, 0, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		printf("wifi: %u MB in one piece for the radio could not be taken at boot either\n", mb);
+		reserved = 0;
+		reserved_size = 0;
+		return;
+	}
+	printf("wifi: %u MB in one piece taken for the radio at boot (physical %#llx)\n", mb, (unsigned long long)kvtophys(reserved));
+}
+
+kmem_return_t starlte_wifi_kmem_alloc_contig_guard(vm_map_t map, vm_size_t size, vm_offset_t mask, ppnum_t max_pnum,
+    ppnum_t pnum_mask, kma_flags_t flags, kmem_guard_t guard);
+kmem_return_t
+starlte_wifi_kmem_alloc_contig_guard(vm_map_t map, vm_size_t size, vm_offset_t mask, ppnum_t max_pnum, ppnum_t pnum_mask,
+    kma_flags_t flags, kmem_guard_t guard)
+{
+	if (reserved != 0 && !reserved_given && map == kernel_map && size == reserved_size && mask == 0 && max_pnum == 0) {
+		reserved_given = true;
+		printf("wifi: the radio's memory: the piece taken at boot\n");
+		return (kmem_return_t){ .kmr_return = KERN_SUCCESS, .kmr_address = reserved };
+	}
+	return kmem_alloc_contig_guard(map, size, mask, max_pnum, pnum_mask, flags, guard);
+}
+
 /* QEMU's virtio network device: not on the phone */
 void hakios_virtio_net_init(void);
 void hakios_virtio_net_init(void) {}
@@ -281,6 +328,9 @@ starlte_wifi_init(void)
 
 	if (steps == 0) {
 		return;
+	}
+	if (steps >= 6) {
+		reserve_early();
 	}
 	if (kernel_thread_start(starlte_wifi_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_set_thread_name(thread, "starlte-wifi");
