@@ -62,7 +62,8 @@ hfs_encodings.o_CFLAGS_ADD += -Dhfs_allocated=hfs_encodings_allocated
 hfs_encodinghint.o_CFLAGS_ADD += -Dhfs_allocated=hfs_encodings_allocated
 
 # Scion's Wi-Fi: the station layer (hakios.sta.c) is in this kernel
-hakios.lx.o_CFLAGS_ADD += -DHAKIOS_WIFI_STA -include vm/vm_kern_xnu.h
+# (and its kmem_alloc_contig() is starlte_wifi.c's: the radio's 44 MB, taken at boot while memory is in large pieces)
+hakios.lx.o_CFLAGS_ADD += -DHAKIOS_WIFI_STA -Dkmem_alloc_contig_guard=starlte_wifi_kmem_alloc_contig_guard -include vm/vm_kern_xnu.h
 hakios.brcmfmac.o_CFLAGS_ADD += -DHAKIOS_WIFI_STA
 # ... and iOS 27's Apple80211 layouts (scan request 5528 bytes, scan result 2280, join 656)
 hakios.apple80211.o_CFLAGS_ADD += -DHAKIOS_APPLE80211_27
