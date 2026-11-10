@@ -1106,7 +1106,7 @@ static uint64_t sgu_as_n, sgu_as_prev_waits, sgu_as_prev_ns, sgu_as_gpu_ns, sgu_
 #define SGU_QUEUE       256
 static struct {
 	uint64_t jc, seq, queued;
-	uint32_t req;
+	uint32_t req, flush;
 } sgu_q[SGU_QUEUE];
 static unsigned sgu_q_head, sgu_q_count, sgu_q_deepest;
 static uint64_t sgu_q_seq, sgu_q_done;                  /* last number given, last number done */
@@ -1121,6 +1121,15 @@ static uint32_t sgu_q_spin_us = 200;                    /* boot-arg sgu_spin_us 
  * ahead of the GPU on average and up to ten (queued 55 ms on average in a 57 fps scroll: frames on time, each one late).
  */
 static uint32_t sgu_q_depth = SGU_QUEUE;
+/*
+ * boot-arg sgu_flushred=1 (off by default): the Mali's flush reduction, as Linux's Panfrost driver uses it on this GPU.
+ * Every chain is configured to clean and invalidate the GPU's caches when it starts and when it ends. With flush
+ * reduction the chain also carries the GPU's flush count as it was when the chain was submitted (LATEST_FLUSH,
+ * register 0x38, into the slot's FLUSH_ID_NEXT, 0x70), and the GPU leaves out the flush at the start when a flush
+ * has happened since then: for a chain that waited in the queue behind another one, always. 1,100 small chains a
+ * second each pay that flush today.
+ */
+static uint32_t sgu_flushred;
 static LCK_MTX_DECLARE(sgu_q_lock, &sg_lck_grp);
 static LCK_MTX_DECLARE(sgu_q_nap_lock, &sg_lck_grp);
 extern uint32_t sweet_speed_flags(void);                /* boot-arg sweetspeed (osfmk/arm64/sweet_a64e.c) */
@@ -1180,9 +1189,9 @@ sgu_retire_locked(bool block)
 int starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_t *seq);
 int starlte_gpu_user_wait_seq(uint64_t seq, bool block);
 
-/* sg_lock held, nothing on the GPU: start the chain. */
+/* sg_lock held, nothing on the GPU: start the chain (`flush`: the GPU's flush count when it was submitted). */
 static void
-sgu_start_locked(uint64_t jc, uint32_t requirements)
+sgu_start_locked(uint64_t jc, uint32_t requirements, uint32_t flush)
 {
 	unsigned js = (requirements & 1) ? 0 : 1;
 	uint32_t slot = JS_BASE(js);
@@ -1192,7 +1201,11 @@ sgu_start_locked(uint64_t jc, uint32_t requirements)
 	sg_wr(sg_gpu, slot + 0x44, (uint32_t)(jc >> 32));
 	sg_wr(sg_gpu, slot + 0x50, sgp_shaders);                        /* AFFINITY_NEXT */
 	sg_wr(sg_gpu, slot + 0x54, 0);
-	sg_wr(sg_gpu, slot + 0x58, (8u << 16) | (3u << 8) | (3u << 12) | 1u);   /* AS1, flushes, priority 8 */
+	/* AS1, flushes at start and end, priority 8; with sgu_flushred the start's is left out when one happened since `flush` */
+	sg_wr(sg_gpu, slot + 0x58, (8u << 16) | (3u << 8) | (3u << 12) | (sgu_flushred ? (1u << 14) : 0) | 1u);
+	if (sgu_flushred) {
+		sg_wr(sg_gpu, slot + 0x70, flush);                      /* FLUSH_ID_NEXT */
+	}
 	sgu_busy_js = js;
 	sgu_busy_jc = jc;
 	sgu_busy_req = requirements;
@@ -1212,7 +1225,7 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 			lck_mtx_sleep(&sgu_q_lock, LCK_SLEEP_DEFAULT, (event_t)&sgu_q_count, THREAD_UNINT);
 		}
 		uint64_t jc = sgu_q[sgu_q_head].jc, seq = sgu_q[sgu_q_head].seq, queued = sgu_q[sgu_q_head].queued;
-		uint32_t req = sgu_q[sgu_q_head].req;
+		uint32_t req = sgu_q[sgu_q_head].req, flush = sgu_q[sgu_q_head].flush;
 		lck_mtx_unlock(&sgu_q_lock);
 
 		lck_mtx_lock(&sg_lock);
@@ -1220,7 +1233,7 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 			(void)sgu_retire_locked(true);          /* (a chain of a client without the queue) */
 		}
 		uint64_t began = mach_absolute_time();
-		sgu_start_locked(jc, req);
+		sgu_start_locked(jc, req, flush);
 		sgu_seq_sub++;
 		lck_mtx_unlock(&sg_lock);
 		for (unsigned looks = 0;; looks++) {
@@ -1301,10 +1314,14 @@ sgu_q_enabled(void)
 			if (PE_parse_boot_argn("sgu_depth", &depth, sizeof(depth)) && depth >= 16 && depth <= SGU_QUEUE) {
 				sgu_q_depth = depth;
 			}
+			uint32_t flushred = 0;
+			if (PE_parse_boot_argn("sgu_flushred", &flushred, sizeof(flushred))) {
+				sgu_flushred = flushred != 0;
+			}
 			sgu_q_on = (sweet_speed_flags() & 262144) != 0;
 			sgu_q_checked = 1;
-			printf("STARLTE GPU QUEUE: %s (sweetspeed&262144), spin %u us, nap %u us, depth %u\n", sgu_q_on ? "on" : "off",
-			    sgu_q_spin_us, sgu_q_nap_us, sgu_q_depth);
+			printf("STARLTE GPU QUEUE: %s (sweetspeed&262144), spin %u us, nap %u us, depth %u, flush reduction %s\n",
+			    sgu_q_on ? "on" : "off", sgu_q_spin_us, sgu_q_nap_us, sgu_q_depth, sgu_flushred ? "on" : "off");
 		}
 		lck_mtx_unlock(&sgu_q_lock);
 	}
@@ -1334,6 +1351,7 @@ sgu_q_enqueue(uint64_t jc, uint32_t requirements)
 	unsigned at = (sgu_q_head + sgu_q_count) % SGU_QUEUE;
 	sgu_q[at].jc = jc;
 	sgu_q[at].req = requirements;
+	sgu_q[at].flush = sgu_flushred ? sg_rd(sg_gpu, 0x38) : 0;       /* LATEST_FLUSH, as of this submit */
 	sgu_q[at].seq = seq;
 	sgu_q[at].queued = mach_absolute_time();
 	if (++sgu_q_count > sgu_q_deepest) {
@@ -1377,7 +1395,7 @@ starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_
 		sgu_as_prev_waits++;
 		sgu_as_prev_ns += ns;
 	}
-	sgu_start_locked(jc, requirements);
+	sgu_start_locked(jc, requirements, sgu_flushred ? sg_rd(sg_gpu, 0x38) : 0);
 	*seq = ++sgu_seq_sub;
 	int ret = 0;
 	if (!async) {
