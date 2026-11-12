@@ -824,8 +824,8 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		/* Boot-arg extra_ram_canary=1 (with extra_ram=1): the extra RAM's canary pages checked every 10 s (arm_vm_init.c). */
 		extern void hakios_extra_ram_canary_start(void);
 		hakios_extra_ram_canary_start();
-		extern void hakios_exynos_pcie_init(void);
-		hakios_exynos_pcie_init();
+		extern void starlte_wifi_init(void);
+		starlte_wifi_init();       /* wifi_pcie=N: en0's options, then the link and (6) brcmfmac (bsd/dev/starlte_wifi.c) */
 		/* Boot-arg cam_s9=N: Scion's front camera driver (bsd/dev/hakios.exynos_camera.c; its lens with cam_af=N,
 		 * bsd/dev/hakios.ak737x.c); off: nothing mapped, nothing powered. */
 		extern void hakios_exynos_camera_init(void);
