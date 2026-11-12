@@ -112,7 +112,7 @@ STUB_ARG(hakios_net_console_names)
 /* hakios_input_console_touch(), hakios_input_console_button(): bsd/dev/starlte_touch.c */
 STUB_ARG(hakios_abox_console)
 STUB_ARG(hakios_cs47l93_console)
-STUB_ARG(hakios_ssp_console)
+/* hakios_ssp_console(): the sensor hub's driver, bsd/dev/hakios.ssp.c (the console's "sensors", boot-arg shub=N) */
 STUB_ARG(hakios_max77705_usb_console)
 void hakios_net_console_ip(void);
 void hakios_net_console_ip(void) {}
@@ -128,10 +128,30 @@ int hakios_panel_brightness(int level);
 /* hakios_fb_scanned(): iokit/Kernel/arm/SweetFramebuffer.cpp (the panel's memory, for the console's "shot") */
 bool hakios_acpm_init(int (*say)(const char *, ...));
 bool hakios_acpm_init(__unused int (*say)(const char *, ...)) { return false; }
+/*
+ * The S2MPS18's registers for the shared drivers that ask by these names (the sensor hub's supply, bsd/dev/hakios.ssp.c):
+ * through this tree's own ACPM path, starlte_pmic_read/write of bsd/dev/starlte_touch.c (the same block numbers).
+ * hakios_acpm_init() above still says "no ACPM", so the USB glue leaves its supplies as the boot left them, as before.
+ */
+extern bool starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
+extern bool starlte_pmic_write(uint32_t type, uint32_t reg, uint8_t val);
 int hakios_acpm_pmic_read(uint32_t type, uint32_t reg, uint8_t *value);
-int hakios_acpm_pmic_read(__unused uint32_t type, __unused uint32_t reg, __unused uint8_t *value) { return ENODEV; }
+int
+hakios_acpm_pmic_read(uint32_t type, uint32_t reg, uint8_t *value)
+{
+	return starlte_pmic_read(type, reg, value) ? 0 : EIO;
+}
 int hakios_acpm_pmic_update(uint32_t type, uint32_t reg, uint8_t value, uint8_t mask);
-int hakios_acpm_pmic_update(__unused uint32_t type, __unused uint32_t reg, __unused uint8_t value, __unused uint8_t mask) { return ENODEV; }
+int
+hakios_acpm_pmic_update(uint32_t type, uint32_t reg, uint8_t value, uint8_t mask)
+{
+	uint8_t now = 0;
+
+	if (!starlte_pmic_read(type, reg, &now)) {
+		return EIO;
+	}
+	return starlte_pmic_write(type, reg, (uint8_t)((now & ~mask) | (value & mask))) ? 0 : EIO;
+}
 
 #include <stdarg.h>
 int hakios_say(const char *format, ...) __printflike(1, 2);
