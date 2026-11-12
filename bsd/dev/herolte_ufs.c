@@ -1310,6 +1310,9 @@ static void
 starlte_reboot_recovery(void)
 {
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* the front camera's sensor, lens and supplies off again, if a stream had them on (nothing without cam_s9=) */
+	extern void hakios_exynos_camera_quiesce(void);
+	hakios_exynos_camera_quiesce();
 	starlte_reset_to_recovery();
 	printf("HEROLTE LOG: PMU mapping failed, no reboot\n");
 #else
