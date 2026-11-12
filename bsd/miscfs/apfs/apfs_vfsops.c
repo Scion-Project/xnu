@@ -1366,18 +1366,81 @@ apfs_vget(mount_t mp, ino64_t ino, vnode_t *vpp, __unused vfs_context_t ctx)
 	return apfs_node_vnode(APFS_MP(mp), (uint64_t)ino, NULLVP, NULL, vpp);
 }
 
+/*
+ * The space of the data volume, for the read-only system volume to report as its own free space. On an iPhone the
+ * system and data volumes share one APFS container, so "/" answers statfs and getattrlist with the container's size
+ * and free space; iOS sizes the phone from "/" (StorageData's getattrlist("/", ATTR_VOL_SPACE|SPACEAVAIL), MobileGestalt's
+ * DiskUsage). Here "/" is userland/system.apfs alone (2.5 GB, nothing free) and the data volume is HFS Plus on another
+ * partition (var_hfs=, mounted on /private/var by init): Settings said 2.6 of 3 GB. So "/" reports, as one container
+ * would, the data volume's blocks plus its own and the data volume's free space. apfs_shared_space=0: its own only.
+ */
+struct apfs_space_find {
+	mount_t mp;
+};
+
+static int
+apfs_space_find_cb(mount_t mp, void *arg)
+{
+	struct vfsstatfs *sp = vfs_statfs(mp);
+
+	if (strcmp(sp->f_mntonname, "/private/var") == 0 && strcmp(sp->f_fstypename, "hfs") == 0) {
+		((struct apfs_space_find *)arg)->mp = mp;
+		return VFS_RETURNED_DONE;
+	}
+	return VFS_RETURNED;
+}
+
+static int apfs_shared_space_on = -1;
+
+/* the data volume's size and free space in this volume's blocks; false: none mounted (or apfs_shared_space=0) */
+static bool
+apfs_shared_space(struct apfs_mount *am, vfs_context_t ctx, uint64_t *blocks, uint64_t *bfree, uint64_t *bavail)
+{
+	struct apfs_space_find f = { NULL };
+	struct vfs_attr va;
+	uint64_t bs = am->am_nx.block_size;
+
+	if (apfs_shared_space_on < 0) {
+		int on = 1;
+
+		(void)PE_parse_boot_argn("apfs_shared_space", &on, sizeof(on));
+		apfs_shared_space_on = on != 0;
+	}
+	if (!apfs_shared_space_on || bs == 0 || strcmp(vfs_statfs(am->am_mp)->f_mntonname, "/") != 0) {
+		return false;
+	}
+	vfs_iterate(0, apfs_space_find_cb, &f);
+	if (f.mp == NULL) {
+		return false;
+	}
+	VFSATTR_INIT(&va);
+	VFSATTR_WANTED(&va, f_bsize);
+	VFSATTR_WANTED(&va, f_blocks);
+	VFSATTR_WANTED(&va, f_bfree);
+	VFSATTR_WANTED(&va, f_bavail);
+	if (vfs_getattr(f.mp, &va, ctx) != 0 || !VFSATTR_IS_SUPPORTED(&va, f_blocks) || va.f_bsize == 0) {
+		return false;
+	}
+	*blocks = va.f_blocks * va.f_bsize / bs + am->am_vol.alloc_count;
+	*bfree = va.f_bfree * va.f_bsize / bs;
+	*bavail = va.f_bavail * va.f_bsize / bs;
+	return true;
+}
+
 static int
 apfs_vfs_getattr(mount_t mp, struct vfs_attr *fsap, __unused vfs_context_t ctx)
 {
 	struct apfs_mount *am = APFS_MP(mp);
 	uint64_t files = am->am_vol.num_files + am->am_vol.num_dirs;
+	uint64_t blocks = am->am_nx.block_count, bfree = 0, bavail = 0;
 
+	(void)apfs_shared_space(am, ctx, &blocks, &bfree, &bavail);
 	VFSATTR_RETURN(fsap, f_objcount, files);
 	VFSATTR_RETURN(fsap, f_bsize, am->am_nx.block_size);
 	VFSATTR_RETURN(fsap, f_iosize, am->am_nx.block_size);
-	VFSATTR_RETURN(fsap, f_blocks, am->am_nx.block_count);
-	VFSATTR_RETURN(fsap, f_bfree, 0);
-	VFSATTR_RETURN(fsap, f_bavail, 0);
+	VFSATTR_RETURN(fsap, f_blocks, blocks);
+	VFSATTR_RETURN(fsap, f_bfree, bfree);
+	VFSATTR_RETURN(fsap, f_bavail, bavail);
 	VFSATTR_RETURN(fsap, f_bused, am->am_vol.alloc_count);
 	VFSATTR_RETURN(fsap, f_files, files);
 	VFSATTR_RETURN(fsap, f_ffree, 0);
