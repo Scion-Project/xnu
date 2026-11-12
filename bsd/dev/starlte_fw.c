@@ -13,6 +13,10 @@
  * The files themselves are the chips' makers' and are in no repository of ours; the packing step takes them from the
  * builder's own copy. First user: the sensor hub's RAM image (bsd/dev/hakios.ssp.c, boot-arg shub=4 and up).
  *
+ * A file the device tree does not carry is asked of the Wi-Fi's reader (bsd/dev/starlte_wifi.c, starlte_wifi_image_file():
+ * a directory of the root filesystem, once that is mounted), which answers only with wifi_pcie=N; without that boot-argument
+ * the answer is the one above and nothing else.
+ *
  * SPDX-License-Identifier: MIT-0
  */
 #include <libkern/libkern.h>
@@ -21,6 +25,9 @@
 #include <sys/systm.h>
 
 #define FIRMWARE_NODE   "/scion-firmware"
+
+/* bsd/dev/starlte_wifi.c: the radio's files, from a directory of the root filesystem; NULL at once without wifi_pcie=N */
+const uint8_t *starlte_wifi_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
 
 const uint8_t *
 hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out)
@@ -41,7 +48,8 @@ hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_o
 	}
 	if (SecureDTLookupEntry(NULL, FIRMWARE_NODE, &node) != kSuccess ||
 	    SecureDTGetProperty(node, name, &bytes, &length) != kSuccess || bytes == NULL || length == 0) {
-		return NULL;
+		/* not carried with the kernel: the Wi-Fi's files are read from the root filesystem (only with wifi_pcie=N) */
+		return starlte_wifi_image_file(dir, name, size, disk_out);
 	}
 	if (size != NULL) {
 		*size = length;

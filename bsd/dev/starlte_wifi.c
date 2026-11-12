@@ -7,7 +7,8 @@
  * and the Apple80211 surface wifid talks to (hakios.sta.c, hakios.apple80211.c, hakios.wlan.cpp). On Scion's iOS 16.5
  * kernel they lean on parts this tree does not have; this file stands in for them:
  *
- *   hakios_image_file()      Scion reads the radio's files from fw/ of its small image. Here they are read from the iOS
+ *   hakios_image_file()      (through bsd/dev/starlte_fw.c, which asks starlte_wifi_image_file() here for what the device
+ *                            tree does not carry.) Scion reads the radio's files from fw/ of its small image. Here they are read from the iOS
  *                            root filesystem once it is mounted: /private/var/hakios/wifi/<name>, under bcmdhd's names
  *                            (bcmdhd_sta.bin_b2, bcmdhd_clm.blob, nvram.txt_*) and mac.info / network (the network to
  *                            join, two lines), as scion-starlte's WIFI.md names them. Nothing of the vendor's is in
@@ -119,17 +120,24 @@ root_there(void)
 /*
  * Scion's fw/ of the small image, here a directory of the root filesystem. Only dir "fw" is asked for (hakios.brcmfmac.c).
  * A file read once is kept (brcmfmac may ask again after a reset); what is not there is NULL at once.
+ * hakios_image_file() itself is bsd/dev/starlte_fw.c's: it looks in the device tree's /scion-firmware first (the files
+ * that travel with the kernel, the sensor hub's) and asks here for what is not there.
  */
-const uint8_t *hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
+const uint8_t *starlte_wifi_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
 const uint8_t *
-hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out)
+starlte_wifi_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out)
 {
 	char base[96] = WIFI_DIR_DEFAULT, path[192];
 	const uint8_t *found = NULL;
 	uint8_t *data = NULL, *result;
 	uint64_t length = 0;
+	uint32_t steps = 0;
 	int e;
 
+	/* only with the Wi-Fi on: without wifi_pcie=N no file is looked for here and nobody waits for the root filesystem */
+	if (!PE_parse_boot_argn("wifi_pcie", &steps, sizeof(steps)) || steps == 0) {
+		return NULL;
+	}
 	if (disk_out != NULL) {
 		*disk_out = 0;
 	}
