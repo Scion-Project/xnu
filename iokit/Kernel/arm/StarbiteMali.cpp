@@ -857,6 +857,17 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
  * every 10 s while calls come: "STARLTE GPU CALLS: submit N x avg us (max), create ..., close ...".
  */
 static uint64_t sbm_calls[6], sbm_call_ns[6], sbm_call_max[6], sbm_calls_since;
+/*
+ * boot-arg sbm_prof=1 (off by default): who waits. With the ten-second line, "STARLTE GPU WAITS: ...": the waits for one
+ * buffer and the waits for the whole queue, and the four threads that waited longest, by thread id and name.
+ */
+static uint32_t sbm_prof;
+static int sbm_prof_checked;
+static struct { uint64_t tid, n, ns; char name[24]; } sbm_waiter[8];
+static uint64_t sbm_wait_kind_n[2], sbm_wait_kind_ns[2];
+extern "C" uint64_t thread_tid(thread_t thread);
+extern "C" void bsd_getthreadname(void *uth, char *buffer);
+extern "C" void *current_uthread(void);
 
 static unsigned
 sbm_call_kind(uint32_t selector)
@@ -880,7 +891,34 @@ StarbiteMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArgume
 	uint64_t t1 = mach_absolute_time(), ns = 0;
 	absolutetime_to_nanoseconds(t1 - t0, &ns);
 	unsigned k = sbm_call_kind(selector);
+	if (!sbm_prof_checked) {
+		sbm_prof_checked = 1;
+		PE_parse_boot_argn("sbm_prof", &sbm_prof, sizeof(sbm_prof));
+	}
 	IOLockLock(sbm_va_lock);
+	if (sbm_prof && k == 5) {
+		uint64_t tid = thread_tid(current_thread());
+		unsigned w = selector == SBM_WAIT_IDLE ? 1 : 0, slot = 8;
+		sbm_wait_kind_n[w]++;
+		sbm_wait_kind_ns[w] += ns;
+		for (unsigned i = 0; i < 8; i++) {
+			if (sbm_waiter[i].tid == tid || sbm_waiter[i].n == 0) {
+				slot = i;
+				break;
+			}
+		}
+		if (slot < 8) {
+			if (sbm_waiter[slot].n == 0) {
+				sbm_waiter[slot].tid = tid;
+				sbm_waiter[slot].name[0] = 0;
+				char tn[64] = "";
+				bsd_getthreadname(current_uthread(), tn);
+				strlcpy(sbm_waiter[slot].name, tn, sizeof(sbm_waiter[slot].name));
+			}
+			sbm_waiter[slot].n++;
+			sbm_waiter[slot].ns += ns;
+		}
+	}
 	sbm_calls[k]++;
 	sbm_call_ns[k] += ns;
 	if (ns > sbm_call_max[k]) {
@@ -904,8 +942,24 @@ StarbiteMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArgume
 		snprintf(line + n, sizeof(line) - (size_t)n, " wired: buffers %lld MiB, surfaces %lld MiB, host %lld MiB",
 		    sbm_live_pages[0] / 256, sbm_live_pages[1] / 256, sbm_live_pages[2] / 256);
 		sbm_calls_since = t1;
+		char wline[400];
+		wline[0] = 0;
+		if (sbm_prof) {
+			int wn = snprintf(wline, sizeof(wline), "STARLTE GPU WAITS: one buffer %llu x %llu us, whole queue %llu x %llu us; by thread:",
+			    sbm_wait_kind_n[0], sbm_wait_kind_n[0] ? sbm_wait_kind_ns[0] / sbm_wait_kind_n[0] / 1000 : 0,
+			    sbm_wait_kind_n[1], sbm_wait_kind_n[1] ? sbm_wait_kind_ns[1] / sbm_wait_kind_n[1] / 1000 : 0);
+			for (unsigned i = 0; i < 8 && sbm_waiter[i].n != 0 && wn < (int)sizeof(wline) - 60; i++) {
+				wn += snprintf(wline + wn, sizeof(wline) - (size_t)wn, " %llu(%s) %llu x %llu us", sbm_waiter[i].tid,
+				    sbm_waiter[i].name, sbm_waiter[i].n, sbm_waiter[i].ns / sbm_waiter[i].n / 1000);
+			}
+			bzero(sbm_waiter, sizeof(sbm_waiter));
+			sbm_wait_kind_n[0] = sbm_wait_kind_n[1] = sbm_wait_kind_ns[0] = sbm_wait_kind_ns[1] = 0;
+		}
 		IOLockUnlock(sbm_va_lock);
 		IOLog("%s\n", line);
+		if (wline[0]) {
+			IOLog("%s\n", wline);
+		}
 		return ret;
 	}
 	IOLockUnlock(sbm_va_lock);

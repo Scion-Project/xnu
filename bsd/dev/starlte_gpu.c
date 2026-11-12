@@ -1107,7 +1107,16 @@ static uint64_t sgu_as_n, sgu_as_prev_waits, sgu_as_prev_ns, sgu_as_gpu_ns, sgu_
 static struct {
 	uint64_t jc, seq, queued;
 	uint32_t req, flush;
+	int pid;
 } sgu_q[SGU_QUEUE];
+/*
+ * boot-arg sgu_prof=1 (off by default): a second ten-second line, "STARLTE GPU QUEUE prof: ...": the chains by kind
+ * (fragment chains run on job slot 0, vertex/tiler/compute chains on slot 1) with how long each took as the worker saw it
+ * (counts under 100, 200, 400, 800, 1600 us and above), how long the GPU stood still between one chain's end being seen
+ * and the next chain's start while chains were waiting, and the two processes that submitted most.
+ */
+static uint32_t sgu_prof;
+extern int proc_selfpid(void);
 static unsigned sgu_q_head, sgu_q_count, sgu_q_deepest;
 static uint64_t sgu_q_seq, sgu_q_done;                  /* last number given, last number done */
 static bool sgu_q_on, sgu_q_started;
@@ -1219,6 +1228,10 @@ static void
 sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 {
 	uint64_t win_t0 = 0, win_gpu = 0, win_gpu_max = 0, win_wait = 0, win_n = 0, win_naps = 0;
+	uint64_t pk_n[2] = { 0, 0 }, pk_gpu[2] = { 0, 0 }, pk_hist[2][6], pk_gap = 0, pk_gaps = 0, pk_prev_end = 0;
+	struct { int pid; uint64_t n; } pk_pid[4];
+	bzero(pk_hist, sizeof(pk_hist));
+	bzero(pk_pid, sizeof(pk_pid));
 	for (;;) {
 		lck_mtx_lock(&sgu_q_lock);
 		while (sgu_q_count == 0) {
@@ -1226,6 +1239,7 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 		}
 		uint64_t jc = sgu_q[sgu_q_head].jc, seq = sgu_q[sgu_q_head].seq, queued = sgu_q[sgu_q_head].queued;
 		uint32_t req = sgu_q[sgu_q_head].req, flush = sgu_q[sgu_q_head].flush;
+		int pk_owner = sgu_q[sgu_q_head].pid;
 		lck_mtx_unlock(&sgu_q_lock);
 
 		lck_mtx_lock(&sg_lock);
@@ -1266,6 +1280,30 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 		wakeup((caddr_t)&sgu_q_done);
 		wakeup((caddr_t)&sgu_q_head);                   /* (room in the queue) */
 
+		if (sgu_prof) {
+			unsigned kind = (req & 1) ? 0 : 1;
+			uint64_t ns = 0;
+			absolutetime_to_nanoseconds(ended - began, &ns);
+			pk_n[kind]++;
+			pk_gpu[kind] += ended - began;
+			pk_hist[kind][ns < 100000 ? 0 : ns < 200000 ? 1 : ns < 400000 ? 2 : ns < 800000 ? 3 : ns < 1600000 ? 4 : 5]++;
+			if (pk_prev_end != 0 && queued < pk_prev_end && began > pk_prev_end) {
+				pk_gap += began - pk_prev_end;          /* it was waiting when the chain before it ended */
+				pk_gaps++;
+			}
+			pk_prev_end = ended;
+			unsigned slot = 4;
+			for (unsigned i = 0; i < 4; i++) {
+				if (pk_pid[i].pid == pk_owner || pk_pid[i].n == 0) {
+					slot = i;
+					break;
+				}
+			}
+			if (slot < 4) {
+				pk_pid[slot].pid = pk_owner;
+				pk_pid[slot].n++;
+			}
+		}
 		/* every 10 s: how many chains, how long the GPU ran them, how long they waited for their turn */
 		win_n++;
 		win_gpu += ended - began;
@@ -1286,6 +1324,21 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 			printf("STARLTE GPU QUEUE (%llu s): %llu chains, gpu busy %llu%% avg %llu us (max %llu), queued avg %llu us, "
 			    "deepest %u, %llu naps\n", window / NSEC_PER_SEC, win_n, gpu * 100 / window, gpu / win_n / 1000,
 			    gmax / 1000, wait / win_n / 1000, deepest, win_naps);
+			if (sgu_prof) {
+				uint64_t g[2] = { 0, 0 }, gap = 0;
+				absolutetime_to_nanoseconds(pk_gpu[0], &g[0]);
+				absolutetime_to_nanoseconds(pk_gpu[1], &g[1]);
+				absolutetime_to_nanoseconds(pk_gap, &gap);
+				printf("STARLTE GPU QUEUE prof: fragment %llu avg %llu us [%llu %llu %llu %llu %llu %llu], vertex/tiler %llu avg %llu us "
+				    "[%llu %llu %llu %llu %llu %llu], idle between waiting chains avg %llu us (%llu), by pid %d:%llu %d:%llu %d:%llu\n",
+				    pk_n[0], pk_n[0] ? g[0] / pk_n[0] / 1000 : 0, pk_hist[0][0], pk_hist[0][1], pk_hist[0][2], pk_hist[0][3],
+				    pk_hist[0][4], pk_hist[0][5], pk_n[1], pk_n[1] ? g[1] / pk_n[1] / 1000 : 0, pk_hist[1][0], pk_hist[1][1],
+				    pk_hist[1][2], pk_hist[1][3], pk_hist[1][4], pk_hist[1][5], pk_gaps ? gap / pk_gaps / 1000 : 0, pk_gaps,
+				    pk_pid[0].pid, pk_pid[0].n, pk_pid[1].pid, pk_pid[1].n, pk_pid[2].pid, pk_pid[2].n);
+				pk_n[0] = pk_n[1] = pk_gpu[0] = pk_gpu[1] = pk_gap = pk_gaps = 0;
+				bzero(pk_hist, sizeof(pk_hist));
+				bzero(pk_pid, sizeof(pk_pid));
+			}
 			win_t0 = ended;
 			win_gpu = win_gpu_max = win_wait = win_n = win_naps = 0;
 			lck_mtx_lock(&sgu_q_lock);
@@ -1318,6 +1371,7 @@ sgu_q_enabled(void)
 			if (PE_parse_boot_argn("sgu_flushred", &flushred, sizeof(flushred))) {
 				sgu_flushred = flushred != 0;
 			}
+			(void)PE_parse_boot_argn("sgu_prof", &sgu_prof, sizeof(sgu_prof));
 			sgu_q_on = (sweet_speed_flags() & 262144) != 0;
 			sgu_q_checked = 1;
 			printf("STARLTE GPU QUEUE: %s (sweetspeed&262144), spin %u us, nap %u us, depth %u, flush reduction %s\n",
@@ -1353,6 +1407,7 @@ sgu_q_enqueue(uint64_t jc, uint32_t requirements)
 	sgu_q[at].req = requirements;
 	sgu_q[at].flush = sgu_flushred ? sg_rd(sg_gpu, 0x38) : 0;       /* LATEST_FLUSH, as of this submit */
 	sgu_q[at].seq = seq;
+	sgu_q[at].pid = sgu_prof ? proc_selfpid() : 0;
 	sgu_q[at].queued = mach_absolute_time();
 	if (++sgu_q_count > sgu_q_deepest) {
 		sgu_q_deepest = sgu_q_count;
@@ -1360,6 +1415,14 @@ sgu_q_enqueue(uint64_t jc, uint32_t requirements)
 	lck_mtx_unlock(&sgu_q_lock);
 	wakeup((caddr_t)&sgu_q_count);
 	return seq;
+}
+
+/* How many app chains are queued or running (the framebuffer's sweetfb_prof asks at a tick that has no new frame). */
+unsigned starlte_gpu_user_pending(void);
+unsigned
+starlte_gpu_user_pending(void)
+{
+	return sgu_q_count;
 }
 
 /* The number of the last chain an app has submitted (0: none, or no queue): what a frame shown now must wait for. */

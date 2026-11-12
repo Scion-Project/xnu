@@ -20,6 +20,8 @@
  * input (st_script) for unattended test boots.
  */
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
+/* when the scripted input (sweetspeed&4096) saw the first frame, 0 before: read by the burst sampler */
+unsigned long long starlte_touch_script_t0;
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/sysctl.h>
@@ -935,6 +937,7 @@ st_script_thread(void *arg, __unused wait_result_t wr)
 	}
 	uint64_t start_ns;
 	absolutetime_to_nanoseconds(sweet_fb_first_present, &start_ns);
+	starlte_touch_script_t0 = mach_absolute_time();      /* (bsd/dev/sweet_sample.c: the burst sampler's window) */
 	printf("STARLTE TOUCH: first frame on the panel; scripted input starts\n");
 	const struct st_step *script;
 	unsigned count;
