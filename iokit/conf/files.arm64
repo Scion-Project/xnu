@@ -25,3 +25,4 @@ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitc
 iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp             optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/hid/SweetHIDSystem.cpp                          optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/hid/SweetHIDSensors.cpp                         optional iokitcpp scion_generic_arm64
