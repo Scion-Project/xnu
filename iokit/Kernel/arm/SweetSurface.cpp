@@ -497,6 +497,8 @@ public:
 
 OSDefineMetaClassAndStructors(IOSurfaceRootUserClient, IOUserClient);
 
+extern "C" uint32_t sweet_speed_flags(void);
+
 static uint64_t sweet_surf_logged;      /* selectors / traps already logged (< 64) */
 
 static void
@@ -1074,9 +1076,15 @@ IOSurfaceRootUserClient::externalMethodInner(uint32_t selector, IOExternalMethod
 		 * the 0x28 form's maxima: +0x08 bytes per row, +0x10 width, +0x18 height
 		 * (u64; with zeros every maximum is 0). +0x0 / +0x4 are the offset and
 		 * row alignment masks (IOSurfaceClientAlignProperty). Filled for macOS
-		 * callers only (PLATFORM_MACOS = 1): iOS 26 keeps the answer it boots with.
+		 * callers (PLATFORM_MACOS = 1); iOS callers keep the zeros they boot with
+		 * unless sweetspeed&268435456 is set.
+		 *
+		 * iOS 27's framework reads the same three fields (IOSurfaceGetPropertyMaximum
+		 * of width, height and bytes per row is 0 for every iOS process without the
+		 * bit). One known reader: Core Image's software context takes its largest
+		 * texture from them.
 		 */
-		if (len == 0x28 && proc_platform(current_proc()) == 1) {
+		if (len == 0x28 && (proc_platform(current_proc()) == 1 || (sweet_speed_flags() & 268435456) != 0)) {
 			put64(limits, 0x08, (uint64_t)SWEET_SURFACE_MAX_DIM * 64);
 			put64(limits, 0x10, SWEET_SURFACE_MAX_DIM);
 			put64(limits, 0x18, SWEET_SURFACE_MAX_DIM);
