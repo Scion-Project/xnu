@@ -1567,6 +1567,47 @@ starlte_gpu_user_wait_seq(uint64_t seq, bool block)
 	return ret;
 }
 
+/*
+ * Wait for one chain by its number, for at most timeout_ns (0: only look), and say how far the GPU has come (*done: the
+ * number of the last chain finished). 0: that chain is done. For a client whose fences each stand for a chain of its own
+ * (StarbiteMali's WAIT_SEQ): a wait for the whole queue holds a thread for work that is not its own.
+ */
+int starlte_gpu_user_wait_seq_for(uint64_t seq, uint64_t timeout_ns, uint64_t *done);
+int
+starlte_gpu_user_wait_seq_for(uint64_t seq, uint64_t timeout_ns, uint64_t *done)
+{
+	*done = seq;
+	if (!sgu_ready) {
+		return 0;
+	}
+	if (timeout_ns > 3000ull * NSEC_PER_MSEC) {
+		timeout_ns = 3000ull * NSEC_PER_MSEC;   /* (as the other waits: a hung chain is ended by the worker after 2 s) */
+	}
+	if (sgu_q_enabled()) {
+		uint64_t deadline;
+		clock_interval_to_deadline((uint32_t)(timeout_ns / NSEC_PER_USEC), NSEC_PER_USEC, &deadline);
+		lck_mtx_lock(&sgu_q_lock);
+		if (seq > sgu_q_seq) {
+			seq = sgu_q_seq;                /* (a number never given: nothing to wait for beyond what is queued) */
+		}
+		while (timeout_ns != 0 && sgu_q_done < seq && mach_absolute_time() < deadline) {
+			(void)lck_mtx_sleep_deadline(&sgu_q_lock, LCK_SLEEP_DEFAULT, (event_t)&sgu_q_done, THREAD_UNINT, deadline);
+		}
+		*done = sgu_q_done;
+		int ret = sgu_q_done >= seq ? 0 : ETIMEDOUT;
+		lck_mtx_unlock(&sgu_q_lock);
+		return ret;
+	}
+	lck_mtx_lock(&sg_lock);
+	if (seq > sgu_seq_done) {
+		(void)sgu_retire_locked(timeout_ns != 0);
+	}
+	*done = sgu_seq_done;
+	int ret = seq <= sgu_seq_done ? 0 : ETIMEDOUT;
+	lck_mtx_unlock(&sg_lock);
+	return ret;
+}
+
 static void
 sg_jobs(vm_offset_t pmu)
 {
