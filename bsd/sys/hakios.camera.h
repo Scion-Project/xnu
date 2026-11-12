@@ -37,13 +37,15 @@ struct hakios_camera_frame {
 	uint32_t        frame_lines_min; /* the mode's own length: the shortest frame */
 	uint32_t        frame_lines_max; /* the longest frame it may be given */
 	uint32_t        margin;         /* exposure_lines is at most frame_lines - margin */
-	uint32_t        sensor;         /* which: 0 the macro, 1 the wide, 2 the front, 3 the ultra-wide camera */
+	uint32_t        sensor;         /* which: 0 the macro, 1 the wide, 2 the front, 3 the ultra-wide, 4 the telephoto camera
+	                                 * (HAKIOS_CAMERA_SENSOR_TELE: Star2's S5K3M3) */
 	uint32_t        focus;          /* the lens's position as last set, 0 (the furthest) to 1023: HAKIOS_CAMERA_NO_FOCUS where it
 	                                 * has no motor (or it does not answer) */
 	uint32_t        reserved[5];
 };
 
 #define HAKIOS_CAMERA_NO_FOCUS 0xffffffffu
+#define HAKIOS_CAMERA_SENSOR_TELE 4u    /* the telephoto camera's number in `sensor' and HAKIOS_CAMERA_SENSOR */
 
 enum {
 	HAKIOS_CAMERA_EXPOSURE = 1,    /* a: lines, b: gain, c: frame lines (0: the shortest that holds the exposure) */
