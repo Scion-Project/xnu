@@ -35,6 +35,24 @@
 #include <sys/param.h>
 #include <sys/time.h>
 
+#ifdef __linux__
+/* strlcat is provided by libc on Darwin and the BSDs, but not by glibc. */
+static size_t
+strlcat(char *dst, const char *src, size_t size)
+{
+	size_t dstlen = strnlen(dst, size);
+	size_t srclen = strlen(src);
+
+	if (dstlen < size) {
+		size_t available = size - dstlen - 1;
+		size_t copy = srclen < available ? srclen : available;
+		memcpy(dst + dstlen, src, copy);
+		dst[dstlen + copy] = '\0';
+	}
+	return dstlen + srclen;
+}
+#endif
+
 void usage(void);
 
 int
