@@ -76,6 +76,62 @@ static struct {
 	uint64_t empty_depth;
 } sweet_fb_pf;
 static uint64_t sweet_fb_pf_stamp;                              /* when the pending swap was recorded */
+/*
+ * boot-arg sweetfb_trace=S (off by default): the order of things, once. A ring of the last 768 frame events with their
+ * times; S seconds after the scripted input (sweetspeed&4096) saw its first frame the ring is printed, oldest first, as
+ * "FBT: <microseconds since the first one printed><letter><number> ..." (twelve to a line):
+ *   T a tick begins (number: app chains queued or running)      F the tick takes a frame (its swap's number)
+ *   G that frame's chains are done                              P its present is done
+ *   S a swap call comes in (chains queued)                      R the swap is recorded (it was held until now)
+ *   B the GPU's queue gets its first chain after being empty    E the queue runs empty (chains run since B)
+ * One store and a clock read an event; nothing is printed until the dump.
+ */
+static uint32_t sweet_fb_trace;
+static struct {
+	uint64_t at;
+	uint32_t arg;
+	char what;
+} sweet_fb_tr[768];
+static volatile uint32_t sweet_fb_tr_n;
+static bool sweet_fb_tr_dumped;
+extern "C" unsigned long long starlte_touch_script_t0;         /* bsd/dev/starlte_touch.c */
+extern "C" void sweet_fb_trace_event(char what, uint32_t arg);
+
+extern "C" void
+sweet_fb_trace_event(char what, uint32_t arg)
+{
+	if (!sweet_fb_trace || sweet_fb_tr_dumped) {
+		return;
+	}
+	uint32_t at = __atomic_fetch_add(&sweet_fb_tr_n, 1, __ATOMIC_RELAXED) % 768;
+	sweet_fb_tr[at].at = mach_absolute_time();
+	sweet_fb_tr[at].arg = arg;
+	sweet_fb_tr[at].what = what;
+}
+
+static void
+sweet_fb_trace_dump(void)
+{
+	sweet_fb_tr_dumped = true;
+	uint32_t n = sweet_fb_tr_n, count = n < 768 ? n : 768, first = n < 768 ? 0 : n % 768;
+	uint64_t t0 = sweet_fb_tr[first].at;
+	char line[200];
+	int len = 0;
+	for (uint32_t i = 0; i < count; i++) {
+		uint32_t at = (first + i) % 768;
+		uint64_t ns = 0;
+		absolutetime_to_nanoseconds(sweet_fb_tr[at].at - t0, &ns);
+		len += snprintf(line + len, sizeof(line) - (size_t)len, " %llu%c%u", ns / 1000, sweet_fb_tr[at].what, sweet_fb_tr[at].arg);
+		if ((i % 12) == 11 || i + 1 == count) {
+			IOLog("FBT:%s\n", line);
+			len = 0;
+			if ((i % 96) == 95) {
+				IOSleep(20);            /* (the console's reader is slower than this loop) */
+			}
+		}
+	}
+	IOLog("FBT: done, %u events\n", count);
+}
 extern "C" unsigned starlte_gpu_user_pending(void);            /* bsd/dev/starlte_gpu.c: app chains queued or running */
 
 static uint32_t sweet_fb_gaps[5];       /* vsync ticks between presented frames (sweetspeed&16384, see the present path) */
@@ -508,6 +564,7 @@ AppleCLCD::start(IOService *provider)
 	}
 	PE_parse_boot_argn("sweetfb_relbuf", &sweet_fb_relbuf, sizeof(sweet_fb_relbuf));
 	PE_parse_boot_argn("sweetfb_prof", &sweet_fb_prof, sizeof(sweet_fb_prof));
+	PE_parse_boot_argn("sweetfb_trace", &sweet_fb_trace, sizeof(sweet_fb_trace));
 	if (sweet_fb_relbuf) {
 		setProperty("SupportRelbufInfoCb", 1ULL, 32);
 		IOLog("SWEET FB: sweetfb_relbuf=1: SupportRelbufInfoCb published, relbuf info sent per swap\n");
@@ -587,6 +644,18 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		return;
 	}
 	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (sweet_fb_trace && !sweet_fb_tr_dumped) {
+		sweet_fb_trace_event('T', starlte_gpu_user_pending());
+		uint64_t since = 0;
+		if (starlte_touch_script_t0 != 0) {
+			absolutetime_to_nanoseconds(now - starlte_touch_script_t0, &since);
+			if (since >= (uint64_t)sweet_fb_trace * NSEC_PER_SEC) {
+				sweet_fb_trace_dump();
+			}
+		}
+	}
+#endif
 	uint64_t pf_stamp = 0;
 	if (sweet_fb_prof) {
 		if (sweet_fb_pf.last_tick_at != 0) {
@@ -631,9 +700,15 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 	}
 	IOLockUnlock(fb->fLock);
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (rec != NULL) {
+		sweet_fb_trace_event('F', sweet_fb_swap_id(rec));
+	}
 	if (rec != NULL && recSeq != 0) {
 		/* asleep, not spinning, until this frame's own chains are done (not the next frame's, queued since) */
 		(void)starlte_gpu_user_wait_seq(recSeq, true);
+	}
+	if (rec != NULL) {
+		sweet_fb_trace_event('G', 0);
 	}
 	uint64_t pf_woke = sweet_fb_prof ? mach_absolute_time() : 0;
 #else
@@ -644,6 +719,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		uint64_t before = fb->fPerfLog ? mach_absolute_time() : 0;
 #endif
 		uint64_t bytes = fb->present(rec);
+		sweet_fb_trace_event('P', 0);
 		if (sweet_fb_relbuf) {
 			fb->relbuf(sweet_fb_swap_id(rec));
 		}
@@ -716,9 +792,10 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 				uint64_t sw = sweet_fb_pf.swaps ? sweet_fb_pf.swaps : 1, fr = sweet_fb_pf.frames ? sweet_fb_pf.frames : 1;
 				uint64_t tk = sweet_fb_pf.ticks ? sweet_fb_pf.ticks : 1;
 				IOLog("A5XELTE FB prof: %llu swaps held avg %llu us (max %llu) | %llu frames: tick slept for the GPU avg %llu us "
-				    "(max %llu), present avg %llu us, swap to shown avg %llu us (max %llu) | ticks avg %llu us (max %llu) | "
-				    "ticks with no new frame: in a swap call %u, drawing (GPU depth avg %llu) %u, nothing on the GPU %u\n",
-				    sweet_fb_pf.swaps, v[0] / sw, v[1], sweet_fb_pf.frames, v[2] / fr, v[3], v[4] / fr, v[5] / fr, v[6],
+				    "(max %llu), present avg %llu us, swap to shown avg %llu us (max %llu)\n",
+				    sweet_fb_pf.swaps, v[0] / sw, v[1], sweet_fb_pf.frames, v[2] / fr, v[3], v[4] / fr, v[5] / fr, v[6]);
+				IOLog("A5XELTE FB prof2: ticks avg %llu us (max %llu); with no new frame: in a swap call %u, "
+				    "drawing (GPU depth avg %llu) %u, nothing on the GPU %u\n",
 				    v[7] / tk, v[8], sweet_fb_pf.empty_inswap,
 				    sweet_fb_pf.empty_gpu ? sweet_fb_pf.empty_depth / sweet_fb_pf.empty_gpu : 0, sweet_fb_pf.empty_gpu,
 				    sweet_fb_pf.empty_idle);
@@ -949,6 +1026,7 @@ AppleCLCD::swap(const uint8_t *rec, uint32_t size)
 	static uint64_t prevSwapSeq;
 	uint64_t prev = __atomic_exchange_n(&prevSwapSeq, seq, __ATOMIC_RELAXED);
 	uint64_t pf_t0 = sweet_fb_prof ? mach_absolute_time() : 0;
+	sweet_fb_trace_event('S', starlte_gpu_user_pending());
 	if (sweet_fb_prof) {
 		(void)__atomic_add_fetch(&sweet_fb_pf_inswap, 1, __ATOMIC_RELAXED);
 	}
@@ -968,6 +1046,7 @@ AppleCLCD::swap(const uint8_t *rec, uint32_t size)
 #else
 	uint64_t seq = 0;
 #endif
+	sweet_fb_trace_event('R', sweet_fb_swap_id(rec));
 	IOLockLock(fLock);
 	uint32_t replaced = fDirty ? sweet_fb_swap_id(fPending) : 0;
 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_MAX);

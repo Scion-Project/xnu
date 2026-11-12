@@ -1169,6 +1169,8 @@ static struct {
  */
 static uint32_t sgu_prof;
 extern int proc_selfpid(void);
+extern void sweet_fb_trace_event(char what, uint32_t arg);     /* iokit/Kernel/arm/SweetFramebuffer.cpp (sweetfb_trace) */
+static uint32_t sgu_trace_run;                                  /* chains run since the queue was last empty */
 static unsigned sgu_q_head, sgu_q_count, sgu_q_deepest;
 static uint64_t sgu_q_seq, sgu_q_done;                  /* last number given, last number done */
 static bool sgu_q_on, sgu_q_started;
@@ -1327,6 +1329,11 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 		sgu_q_head = (sgu_q_head + 1) % SGU_QUEUE;
 		sgu_q_count--;
 		sgu_q_done = seq;
+		sgu_trace_run++;
+		if (sgu_q_count == 0) {
+			sweet_fb_trace_event('E', sgu_trace_run);
+			sgu_trace_run = 0;
+		}
 		unsigned deepest = sgu_q_deepest;
 		lck_mtx_unlock(&sgu_q_lock);
 		wakeup((caddr_t)&sgu_q_done);
@@ -1463,6 +1470,9 @@ sgu_q_enqueue(uint64_t jc, uint32_t requirements)
 	sgu_q[at].queued = mach_absolute_time();
 	if (++sgu_q_count > sgu_q_deepest) {
 		sgu_q_deepest = sgu_q_count;
+	}
+	if (sgu_q_count == 1) {
+		sweet_fb_trace_event('B', 0);
 	}
 	lck_mtx_unlock(&sgu_q_lock);
 	wakeup((caddr_t)&sgu_q_count);
