@@ -420,10 +420,26 @@ sweet_amfi_syscall(struct proc *p, int call, user_addr_t arg)
 		/*
 		 * amfi_interface_query_bootarg_state(uint64_t *state) (iOS 27 libxpc,
 		 * AppleMobileFileIntegrity.framework): arg = user pointer to a
-		 * uint64_t. lsd asked at start. iOS 27 on STARLTE: answer 0 (no
-		 * AMFI boot-args in effect), as on a stock device.
+		 * uint64_t. iOS 27 ExtensionFoundation (-[_EXDefaults
+		 * enforceXPCCacheCodeSigning]) reads (state & 0x86) to decide whether
+		 * to skip code-signing enforcement on the XPC extension-point cache
+		 * (/System/Library/xpc/extensions.plist). We have no AMFI trust cache,
+		 * so with state 0 EF rejects that cache and NONE of the framework-
+		 * declared extension points register (com.apple.posterkit.provider ->
+		 * wallpaper picker dead; com.apple.widgetkit-extension -> widgets dead;
+		 * app/extension discovery degraded). With sweet_extkit_unsigned_cache=1
+		 * report bits 0x86 so the cache loads from disk unverified, matching a
+		 * genuine device booted with the corresponding AMFI boot-args (and
+		 * consistent with this build's existing cs_enforcement_disable /
+		 * launchd_unsecure_cache posture). OFF by default. Proven-equivalent
+		 * root-side workaround: FeatureFlag ExtensionKit
+		 * enforce_xpc_cache_code_signing=false.
 		 */
 		uint64_t state = 0;
+		uint32_t on = 0;
+		if (PE_parse_boot_argn("sweet_extkit_unsigned_cache", &on, sizeof(on)) && on) {
+			state = 0x86;   /* bits 1,2,7: EF's codeSigningEnforcementIsDisabled test */
+		}
 		return copyout(&state, arg, sizeof(state));
 	}
 	if (call == 0x66) {
