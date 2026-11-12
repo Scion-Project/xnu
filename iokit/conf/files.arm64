@@ -15,6 +15,7 @@ iokit/Kernel/arm/SweetKeyStore.cpp                               optional iokitc
 iokit/Kernel/arm/SweetWatchdog.cpp                               optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/SweetSurface.cpp                                optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp scion_generic_arm64
+iokit/Kernel/hakios.physmap.cpp                                  optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/StarbiteMali.cpp                                optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/A5XELTEGPU.cpp                                 optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp scion_generic_arm64

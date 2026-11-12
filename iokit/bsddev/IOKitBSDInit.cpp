@@ -826,6 +826,10 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		hakios_extra_ram_canary_start();
 		extern void hakios_exynos_pcie_init(void);
 		hakios_exynos_pcie_init();
+		/* Boot-arg cam_s9=N: Scion's front camera driver (bsd/dev/hakios.exynos_camera.c; its lens with cam_af=N,
+		 * bsd/dev/hakios.ak737x.c); off: nothing mapped, nothing powered. */
+		extern void hakios_exynos_camera_init(void);
+		hakios_exynos_camera_init();
 		/* Boot-arg dpu_probe=1: Scion's DPU scan-out service, its read-only probe (bsd/dev/hakios.exynos_dpu.c). */
 		extern void hakios_exynos_dpu_boot_probe(void);
 		hakios_exynos_dpu_boot_probe();

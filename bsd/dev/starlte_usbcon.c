@@ -90,6 +90,7 @@ loader_log_line(const char *line)
 void loader_return(void);
 extern void starlte_return_to_recovery(void);
 void loader_return(void) { starlte_return_to_recovery(); }
+/* (the front camera is powered down on the way: starlte_reboot_recovery(), bsd/dev/herolte_ufs.c) */
 void hakios_var_save_on_return(void);
 void hakios_var_save_on_return(void) {}
 void hakios_ufs_summary(const char *when, int how);
@@ -144,12 +145,11 @@ hakios_say(const char *format, ...)
 	return 0;
 }
 
-/* the console's camshot/irshot/swipe and the kern.hakios sysctl node, which this tree does not have */
+/* the console's irshot/swipe and the kern.hakios sysctl node, which this tree does not have (camshot: the front
+ * camera's driver, bsd/dev/hakios.exynos_camera.c, boot-arg cam_s9=6 or 7) */
 #include <sys/sysctl.h>
 SYSCTL_NODE(_kern, OID_AUTO, hakios, CTLFLAG_RW | CTLFLAG_LOCKED, NULL, "hakios (USB console only)");
 void hakios_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
 void hakios_touch_post(__unused uint32_t type, __unused uint32_t finger, __unused uint32_t x, __unused uint32_t y) {}
-const char *hakios_exynos_camera_shot(uint32_t n, int pattern);
-const char *hakios_exynos_camera_shot(__unused uint32_t n, __unused int pattern) { return "no camera driver on this kernel"; }
 const char *hakios_exynos_iris_shot(uint32_t n);
 const char *hakios_exynos_iris_shot(__unused uint32_t n) { return "no iris driver on this kernel"; }
