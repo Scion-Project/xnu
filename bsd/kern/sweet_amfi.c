@@ -24,6 +24,8 @@
  */
 #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 #include <kern/debug.h>
+#include <kern/kalloc.h>
+#include <machine/atomic.h>
 #include <kern/startup.h>
 #include <libkern/amfi/amfi.h>
 #include <mach/kern_return.h>
@@ -287,14 +289,82 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
  */
 static uint64_t sweet_sandbox_seen;
 
+/*
+ * Sandbox extensions (boot-arg sweetspeed&0x2000000, off by default). A process hands another one
+ * the right to a file as a token: sandbox_extension_issue_* (operation 5) makes it,
+ * sandbox_extension_consume (6) turns it into a handle, release (7) gives the handle back. With no
+ * sandbox every process already has every right, so a token grants nothing, but the programs check
+ * that they got one: PosterKit logs "failed to issue sandbox extension to PID ..." for every poster
+ * path it sends to a poster extension. With the bit, issue answers a token (the class and the path,
+ * readable, behind a fixed prefix) and consume answers a handle (a counter); nothing is recorded
+ * and nothing is checked. Argument layouts as libsystem_sandbox of iOS 27.0.1 passes them:
+ *   issue:   { class, type, data, flags, token buffer (0x3ff0 bytes), pid, flags2 }, 8 bytes each
+ *   consume: { token, its length with the NUL, address of an int64 handle }
+ */
+#define SWEET_SPEED_SBX_EXT     0x2000000
+#define SWEET_SBX_TOKEN_MAX     1280
+extern uint32_t sweet_speed_flags(void);        /* boot-arg sweetspeed (osfmk/arm64/sweet_a64e.c) */
+static _Atomic int64_t sweet_sandbox_handle;
+
 static int
-sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
+sweet_sandbox_extension_issue(user_addr_t arg)
+{
+	struct { uint64_t cls, type, data, flags, token, pid, flags2; } a;
+	char cls[128] = "", data[1024] = "";
+	char *token;
+	size_t done;
+	int error;
+
+	if ((error = copyin(arg, &a, sizeof(a))) != 0) {
+		return error;
+	}
+	if (a.token == 0) {
+		return EINVAL;
+	}
+	if (a.cls != 0 && copyinstr((user_addr_t)a.cls, cls, sizeof(cls), &done) != 0) {
+		cls[0] = 0;
+	}
+	if (a.data != 0 && copyinstr((user_addr_t)a.data, data, sizeof(data), &done) != 0) {
+		data[0] = 0;
+	}
+	token = kalloc_data(SWEET_SBX_TOKEN_MAX, Z_WAITOK | Z_ZERO);
+	if (token == NULL) {
+		return ENOMEM;
+	}
+	snprintf(token, SWEET_SBX_TOKEN_MAX, "scion-no-sandbox;%llu;%s;%s", (unsigned long long)a.type, cls, data);
+	error = copyout(token, (user_addr_t)a.token, strlen(token) + 1);
+	kfree_data(token, SWEET_SBX_TOKEN_MAX);
+	return error;
+}
+
+static int
+sweet_sandbox_extension_consume(user_addr_t arg)
+{
+	struct { uint64_t token, length, handle; } a;
+	int64_t handle;
+	int error;
+
+	if ((error = copyin(arg, &a, sizeof(a))) != 0) {
+		return error;
+	}
+	if (a.handle == 0) {
+		return EINVAL;
+	}
+	handle = os_atomic_inc(&sweet_sandbox_handle, relaxed);
+	return copyout(&handle, (user_addr_t)a.handle, sizeof(handle));
+}
+
+static int
+sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
 {
 	if (call >= 0 && call < 64 && !(sweet_sandbox_seen & (1ULL << call))) {
 		sweet_sandbox_seen |= 1ULL << call;
 		char name[32];
 		proc_name(proc_pid(p), name, sizeof(name));
 		printf("SWEET Sandbox: %s op %d\n", name, call);
+	}
+	if ((call == 5 || call == 6) && (sweet_speed_flags() & SWEET_SPEED_SBX_EXT) != 0) {
+		return call == 5 ? sweet_sandbox_extension_issue(arg) : sweet_sandbox_extension_consume(arg);
 	}
 	switch (call) {
 	case 4:         /* container path (audit token / pid) */

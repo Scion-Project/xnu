@@ -163,6 +163,7 @@ static void sleh_interrupt_handler_prologue(arm_saved_state_t *, unsigned int ty
 static void sleh_interrupt_handler_epilogue(void);
 
 static void handle_svc(arm_saved_state_t *);
+extern volatile uint32_t sweet_wdog_mark;       /* osfmk/arm64/sweet_a64e.c: 0 while the hang watchdog waits for a system call */
 static void handle_mach_absolute_time_trap(arm_saved_state_t *);
 static void handle_mach_continuous_time_trap(arm_saved_state_t *);
 
@@ -2922,10 +2923,16 @@ handle_svc(arm_saved_state_t *state)
 
 		/* Counting perhaps better in the handler, but this is how it's been done */
 		thread->syscalls_mach++;
+		if (__improbable(sweet_wdog_mark == 0)) {
+			sweet_wdog_mark = 1;    /* sweetwdog: user space is alive (osfmk/arm64/sweet_a64e.c) */
+		}
 		mach_syscall(state);
 	} else {
 		/* Counting perhaps better in the handler, but this is how it's been done */
 		thread->syscalls_unix++;
+		if (__improbable(sweet_wdog_mark == 0)) {
+			sweet_wdog_mark = 1;
+		}
 		p = get_bsdthreadtask_info(thread);
 
 		assert(p);

@@ -113,6 +113,9 @@ bsd/dev/hakios.exynos_usb.c	optional scion_generic_arm64
 bsd/dev/starlte_usbcon.c	optional scion_generic_arm64
 bsd/dev/starlte_muic.c	optional scion_generic_arm64
 bsd/dev/hakios.exynos_hsi2c.c	optional scion_generic_arm64
+bsd/dev/hakios.exynos_camera.c	optional scion_generic_arm64
+bsd/dev/hakios.ak737x.c	optional scion_generic_arm64
+bsd/dev/hakios.exynos_camera_rear.c	optional scion_generic_arm64
 bsd/dev/starlte_gpu.c	optional scion_generic_arm64
 bsd/dev/starlte_overlay.c	optional scion_generic_arm64
 bsd/dev/starlte_sd.c	optional scion_generic_arm64
@@ -473,6 +476,7 @@ bsd/sweet_hfs/core/rangelist.c		optional sweet_hfs
 bsd/sweet_hfs/hfs_encodings/hfs_encodinghint.c		optional sweet_hfs
 bsd/sweet_hfs/hfs_encodings/hfs_encodings.c		optional sweet_hfs
 bsd/sweet_hfs/sweet_hfs_iokit.c		optional sweet_hfs
+bsd/sweet_hfs/sweet_hfs_pclass.c		optional sweet_hfs
 
 bsd/kern/kern_csr.c			optional config_csr
 bsd/kern/kern_debug.c			standard

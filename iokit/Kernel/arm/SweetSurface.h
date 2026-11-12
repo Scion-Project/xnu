@@ -40,6 +40,10 @@ public:
 	IOBufferMemoryDescriptor *state;        /* shared state page, read-only for users */
 	IOMemoryMap              *kernelMap;    /* lazily created for kernel copies */
 	bool                      prepared;     /* memory is a client's own, wired by prepare() */
+	/* memory is a snapshot of a client's own that could not be wired (sweet_surface_wrap_memory): where it came from */
+	task_t                    snapTask;
+	uint64_t                  snapAddress, snapSize;
+	uint32_t                  snapLead, snapLooks, snapChanges;
 
 	bool init() APPLE_KEXT_OVERRIDE { return OSObject::init(); }
 	void free() APPLE_KEXT_OVERRIDE;

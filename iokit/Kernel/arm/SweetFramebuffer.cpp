@@ -148,6 +148,8 @@ extern "C" bool sweet_fb_last_surface(uint64_t *pages, unsigned max_pages, unsig
 #define herolte_gpu_present_map starlte_gpu_present_map
 #define herolte_gpu_present_draw starlte_gpu_present_draw
 extern "C" int starlte_gpu_present_ready(void);
+extern "C" uint64_t starlte_gpu_user_seq(void);
+extern "C" int starlte_gpu_user_wait_seq(uint64_t seq, bool block);
 #endif
 extern "C" int herolte_gpu_present_slot(uint32_t id, uint64_t first_pa);
 extern "C" int herolte_gpu_present_map(uint32_t id, const uint64_t *pages, unsigned n);
@@ -250,6 +252,7 @@ public:
 	uint32_t      fSwapID;
 	bool          fConsolePaused;
 	uint8_t       fPending[SWEET_FB_SWAP_REC_MAX];      /* latest swap, not yet shown */
+	uint64_t      fPendingSeq;                          /* the last GPU chain queued when it came (STARLTE, sweetspeed&262144) */
 	bool          fDirty;
 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
@@ -304,6 +307,10 @@ public:
 };
 
 OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
+
+/* the panel's memory as start() found it, for hakios_fb_scanned() below */
+static uintptr_t sweet_fb_scan_base;
+static uint32_t sweet_fb_scan_width, sweet_fb_scan_height, sweet_fb_scan_rowbytes;
 
 bool
 AppleCLCD::start(IOService *provider)
@@ -398,6 +405,10 @@ AppleCLCD::start(IOService *provider)
 		IOLog("SWEET FB: scaled: panel mapping %ux%u for the scaler\n", fWidth, fHeight);
 	}
 	fWorkLoop = IOWorkLoop::workLoop();
+	sweet_fb_scan_base = fPixels;
+	sweet_fb_scan_width = fWidth;
+	sweet_fb_scan_height = fHeight;
+	sweet_fb_scan_rowbytes = fRowBytes;
 	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
 		IOLog("SWEET FB: setup failed\n");
 		OSSafeReleaseNULL(fSurface);    /* stays published: also held by the table */
@@ -492,6 +503,25 @@ AppleCLCD::start(IOService *provider)
 	return true;
 }
 
+/*
+ * The panel's memory for the USB console's "shot" (drivers/usb/hakios.dwc3.c): this board has no vinfo for it to fall
+ * back on (the shot failed with "a picture of 0x0"). 1 ("the shown buffer"), or 0 before the framebuffer has started.
+ */
+extern "C" int hakios_fb_scanned(uintptr_t *base, uint32_t *width, uint32_t *height, uint32_t *rowbytes, unsigned *index);
+extern "C" int
+hakios_fb_scanned(uintptr_t *base, uint32_t *width, uint32_t *height, uint32_t *rowbytes, unsigned *index)
+{
+	if (sweet_fb_scan_base == 0) {
+		return 0;
+	}
+	*base = sweet_fb_scan_base;
+	*width = sweet_fb_scan_width;
+	*height = sweet_fb_scan_height;
+	*rowbytes = sweet_fb_scan_rowbytes;
+	*index = 0;
+	return 1;
+}
+
 void
 AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 {
@@ -541,14 +571,24 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 	}
 #endif
 	uint8_t *rec = NULL;
+	uint64_t recSeq = 0;
 	if (flush) {
 		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_MAX);
 		if (rec != NULL) {
 			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_MAX);
+			recSeq = fb->fPendingSeq;
 			fb->fDirty = false;
 		}
 	}
 	IOLockUnlock(fb->fLock);
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (rec != NULL && recSeq != 0) {
+		/* asleep, not spinning, until this frame's own chains are done (not the next frame's, queued since) */
+		(void)starlte_gpu_user_wait_seq(recSeq, true);
+	}
+#else
+	(void)recSeq;
+#endif
 	if (rec != NULL) {
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
 		uint64_t before = fb->fPerfLog ? mach_absolute_time() : 0;
@@ -809,9 +849,27 @@ AppleCLCD::swap(const uint8_t *rec, uint32_t size)
 		sweet_fb_swap_brightness(rec);
 	}
 #endif
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* with the GPU's chain queue (sweetspeed&262144): the frame is drawn once every chain queued by now is done */
+	uint64_t seq = starlte_gpu_user_seq();
+	/*
+	 * And at most two frames are in flight: this swap returns once the chains of the swap before it are done. The
+	 * window server draws the next frame while the GPU works on this one (the overlap the queue is for), but it
+	 * cannot run further ahead: with nothing to hold it, a scene the GPU needs more than a refresh for would fill
+	 * the queue (256 chains, a dozen frames) and every touch would be answered that many frames late.
+	 */
+	static uint64_t prevSwapSeq;
+	uint64_t prev = __atomic_exchange_n(&prevSwapSeq, seq, __ATOMIC_RELAXED);
+	if (prev != 0 && prev != seq) {
+		(void)starlte_gpu_user_wait_seq(prev, true);
+	}
+#else
+	uint64_t seq = 0;
+#endif
 	IOLockLock(fLock);
 	uint32_t replaced = fDirty ? sweet_fb_swap_id(fPending) : 0;
 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_MAX);
+	fPendingSeq = seq;
 	fDirty = true;
 	IOLockUnlock(fLock);
 	if (sweet_fb_relbuf && replaced != 0) {
@@ -1383,10 +1441,44 @@ AppleCLCD::gpuPresent(SweetSurface *s, int32_t sx, int32_t sy, int32_t w, int32_
 	uint64_t off = (uint64_t)s->offset + (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4;
 	uintptr_t start = s->kernelAddress() + (uintptr_t)off;
 	uintptr_t end = start + (uintptr_t)(h - 1) * s->bytesPerRow + (uintptr_t)w * 4;
-	for (uintptr_t p = start & ~(uintptr_t)63; p < end; p += 64) {
-		__asm__ volatile ("dc cvac, %0" : : "r" (p) : "memory");
+	bool clean = true;
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/*
+	 * sweetspeed&524288: the clean (6 MiB of DC CVAC a frame, on the vsync thread) only when a CPU may have written
+	 * the surface: the first time it is shown, and whenever its seed moved (every CPU writer unlocks with a seed
+	 * bump). A frame the GPU rendered (CoreAnimation on GL or Metal) has nothing in the CPU's caches to clean.
+	 */
+	if ((sweet_fb_sbx & 524288) != 0 && s->state != NULL) {
+		static struct { uint32_t id, seed; addr64_t pa; } seen[8];
+		static unsigned next;
+		static uint64_t skipped, cleaned;
+		uint32_t seed = *(volatile uint32_t *)((uint8_t *)s->state->getBytesNoCopy() + 0xc);
+		unsigned i;
+		for (i = 0; i < 8 && !(seen[i].id == s->id && seen[i].pa == pa0); i++) {
+		}
+		if (i < 8 && seen[i].seed == seed) {
+			clean = false;
+			skipped++;
+		} else {
+			if (i == 8) {
+				i = next++ % 8;
+			}
+			seen[i].id = s->id;
+			seen[i].pa = pa0;
+			seen[i].seed = seed;
+			cleaned++;
+		}
+		if (((skipped + cleaned) % 3600) == 0) {
+			IOLog("SWEET FB: GPU present: %llu frames cleaned first, %llu not (seed unchanged)\n", cleaned, skipped);
+		}
 	}
-	__asm__ volatile ("dsb sy" ::: "memory");
+#endif
+	if (clean) {
+		for (uintptr_t p = start & ~(uintptr_t)63; p < end; p += 64) {
+			__asm__ volatile ("dc cvac, %0" : : "r" (p) : "memory");
+		}
+		__asm__ volatile ("dsb sy" ::: "memory");
+	}
 	if (!herolte_gpu_present_draw(slot, (uint32_t)off, s->bytesPerRow, (uint32_t)w, (uint32_t)h)) {
 		IOLog("SWEET FB: GPU present: %dx%d stride %u not drawn (%u of 8)\n", w, h, s->bytesPerRow, ++failures);
 		return false;
