@@ -727,17 +727,69 @@ starlte_gpu_present_map(uint32_t id, const uint64_t *pages, unsigned n)
  * coherency. False: the caller falls back to the CPU copy; after a GPU
  * fault the present path switches itself off.
  */
+/* The bits of a float that holds a whole number below 2^24 (no floating point in here). */
+static uint32_t
+sgp_float_bits(uint32_t v)
+{
+	if (v == 0) {
+		return 0;
+	}
+	unsigned top = 31 - (unsigned)__builtin_clz(v);
+	return ((127u + top) << 23) | ((v << (23 - top)) & 0x7fffffu);
+}
+
+/*
+ * The blob (tools/ios27/gpu/starlte-g72-tri.c) was generated for one canvas, SG_PRES_CANVAS_W x _H (828 x 1792). Three of
+ * its parts say so and nothing else does: the quad's four corners on the panel (0x500: x y 0 1 each, panel pixels), the
+ * texel coordinates at those corners (0x540: 0 or the canvas' width, 0 or its height), and the texture descriptor's second
+ * word (0x644: width - 1, height - 1 << 16). For another canvas (boot-args sweetfb_lw, sweetfb_lh: a display in the
+ * panel's own shape, 828 x 1702, fills it) they are written here, laid out as the generator does it: the canvas keeps its
+ * shape, at the panel's full height between bars at the sides, or at its full width between bars above and below.
+ */
+#define SGP_BLOB_POS    0x500u
+#define SGP_BLOB_TC     0x540u
+#define SGP_BLOB_TEX_WH 0x644u
+#define SGP_PANEL_W     1440u
+#define SGP_PANEL_H     2960u
+
+static void
+sgp_canvas_locked(uint32_t base, uint32_t w, uint32_t h)
+{
+	uint32_t x0 = 0, x1 = SGP_PANEL_W, y0 = 0, y1 = SGP_PANEL_H;
+	if ((uint64_t)w * SGP_PANEL_H <= (uint64_t)SGP_PANEL_W * h) {
+		uint32_t out_w = (uint32_t)((uint64_t)w * SGP_PANEL_H / h);
+		x0 = (SGP_PANEL_W - out_w) / 2;
+		x1 = x0 + out_w;
+	} else {
+		uint32_t out_h = (uint32_t)((uint64_t)h * SGP_PANEL_W / w);
+		y0 = (SGP_PANEL_H - out_h) / 2;
+		y1 = y0 + out_h;
+	}
+	const uint32_t px[4] = { x0, x1, x0, x1 }, py[4] = { y0, y0, y1, y1 };
+	const uint32_t tx[4] = { 0, w, 0, w }, ty[4] = { 0, 0, h, h };
+	for (unsigned i = 0; i < 4; i++) {
+		sg_put32(base + SGP_BLOB_POS + i * 16 + 0, sgp_float_bits(px[i]));
+		sg_put32(base + SGP_BLOB_POS + i * 16 + 4, sgp_float_bits(py[i]));
+		sg_put32(base + SGP_BLOB_TC + i * 16 + 0, sgp_float_bits(tx[i]));
+		sg_put32(base + SGP_BLOB_TC + i * 16 + 4, sgp_float_bits(ty[i]));
+	}
+	sg_put32(base + SGP_BLOB_TEX_WH, ((h - 1) << 16) | (w - 1));
+}
+
 bool
 starlte_gpu_present_draw(int s, uint32_t off, uint32_t stride, uint32_t w, uint32_t h)
 {
-	if (!sgp_ready || s < 0 || s >= (int)SGP_SLOTS || w != SG_PRES_CANVAS_W ||
-	    h != SG_PRES_CANVAS_H || stride < w * 4) {
+	if (!sgp_ready || s < 0 || s >= (int)SGP_SLOTS || w == 0 || h == 0 || w > 4096 || h > 4096 || stride < w * 4 ||
+	    (uint64_t)stride * h > (uint64_t)SGP_SLOT_PAGES * 4096) {
 		return false;
 	}
 	lck_mtx_lock(&sg_lock);
 	uint32_t base = (uint32_t)(SG_PRES_BLOB_VA - SG_VA);
 	for (unsigned i = 0; i < SG_PRES_BLOB_WORDS; i++) {
 		sg_put32(base + i * 4, sg_pres_blob[i]);
+	}
+	if (w != SG_PRES_CANVAS_W || h != SG_PRES_CANVAS_H) {
+		sgp_canvas_locked(base, w, h);
 	}
 	sg_put64(base + SG_PRES_SURFACE + 0, sgp_slots[s].va + off);
 	sg_put32(base + SG_PRES_SURFACE + 8, stride);
