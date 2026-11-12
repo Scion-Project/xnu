@@ -22,6 +22,7 @@
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
 /* when the scripted input (sweetspeed&4096) saw the first frame, 0 before: read by the burst sampler */
 unsigned long long starlte_touch_script_t0;
+extern unsigned long long sweet_fb_frames_shown;       /* iokit/Kernel/arm/SweetFramebuffer.cpp: frames presented since boot */
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/sysctl.h>
@@ -959,6 +960,11 @@ st_script_thread(void *arg, __unused wait_result_t wr)
 		if (now_ns < at_ns) {
 			st_msleep((unsigned)((at_ns - now_ns) / NSEC_PER_MSEC));
 		}
+		/* the frames shown since the step before this one: the same input every boot, so the counts compare */
+		static unsigned long long shown_before;
+		unsigned long long shown = sweet_fb_frames_shown;
+		printf("STARLTE TOUCH: step %u at %u s: %llu frames shown since the step before\n", i, at_s, shown - shown_before);
+		shown_before = shown;
 		if (home) {
 			printf("STARLTE TOUCH: scripted Home press\n");
 			sweet_hid_key(3, 1);

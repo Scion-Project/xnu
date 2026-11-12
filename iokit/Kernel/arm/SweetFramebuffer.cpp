@@ -96,6 +96,8 @@ static volatile uint32_t sweet_fb_tr_n;
 static bool sweet_fb_tr_dumped;
 extern "C" unsigned long long starlte_touch_script_t0;         /* bsd/dev/starlte_touch.c */
 extern "C" void sweet_fb_trace_event(char what, uint32_t arg);
+/* every frame presented since boot (one thread counts): bsd/dev/starlte_touch.c prints it between the scripted input's steps */
+extern "C" { unsigned long long sweet_fb_frames_shown; }
 
 extern "C" void
 sweet_fb_trace_event(char what, uint32_t arg)
@@ -719,6 +721,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		uint64_t before = fb->fPerfLog ? mach_absolute_time() : 0;
 #endif
 		uint64_t bytes = fb->present(rec);
+		sweet_fb_frames_shown++;
 		sweet_fb_trace_event('P', 0);
 		if (sweet_fb_relbuf) {
 			fb->relbuf(sweet_fb_swap_id(rec));
