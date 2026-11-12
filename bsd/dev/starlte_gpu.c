@@ -1155,6 +1155,10 @@ static uint32_t sgu_busy_req;
 #define SGU_REQ_HALF_NAMED      0x100u
 #define SGU_REQ_HALF_SECOND     0x200u
 static uint32_t sgu_pipe;
+/* diagnostics while sgu_pipe draws wrong tiles: the flushes of a chain started beside another (sgu_pipe_side) and of a
+ * fragment chain that names its half (sgu_pipe_main), 0x1SE: S at the start, E at the end, each 0 none, 1 clean, 3 clean
+ * and invalidate; 0 (default): as every chain. */
+static uint32_t sgu_pipe_side, sgu_pipe_main;
 static bool sgu_side;
 static unsigned sgu_side_js;
 static uint64_t sgu_side_t0, sgu_side_jc;
@@ -1308,14 +1312,19 @@ int starlte_gpu_user_wait_seq(uint64_t seq, bool block);
 
 /* A slot's next chain: where it starts, every shader core, AS1 with its cache flushes. */
 static void
-sgu_slot_next(uint32_t slot, uint64_t jc, uint32_t flush)
+sgu_slot_next(uint32_t slot, uint64_t jc, uint32_t flush, uint32_t flushes)
 {
 	sg_wr(sg_gpu, slot + 0x40, (uint32_t)jc);                       /* HEAD_NEXT */
 	sg_wr(sg_gpu, slot + 0x44, (uint32_t)(jc >> 32));
 	sg_wr(sg_gpu, slot + 0x50, sgp_shaders);                        /* AFFINITY_NEXT */
 	sg_wr(sg_gpu, slot + 0x54, 0);
 	/* AS1, flushes at start and end, priority 8; with sgu_flushred the start's is left out when one happened since `flush` */
-	sg_wr(sg_gpu, slot + 0x58, (8u << 16) | (3u << 8) | (3u << 12) | (sgu_flushred ? (1u << 14) : 0) | 1u);
+	uint32_t at_start = 3, at_end = 3;
+	if (flushes & 0x100) {
+		at_start = (flushes >> 4) & 3;
+		at_end = flushes & 3;
+	}
+	sg_wr(sg_gpu, slot + 0x58, (8u << 16) | (at_start << 8) | (at_end << 12) | (sgu_flushred ? (1u << 14) : 0) | 1u);
 	if (sgu_flushred) {
 		sg_wr(sg_gpu, slot + 0x70, flush);                      /* FLUSH_ID_NEXT */
 	}
@@ -1329,7 +1338,7 @@ sgu_start_locked(uint64_t jc, uint32_t requirements, uint32_t flush)
 	uint32_t slot = JS_BASE(js);
 	sg_wr(sg_gpu, MMU_IRQ_CLEAR, 0xffffffffu);
 	sg_wr(sg_gpu, JOB_IRQ_CLEAR, 0xffffffffu);
-	sgu_slot_next(slot, jc, flush);
+	sgu_slot_next(slot, jc, flush, (sgu_pipe && (requirements & 1) && (requirements & SGU_REQ_HALF_NAMED)) ? sgu_pipe_main : 0);
 	sgu_busy_js = js;
 	sgu_busy_jc = jc;
 	sgu_busy_req = requirements;
@@ -1345,7 +1354,7 @@ sgu_start_side_locked(uint64_t jc, uint32_t requirements, uint32_t flush)
 	unsigned js = (requirements & 1) ? 0 : 1;
 	uint32_t slot = JS_BASE(js);
 	sg_wr(sg_gpu, JOB_IRQ_CLEAR, (1u << js) | (1u << (js + 16)));   /* (this slot's only: the busy chain's stay) */
-	sgu_slot_next(slot, jc, flush);
+	sgu_slot_next(slot, jc, flush, sgu_pipe_side);
 	sgu_side_js = js;
 	sgu_side_jc = jc;
 	sgu_side_req = requirements;
@@ -1566,11 +1575,13 @@ sgu_q_enabled(void)
 			(void)PE_parse_boot_argn("sgu_prof", &sgu_prof, sizeof(sgu_prof));
 			(void)PE_parse_boot_argn("sgu_pipe", &sgu_pipe, sizeof(sgu_pipe));
 			(void)PE_parse_boot_argn("sgu_dump", &sgu_dump, sizeof(sgu_dump));
+			(void)PE_parse_boot_argn("sgu_pipe_side", &sgu_pipe_side, sizeof(sgu_pipe_side));
+			(void)PE_parse_boot_argn("sgu_pipe_main", &sgu_pipe_main, sizeof(sgu_pipe_main));
 			sgu_q_on = (sweet_speed_flags() & 262144) != 0;
 			sgu_q_checked = 1;
 			printf("STARLTE GPU QUEUE: %s (sweetspeed&262144), spin %u us, nap %u us, depth %u, flush reduction %s, "
-			    "two slots at once %s\n", sgu_q_on ? "on" : "off", sgu_q_spin_us, sgu_q_nap_us, sgu_q_depth,
-			    sgu_flushred ? "on" : "off", sgu_pipe ? "on" : "off");
+			    "two slots at once %s (flushes: side %#x main %#x)\n", sgu_q_on ? "on" : "off", sgu_q_spin_us, sgu_q_nap_us,
+			    sgu_q_depth, sgu_flushred ? "on" : "off", sgu_pipe ? "on" : "off", sgu_pipe_side, sgu_pipe_main);
 		}
 		lck_mtx_unlock(&sgu_q_lock);
 	}
