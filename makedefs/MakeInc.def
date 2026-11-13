@@ -1172,6 +1172,8 @@ LDFILES_KERNEL_ONLY = $(TARGET)/all-kpi.exp $(TARGET)/all-alias.exp $(TARGET)/sy
 #
 LD_KERNEL_LIBS	   = -lcc_kext
 LD_KERNEL_ARCHIVES = $(LDFLAGS_KERNEL_SDK) -lfirehose_kernel
+# Scion: the Wi-Fi radio's Linux driver object (scion-kernel tools/mk-brcmfmac.sh), when the build is given one
+LD_KERNEL_ARCHIVES += $(HAKIOS_OBJECTS)
 
 # Link binary support library
 # Scion: Apple's binary support library comes with a KDK, which this build does not use: the parts of the
