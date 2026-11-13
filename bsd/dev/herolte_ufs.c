@@ -467,26 +467,40 @@ ufs_find_partition(const char *want)
 
 /*
  * hakios_ufs_read_partition() (sys/hakios.input.h): a GPT partition of LUN 0 read by name, for Scion's shared drivers.
- * On this tree only RADIO is given (the modem's image, for bsd/dev/hakios.shannon.c, boot-arg cp=N), and only ever
- * read: every other name is refused, so nothing can reach EFS or any other partition this way. It does not touch the
- * root partition's bounds (su.first_block, su.nblocks: what writes are checked against). With dst NULL or len 0 it
- * only gives the partition's size.
+ * On this tree two names are given, and only ever READ (this function has no write path; the UFS write path checks every
+ * write against the root partition's bounds, su.first_block/su.nblocks, which this does not touch):
+ *   RADIO  the modem's image (bsd/dev/hakios.shannon.c, boot-arg cp=N)
+ *   EFS    the modem's non-volatile data, /efs/nv_data.bin, read by the same driver with cp_nv=2 only (the owner's
+ *          decision, 13 Nov 2026: read at boot, kept in RAM, never written, never mounted)
+ * Every other name is refused. With dst NULL or len 0 it only gives the partition's size.
  */
 int hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes);
 int
 hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes)
 {
-	static uint64_t radio_first, radio_blocks;
+	static const char *const names[] = { "RADIO", "EFS" };
+	static uint64_t firsts[2], counts[2];
 	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
+	uint64_t radio_first, radio_blocks;
+	const char *want;
+	unsigned which;
 	int error = 0;
 
-	if (name == NULL || strcmp(name, "RADIO") != 0) {
+	for (which = 0; which < 2; which++) {
+		if (name != NULL && strcmp(name, names[which]) == 0) {
+			break;
+		}
+	}
+	if (which == 2) {
 		return EPERM;
 	}
+	want = names[which];
 	if (!su.ready) {
 		return ENXIO;
 	}
 	lck_mtx_lock(&herolte_ufs_lock);
+	radio_first = firsts[which];
+	radio_blocks = counts[which];
 	if (radio_blocks == 0) {
 		uint64_t entry_lba = 0;
 		uint32_t nent = 0, esz = 0;
@@ -507,17 +521,17 @@ hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint6
 			error = ufs_read_blocks(entry_lba, (nent * esz + UFS_BLOCK - 1) / UFS_BLOCK);
 		}
 		for (uint32_t i = 0; !error && i < nent && radio_blocks == 0; i++) {
-			static const char want[] = "RADIO";
 			const uint8_t *e = b + i * esz;
+			size_t wlen = strlen(want) + 1;
 			uint64_t first, last;
 			unsigned c;
 
-			for (c = 0; c < sizeof(want); c++) {    /* the name with its end, UTF-16 */
-				if ((uint16_t)(e[56 + 2 * c] | e[57 + 2 * c] << 8) != (uint16_t)want[c]) {
+			for (c = 0; c < wlen; c++) {    /* the name with its end, UTF-16 */
+				if ((uint16_t)(e[56 + 2 * c] | e[57 + 2 * c] << 8) != (uint16_t)(uint8_t)want[c]) {
 					break;
 				}
 			}
-			if (c != sizeof(want)) {
+			if (c != wlen) {
 				continue;
 			}
 			memcpy(&first, e + 32, 8);
@@ -530,6 +544,8 @@ hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint6
 		if (!error && radio_blocks == 0) {
 			error = ENOENT;
 		}
+		firsts[which] = radio_first;
+		counts[which] = radio_blocks;
 	}
 	if (!error && bytes != NULL) {
 		*bytes = radio_blocks * UFS_BLOCK;
