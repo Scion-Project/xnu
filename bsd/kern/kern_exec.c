@@ -3963,6 +3963,30 @@ spawn_coalitions_release_all(coalition_t coal[COALITION_NUM_TYPES])
 #endif
 
 #if CONFIG_PERSONAS
+/*
+ * STARLTE (Scion): boot-arg persona_lax=1 (off by default). This port makes no personas, so persona_lookup() fails for every
+ * id and a posix_spawn into a persona ends in ESRCH before the program starts. A rootless package manager becomes root that
+ * way: Sileo (iOS 13 and later) spawns apt-get and dpkg into persona 99 with POSIX_SPAWN_PERSONA_UID/GID 0, and on failure it
+ * returns without a word, so its Confirm button does nothing. With persona_lax=1 a caller that carries
+ * com.apple.private.persona-mgmt (the check stays) and names a persona that does not exist gets what it asked for without
+ * the persona: the child is given the uid, gid and groups of the request; the per-uid process count moves as
+ * persona_proc_adopt() moves it. The 16.5 tree does the same (scion-kernel drivers/core/hakios.exec.c). A persona that does
+ * exist is handled as before.
+ */
+static int spawn_persona_lax_state = -1;
+
+static bool
+spawn_persona_lax(void)
+{
+	if (spawn_persona_lax_state < 0) {
+		int v = 0;
+
+		PE_parse_boot_argn("persona_lax", &v, sizeof(v));
+		spawn_persona_lax_state = v ? 1 : 0;
+	}
+	return spawn_persona_lax_state == 1;
+}
+
 static int
 spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
 {
@@ -3971,6 +3995,10 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
 	kauth_cred_t mycred = kauth_cred_get();
 
 	if (!IOCurrentTaskHasEntitlement( PERSONA_MGMT_ENTITLEMENT)) {
+		if (spawn_persona_lax()) {
+			printf("persona_lax: %s[%d] asks for persona %u without %s: refused\n", proc_best_name(current_proc()),
+			    proc_getpid(current_proc()), px_persona->pspi_id, PERSONA_MGMT_ENTITLEMENT);
+		}
 		return EPERM;
 	}
 
@@ -3982,6 +4010,13 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
 
 	persona = persona_lookup(px_persona->pspi_id);
 	if (!persona) {
+		if (spawn_persona_lax()) {
+			printf("persona_lax: %s[%d] spawns into persona %u, which does not exist: uid %d gid %d given without it\n",
+			    proc_best_name(current_proc()), proc_getpid(current_proc()), px_persona->pspi_id,
+			    (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_UID) ? (int)px_persona->pspi_uid : -1,
+			    (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_GID) ? (int)px_persona->pspi_gid : -1);
+			return 0;
+		}
 		return ESRCH;
 	}
 
@@ -4038,7 +4073,24 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
 	 */
 	persona = persona_lookup(px_persona->pspi_id);
 	if (!persona) {
-		return ESRCH;
+		uid_t old_ruid, new_ruid;
+
+		if (!spawn_persona_lax()) {
+			return ESRCH;
+		}
+		/* persona_lax=1 (see spawn_validate_persona()): the credential of the request, without the persona */
+		old_ruid = kauth_cred_getruid(proc_ucred_unsafe(p));
+		kauth_cred_proc_update(p, PROC_SETTOKEN_SETUGID,
+		    ^bool (kauth_cred_t parent __unused, kauth_cred_t model) {
+			return kauth_cred_model_setpersona(model, px_persona);
+		});
+		new_ruid = kauth_cred_getruid(proc_ucred_unsafe(p));
+		if (new_ruid != old_ruid) {
+			/* fork1() counted the child under the parent's uid; its exit takes it off under the new one */
+			(void)chgproccnt(new_ruid, 1);
+			(void)chgproccnt(old_ruid, -1);
+		}
+		return 0;
 	}
 
 	return persona_proc_adopt(p, persona,
