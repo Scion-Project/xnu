@@ -466,6 +466,96 @@ ufs_find_partition(const char *want)
 }
 
 /*
+ * hakios_ufs_read_partition() (sys/hakios.input.h): a GPT partition of LUN 0 read by name, for Scion's shared drivers.
+ * On this tree only RADIO is given (the modem's image, for bsd/dev/hakios.shannon.c, boot-arg cp=N), and only ever
+ * read: every other name is refused, so nothing can reach EFS or any other partition this way. It does not touch the
+ * root partition's bounds (su.first_block, su.nblocks: what writes are checked against). With dst NULL or len 0 it
+ * only gives the partition's size.
+ */
+int hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes);
+int
+hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes)
+{
+	static uint64_t radio_first, radio_blocks;
+	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
+	int error = 0;
+
+	if (name == NULL || strcmp(name, "RADIO") != 0) {
+		return EPERM;
+	}
+	if (!su.ready) {
+		return ENXIO;
+	}
+	lck_mtx_lock(&herolte_ufs_lock);
+	if (radio_blocks == 0) {
+		uint64_t entry_lba = 0;
+		uint32_t nent = 0, esz = 0;
+
+		error = ufs_read_blocks(1, 1);
+		if (!error && memcmp(b, "EFI PART", 8) != 0) {
+			error = ENXIO;
+		}
+		if (!error) {
+			memcpy(&entry_lba, b + 72, 8);
+			memcpy(&nent, b + 80, 4);
+			memcpy(&esz, b + 84, 4);
+			if (esz != 128 || nent == 0 || nent * esz > BOUNCE_SIZE) {
+				error = ENXIO;
+			}
+		}
+		if (!error) {
+			error = ufs_read_blocks(entry_lba, (nent * esz + UFS_BLOCK - 1) / UFS_BLOCK);
+		}
+		for (uint32_t i = 0; !error && i < nent && radio_blocks == 0; i++) {
+			static const char want[] = "RADIO";
+			const uint8_t *e = b + i * esz;
+			uint64_t first, last;
+			unsigned c;
+
+			for (c = 0; c < sizeof(want); c++) {    /* the name with its end, UTF-16 */
+				if ((uint16_t)(e[56 + 2 * c] | e[57 + 2 * c] << 8) != (uint16_t)want[c]) {
+					break;
+				}
+			}
+			if (c != sizeof(want)) {
+				continue;
+			}
+			memcpy(&first, e + 32, 8);
+			memcpy(&last, e + 40, 8);
+			if (last >= first && last <= UINT32_MAX) {
+				radio_first = first;
+				radio_blocks = last - first + 1;
+			}
+		}
+		if (!error && radio_blocks == 0) {
+			error = ENOENT;
+		}
+	}
+	if (!error && bytes != NULL) {
+		*bytes = radio_blocks * UFS_BLOCK;
+	}
+	if (!error && dst != NULL && len != 0) {
+		if (offset > radio_blocks * UFS_BLOCK || len > radio_blocks * UFS_BLOCK - offset) {
+			error = EINVAL;
+		}
+		for (uint64_t done = 0; !error && done < len;) {
+			uint64_t pos = offset + done;
+			uint32_t skip = (uint32_t)(pos % UFS_BLOCK);
+			uint32_t want = (uint32_t)MIN(len - done, (uint64_t)(BOUNCE_SIZE - skip));
+			uint32_t blocks = (skip + want + UFS_BLOCK - 1) / UFS_BLOCK;
+
+			error = ufs_read_blocks(radio_first + pos / UFS_BLOCK, blocks);
+			if (!error) {
+				memcpy(dst + done, b + skip, want);
+			}
+			done += want;
+		}
+	}
+	lck_mtx_unlock(&herolte_ufs_lock);
+	return error;
+}
+
+/*
  * Bring the device to the Active power mode: clear the unit attention of the
  * UFS Device well-known LUN, then START STOP UNIT with power condition 1
  * (ACTIVE), as ufshcd_set_dev_pwr_mode() does. Leaves su.lun at 0.
@@ -1313,6 +1403,9 @@ starlte_reboot_recovery(void)
 	/* the front camera's sensor, lens and supplies off again, if a stream had them on (nothing without cam_s9=) */
 	extern void hakios_exynos_camera_quiesce(void);
 	hakios_exynos_camera_quiesce();
+	/* the modem back in reset, if cp=3 or 4 started it (nothing without cp=) */
+	extern void hakios_shannon_quiesce(void);
+	hakios_shannon_quiesce();
 	starlte_reset_to_recovery();
 	printf("HEROLTE LOG: PMU mapping failed, no reboot\n");
 #else
