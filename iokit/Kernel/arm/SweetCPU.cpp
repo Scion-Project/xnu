@@ -156,7 +156,7 @@ SweetCPU::start(IOService *provider)
 	}
 #else
 	/* SWEET MPIDR Aff1 = core: 0x000-0x500 A55, 0x600/0x700 A76. */
-	if (cpu->phys_id > 0x700 || (cpu->phys_id & 0xff) != 0 ||
+	if (cpu->phys_id > 0x700 || ((cpu->phys_id & 0xff) != 0 && !(SWEET_AFF0_CORES && cpu->phys_id < 8)) ||
 	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
 		panic(CPU_PORT_NAME " CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
 		    cpu->cpu_id, cpu->phys_id, topology->num_cpus);
