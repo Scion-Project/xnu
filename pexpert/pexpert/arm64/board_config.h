@@ -326,6 +326,11 @@
 #define CORE_NCTRS                     8
 #endif  /* ARM64_BOARD_CONFIG_A5XELTE */
 
+/* How SweetCPU calls PSCI: the S9's firmware takes SMC; FRANKEL (SWEET.h) asks its boot shim at EL2 by HVC. */
+#ifndef SWEET_PSCI_CONDUIT
+#define SWEET_PSCI_CONDUIT             "smc #0"
+#endif
+
 #endif
 #ifdef ARM64_BOARD_CONFIG_VMAPPLE
 #include <pexpert/arm64/VMAPPLE.h>

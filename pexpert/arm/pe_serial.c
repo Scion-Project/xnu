@@ -736,16 +736,16 @@ pl011_uart_setup(const DeviceTreeNode *const devicetree_node)
 
 /*****************************************************************************/
 
-#if !defined(ARM64_BOARD_CONFIG_A5XELTE) && !defined(ARM64_BOARD_CONFIG_SWEET)
+#if (!defined(ARM64_BOARD_CONFIG_A5XELTE) && !defined(ARM64_BOARD_CONFIG_SWEET)) || defined(ARM64_BOARD_CONFIG_FRANKEL)
 #ifdef SCION_NS16550_UART
 /*
- * 8250/16550 UART, devicetree compatible "ns16550a": the console of crosvm,
- * the VMM of Android's Virtualization Framework (ttyS0 at 0x3f8, which AVF
- * captures as the VM's console). Byte-wide registers one byte apart; crosvm
- * ignores accesses of any other width. Polled, at the firmware's baud rate.
+ * 8250/16550 UART, devicetree compatible "ns16550a" (crosvm's ttyS0: byte registers one byte apart, the only width
+ * crosvm takes) or "snps,dw-apb-uart" (the Pixel 10's DesignWare UART at 0x0DB62000: the device tree's "reg-shift" 2 and
+ * "reg-io-width" 4, 32-bit registers four bytes apart). Polled, at the rate the firmware set.
  */
 static volatile uint8_t *ns16550_regs = NULL;
-
+static uint32_t ns16550_shift;          /* "reg-shift": register n is at n << shift */
+static uint32_t ns16550_width = 1;      /* "reg-io-width": 1 or 4 bytes per access */
 #define NS16550_RBR_THR         0x0
 #define NS16550_IER             0x1
 #define NS16550_FCR             0x2
@@ -755,39 +755,30 @@ static volatile uint8_t *ns16550_regs = NULL;
 #define NS16550_LSR_DR          0x01u
 #define NS16550_LSR_THRE        0x20u
 
-static unsigned int
-ns16550_transmit_ready(void)
-{
-	return (ns16550_regs[NS16550_LSR] & NS16550_LSR_THRE) != 0;
-}
-
-static void
-ns16550_transmit_data(uint8_t c)
-{
-	ns16550_regs[NS16550_RBR_THR] = c;
-}
-
-static unsigned int
-ns16550_receive_ready(void)
-{
-	return (ns16550_regs[NS16550_LSR] & NS16550_LSR_DR) != 0;
-}
-
 static uint8_t
-ns16550_receive_data(void)
+ns16550_rd(unsigned int r)
 {
-	return ns16550_regs[NS16550_RBR_THR];
+	volatile uint8_t *a = ns16550_regs + ((uintptr_t)r << ns16550_shift);
+	return ns16550_width == 4 ? (uint8_t)*(volatile uint32_t *)a : *a;
 }
-
+static void
+ns16550_wr(unsigned int r, uint8_t v)
+{
+	volatile uint8_t *a = ns16550_regs + ((uintptr_t)r << ns16550_shift);
+	if (ns16550_width == 4) { *(volatile uint32_t *)a = v; } else { *a = v; }
+}
+static unsigned int ns16550_transmit_ready(void) { return (ns16550_rd(NS16550_LSR) & NS16550_LSR_THRE) != 0; }
+static void ns16550_transmit_data(uint8_t c) { ns16550_wr(NS16550_RBR_THR, c); }
+static unsigned int ns16550_receive_ready(void) { return (ns16550_rd(NS16550_LSR) & NS16550_LSR_DR) != 0; }
+static uint8_t ns16550_receive_data(void) { return ns16550_rd(NS16550_RBR_THR); }
 static void
 ns16550_init(void)
 {
-	ns16550_regs[NS16550_IER] = 0x00;       /* no interrupts */
-	ns16550_regs[NS16550_LCR] = 0x03;       /* 8N1, divisor latch closed */
-	ns16550_regs[NS16550_FCR] = 0x07;       /* FIFOs on and cleared */
-	ns16550_regs[NS16550_MCR] = 0x03;       /* DTR, RTS */
+	ns16550_wr(NS16550_IER, 0x00);          /* no interrupts */
+	ns16550_wr(NS16550_LCR, 0x03);          /* 8N1, divisor latch closed */
+	ns16550_wr(NS16550_FCR, 0x07);          /* FIFOs on and cleared */
+	ns16550_wr(NS16550_MCR, 0x03);          /* DTR, RTS */
 }
-
 SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) ns16550_serial_functions =
 {
 	.init = ns16550_init,
@@ -797,7 +788,6 @@ SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) ns16550_serial_functi
 	.receive_data = ns16550_receive_data,
 	.device = SERIAL_PL011_UART     /* the one serial device this board has */
 };
-
 static void
 ns16550_setup(const DeviceTreeNode *const devicetree_node)
 {
@@ -805,14 +795,24 @@ ns16550_setup(const DeviceTreeNode *const devicetree_node)
 		uint64_t block_offset;
 		uint64_t block_size;
 	} *reg;
-	unsigned int reg_size;
+	const uint32_t *v;
+	unsigned int reg_size, v_size;
 	if (SecureDTGetProperty(devicetree_node, "reg", (const void **)&reg, &reg_size) != kSuccess) {
 		panic("Unable to find the 'reg' property on the 16550 UART devicetree node");
+	}
+	if (SecureDTGetProperty(devicetree_node, "reg-shift", (const void **)&v, &v_size) == kSuccess && v_size == 4 && *v <= 2) {
+		ns16550_shift = *v;
+	}
+	if (SecureDTGetProperty(devicetree_node, "reg-io-width", (const void **)&v, &v_size) == kSuccess && v_size == 4 && *v == 4) {
+		ns16550_width = 4;
 	}
 	const vm_offset_t soc_base_phys = pe_arm_get_soc_base_phys();
 	ns16550_regs = (volatile uint8_t *)ml_io_map(soc_base_phys + reg->block_offset, reg->block_size);
 	register_serial_functions(&ns16550_serial_functions);
 }
+
+
+
 #endif /* SCION_NS16550_UART */
 
 /*****************************************************************************/
@@ -1045,7 +1045,7 @@ static const struct {
 	{ .compatible = "arm,pl011", .setup = pl011_uart_setup },
 #endif // PL011_UART
 #ifdef SCION_NS16550_UART
-	{ .compatible = "ns16550a", .setup = ns16550_setup },
+	{ .compatible = "ns16550a", .setup = ns16550_setup }, { .compatible = "snps,dw-apb-uart", .setup = ns16550_setup },
 #endif // SCION_NS16550_UART
 };
 

@@ -62,6 +62,12 @@
 #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
 #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
 #define GICR_PE_SIZE              0x40000 // Size of each redistributor region (GICv4: RD, SGI, VLPI, reserved)
+/* PSCI by HVC: the boot shim (scion-soc-lga) keeps EL2 and passes CPU_ON on to EL3 (xnuloader platform_frankel.psci_hvc) */
+#define SWEET_PSCI_CONDUIT        "hvc #0"
+/* The console: the device tree's /defaults "serial-device": the phone's DesignWare 16550 (0x0DB62000, reg-shift 2,
+ * 32-bit), or QEMU virt's PL011 for the QEMU run. The framebuffer console ("sweet-fbcon") as on the S9 besides. */
+#define PL011_UART                1
+#define SCION_NS16550_UART        1
 #else
 #define SWEET_VTIMER_INTID        19
 #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals

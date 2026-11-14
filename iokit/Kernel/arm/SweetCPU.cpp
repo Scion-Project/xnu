@@ -84,7 +84,7 @@ sweet_psci_cpu_on(uint64_t target, uint64_t entry, uint64_t context)
 	register uint64_t x1 __asm__("x1") = target;
 	register uint64_t x2 __asm__("x2") = entry;
 	register uint64_t x3 __asm__("x3") = context;
-	__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : :
+	__asm__ volatile(SWEET_PSCI_CONDUIT : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) : :
 	    "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
 	    "x14", "x15", "x16", "x17", "cc", "memory");
 	return (int32_t)x0;
