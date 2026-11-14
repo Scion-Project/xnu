@@ -47,12 +47,37 @@
  * virt, hyp) instead of the usual 13/14/11/10: the virtual timer XNU uses
  * (CNTV) is INTID 16 + 3 = 19.
  */
+#if defined(ARM64_BOARD_CONFIG_FRANKEL)
+/*
+ * Google Pixel 10 (frankel, Tensor G5 "lga"). Facts from the mainline device tree (arch/arm64/boot/dts/google/lga.dtsi,
+ * GPL-2.0 OR BSD-3-Clause: read for facts, nothing copied) and scion-soc-lga's README:
+ * - the architected timer PPIs are the usual ones (secure 13, non-secure 14, virtual 11, hypervisor 10), so XNU's
+ *   virtual timer (CNTV) is INTID 16 + 11 = 27 (the device tree's /arm-io/gic "virtual-timer-intid" still overrides it);
+ * - the GIC (distributor 0x05880000, redistributors 0x05900000 + 2 MB for 8 cores) is a GICv4: each core's redistributor
+ *   has the two GICv4 frames (VLPI, reserved) after RD and SGI, 4 x 64 KB = 256 KB a core (GICR_TYPER.VLPIS = 1).
+ *   QEMU's virt machine has the same layout with gic-version=4.
+ */
+#define FRANKEL                   1
+#define SWEET_VTIMER_INTID        27
+#define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
+#define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
+#define GICR_PE_SIZE              0x40000 // Size of each redistributor region (GICv4: RD, SGI, VLPI, reserved)
+/* PSCI by HVC: the boot shim (scion-soc-lga) keeps EL2 and passes CPU_ON on to EL3 (xnuloader platform_frankel.psci_hvc) */
+#define SWEET_PSCI_CONDUIT        "hvc #0"
+/* QEMU virt (the QEMU runs of this board, xnuloader platform qemu-lga) numbers its cores in Aff0, the phone in Aff1 */
+#define SWEET_AFF0_CORES          1
+/* The console: the device tree's /defaults "serial-device": the phone's DesignWare 16550 (0x0DB62000, reg-shift 2,
+ * 32-bit), or QEMU virt's PL011 for the QEMU run. The framebuffer console ("sweet-fbcon") as on the S9 besides. */
+#define PL011_UART                1
+#define SCION_NS16550_UART        1
+#else
 #define SWEET_VTIMER_INTID        19
 #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
 
 #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
 
 #define GICR_PE_SIZE              0x20000 // Size of each redistributor region
+#endif
 
 /* GICv3 register definitions; see GICv3 spec (Arm IHI 0069G) */
 #define GICD_CTLR                 0x0

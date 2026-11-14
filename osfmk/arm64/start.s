@@ -581,7 +581,7 @@ La5_entry_pixel:
 	bl	La5_draw_text
 #endif
 
-#if defined(SWEET) && !defined(A5XELTE)
+#if defined(SWEET) && !defined(A5XELTE) && !defined(FRANKEL)
 	/* Stage 0: white 64x32 band, no stack or page tables needed. */
 	MOV64	x0, (0x9c000000 + 2368 * 4320)
 	mov		w1, #-1
@@ -770,7 +770,7 @@ La5_fb_attr:
 	b.ne	La5_fb_attr
 #endif
 
-#if defined(SWEET) && !defined(A5XELTE)
+#if defined(SWEET) && !defined(A5XELTE) && !defined(FRANKEL)
 	/*
 	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
 	 * L2 table. Both framebuffer and RAM use L1 index 0; another call to

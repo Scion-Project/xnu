@@ -335,6 +335,7 @@ options   NOS_ARM_PMAP			# <nos_arm_pmap>
 # boards (STARLTE ...) or VMAPPLE
 options   SCION_GENERIC_ARM64	# <scion_generic_arm64>
 options   SCION_VMAPPLE		# <scion_vmapple>
+options   SCION_FRANKEL		# <scion_frankel>
 
 # support dynamic signing of code
 #

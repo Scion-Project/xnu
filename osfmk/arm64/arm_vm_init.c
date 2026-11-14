@@ -2088,7 +2088,7 @@ init_ptpages(tt_entry_t *tt, vm_map_address_t start, vm_map_address_t end, bool 
 #define ARM64_PHYSMAP_ALIGNMENT_PADDING (PTOV_TABLE_SIZE * ARM_TT_TWIG_SIZE)
 #endif
 
-#if defined(SWEET) && !defined(A5XELTE)
+#if defined(SWEET) && !defined(A5XELTE) && !defined(FRANKEL)
 /*
  * The reserved low-globals/kernel region is excluded from VM allocation.
  * Use the otherwise empty 32MB block above low globals and below gVirtBase
@@ -2530,7 +2530,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 #endif /* KASAN */
 
 #if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
-#if defined(SWEET) && !defined(A5XELTE)
+#if defined(SWEET) && !defined(A5XELTE) && !defined(FRANKEL)
 	/* phystokv() must still refer to the bootstrap aperture here. */
 	sweet_early_map_final();
 #endif
@@ -2545,7 +2545,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 	ml_enable_monitor();
 
 #if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
-#if defined(SWEET) && !defined(A5XELTE)
+#if defined(SWEET) && !defined(A5XELTE) && !defined(FRANKEL)
 	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
 	sweet_early_relocate(SWEET_EARLY_FB_VA);
 #elif defined(A5XELTE)
