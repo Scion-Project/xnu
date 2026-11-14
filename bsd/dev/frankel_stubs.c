@@ -119,3 +119,29 @@ void hakios_loader_core_take(void);
 void hakios_loader_core_take(void) { }
 int hakios_loader_core_taken(void);
 int hakios_loader_core_taken(void) { return 0; }
+
+/*
+ * The S9's drivers are compiled into this board's kernel too (the layer is one tree), and a few of them start from a boot
+ * argument alone. Each would program Exynos 9810 addresses, which on the Tensor G5 are other blocks' registers. So a FRANKEL
+ * kernel refuses to boot with any of those arguments on its line, before the first of them could run (EARLY_BOOT, first):
+ * a stop with this message is safe, a write to an unknown register is not.
+ */
+#include <kern/startup.h>
+static const char *const frankel_s9_args[] = {
+	"usb_gadget", "usb_muic", "cp", "wifi_pcie", "brcmfmac", "cam_s9", "cam_rear", "cam_af", "shub", "panel",
+	"panel_brightness", "panel_sleep", "panel_gamma", "dpu_probe", "fb_psr", "tmu", "cpufreq_gov", "sweetreboot", "sweetwdog",
+	"scionup", "sdroot", "sdprobe", "ufsprobe", "ufsrw", "abox", "max98512", "bt", "sbm_prof", "sweetfb_gpu", "starsmpprobe",
+};
+static void
+frankel_refuse_s9_args(void)
+{
+	char value[16];
+
+	for (unsigned i = 0; i < sizeof(frankel_s9_args) / sizeof(frankel_s9_args[0]); i++) {
+		if (PE_parse_boot_argn(frankel_s9_args[i], value, sizeof(value))) {
+			panic("FRANKEL: boot argument \"%s\" starts a Galaxy S9 driver (Exynos 9810 registers): refused on the Pixel 10",
+			    frankel_s9_args[i]);
+		}
+	}
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, frankel_refuse_s9_args);
