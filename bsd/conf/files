@@ -105,6 +105,9 @@ bsd/dev/random/randomdev.c		standard
 bsd/dev/memdev.c			standard
 bsd/dev/a5xelte_emmc.c	optional scion_generic_arm64
 bsd/dev/frankel_stubs.c	optional scion_frankel
+bsd/dev/hakios.pci.c	optional scion_frankel
+bsd/dev/hakios.ufs.c	optional scion_frankel
+bsd/dev/hakios.ufshc.c	optional scion_frankel
 bsd/dev/herolte_ufs.c	optional scion_generic_arm64
 bsd/dev/herolte_touch.c	optional scion_generic_arm64
 bsd/dev/starlte_touch.c	optional scion_generic_arm64

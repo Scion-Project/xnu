@@ -18,6 +18,7 @@
 #include <sys/errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <pexpert/pexpert.h>
 
 /* the kernel log ring the S9 keeps for its UFS/SD log (osfmk/console/serial_console.c, starlte_usbcon.c) */
 void sweet_log_append(const char *c, int size);
@@ -37,19 +38,29 @@ void hakios_input_console_touch(const char *arg) { (void)arg; }
 void hakios_exynos_cpufreq_touch(void);
 void hakios_exynos_cpufreq_touch(void) { }
 
-/* partitions of the S9's UFS (hakios.shannon.c): none here */
-int hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes);
-int
-hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes)
-{
-	(void)name; (void)offset; (void)dst; (void)len;
-	if (bytes) {
-		*bytes = 0;
-	}
-	return ENODEV;
-}
+/*
+ * The root on a UFS partition (IOKitBSDInit.cpp, rd=ufsroot0): Scion's own UFS driver (bsd/dev/hakios.ufs.c, hakios.ufshc.c:
+ * read only on this board, ufs_native=4 ufs_native_soc=lga, or lga-qemu in QEMU) brought up here, and the partition
+ * ufs_root=NAME (default "userdata") is the root. hakios_ufs_read_partition() is that driver's.
+ */
+extern void hakios_ufs_init(void);
+extern int hakios_ufs_dev_by_name(const char *name, dev_t *dev);
 int sweet_ufs_rootdev(dev_t *dev);
-int sweet_ufs_rootdev(dev_t *dev) { (void)dev; return ENODEV; }
+int
+sweet_ufs_rootdev(dev_t *dev)
+{
+	static int started;
+	char name[36] = "userdata";
+
+	if (!started) {
+		started = 1;
+		hakios_ufs_init();
+	}
+	(void)PE_parse_boot_argn("ufs_root", name, sizeof(name));
+	int error = hakios_ufs_dev_by_name(name, dev);
+	printf("FRANKEL: root on the UFS partition %s: %s (%d)\n", name, error == 0 ? "found" : "not there", error);
+	return error;
+}
 
 /* the S9's Mali-G72 (StarbiteMali.cpp): no GPU on this board yet (the Pixel's is a PowerVR) */
 int starlte_gpu_user_ready(void);
