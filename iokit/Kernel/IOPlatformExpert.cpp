@@ -390,10 +390,18 @@ IOPlatformExpert::sleepKernel(void)
 #endif
 }
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+extern "C" long starlte_rtc_boot_time(void);     /* bsd/dev/starlte_rtc.c: 0 unless sweetepoch= / rtc_pmic=1 */
+#endif
+
 long
 IOPlatformExpert::getGMTTimeOfDay(void)
 {
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	return starlte_rtc_boot_time();
+#else
 	return 0;
+#endif
 }
 
 void

@@ -123,6 +123,7 @@ bsd/dev/starlte_fw.c	optional scion_generic_arm64
 bsd/dev/starlte_gpu.c	optional scion_generic_arm64
 bsd/dev/starlte_overlay.c	optional scion_generic_arm64
 bsd/dev/starlte_sd.c	optional scion_generic_arm64
+bsd/dev/starlte_rtc.c	optional scion_generic_arm64
 bsd/dev/hakios.exynos_acpm_dvfs.c	optional scion_generic_arm64
 bsd/dev/hakios.exynos_cpufreq.c	optional scion_generic_arm64
 bsd/dev/hakios.exynos_tmu.c	optional scion_generic_arm64
