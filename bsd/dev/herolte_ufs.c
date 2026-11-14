@@ -40,6 +40,7 @@
 #include <vm/vm_kern_xnu.h>     /* 11417: kmem_alloc_contig, KMA_* */
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
+#include <IOKit/IOPlatformExpert.h>        /* PE_halt_restart, kPE* (sweethalt=) */
 #include <libkern/libkern.h>
 #include <machine/atomic.h>
 
@@ -1155,6 +1156,115 @@ starlte_reboot_setup(void)
 }
 
 /* Armed as soon as kmem works, so early panics reach TWRP too. */
+/*
+ * Boot-arg sweethalt=1: restart and power off from iOS (the power menu's slider, Settings > General > Shut Down, a
+ * restart asked by any daemon). Without it this tree has no PE_halt_restart, so halt_all_cpus() printed "MACH Reboot" or
+ * "CPU halted" and spun: the panel kept its last frame and the phone looked hung until someone held the keys.
+ *   restart (kPERestartCPU, kPEPanicRestartCPU): INFORM2 = 0x12345678, INFORM3 = 0x12345670 (Samsung's reset reason
+ *     "unknown" = a plain restart: S-Boot boots BOOT, i.e. iOS again; 0x12345674 would be recovery), SWRESET.
+ *   power off (kPEHaltCPU, kPEUPSDelayHaltCPU): PS_HOLD low (PMU PS_HOLD_CONTROL 0x330C bit 8, as Samsung's kernel ends a
+ *     power-off). A charger or a held power key keeps the PMIC up; if the phone still runs a second later it restarts
+ *     as above instead (Samsung goes to its charging screen there).
+ * Off by default. Lines "STARLTE HALT: ...".
+ */
+#define STARLTE_PS_HOLD_PAGE    0x14063000
+#define STARLTE_PS_HOLD_OFF     0x30C
+static volatile uint32_t *starlte_halt_pmu_va, *starlte_halt_ps_hold_page;
+
+__attribute__((noreturn))
+static void
+starlte_reset_normal(void)
+{
+	volatile uint32_t *pmu = starlte_halt_pmu_va;
+	(void)ml_set_interrupts_enabled(FALSE);
+	pmu[0x808 / 4] = 0x12345678U;
+	pmu[0x80c / 4] = 0x12345670U;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	pmu[0x400 / 4] = 1;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	for (;;) {
+		__asm__ volatile ("wfe");
+	}
+}
+
+static int
+starlte_halt_restart(unsigned int type)
+{
+	switch (type) {
+	case kPERestartCPU:
+	case kPEPanicRestartCPU:
+		printf("STARLTE HALT: restart (type %u): PMU reset into the system\n", type);
+		delay(50 * 1000);               /* the line out on the USB console */
+		starlte_reset_normal();
+	case kPEHaltCPU:
+	case kPEUPSDelayHaltCPU: {
+		volatile uint32_t *ps_hold = starlte_halt_ps_hold_page + STARLTE_PS_HOLD_OFF / 4;
+		uint32_t v = *ps_hold;
+		printf("STARLTE HALT: power off (type %u): PS_HOLD_CONTROL %08x, PS_HOLD low\n", type, v);
+		delay(50 * 1000);
+		*ps_hold = v & ~(1u << 8);
+		__asm__ volatile ("dsb sy" ::: "memory");
+		delay(1000 * 1000);
+		printf("STARLTE HALT: still running a second after PS_HOLD (%08x: a charger or the power key): restart instead\n",
+		    *ps_hold);
+		delay(50 * 1000);
+		starlte_reset_normal();
+	}
+	default:
+		return -1;
+	}
+}
+
+static void
+starlte_halt_setup(void)
+{
+	uint32_t on = 0;
+	if (!PE_parse_boot_argn("sweethalt", &on, sizeof(on)) || on == 0) {
+		return;
+	}
+	starlte_halt_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);
+	starlte_halt_ps_hold_page = (volatile uint32_t *)ml_io_map(STARLTE_PS_HOLD_PAGE, PAGE_SIZE);
+	if (starlte_halt_pmu_va != NULL && starlte_halt_ps_hold_page != NULL) {
+		PE_halt_restart = starlte_halt_restart;
+	}
+	printf("STARLTE HALT: sweethalt=%u: restart and power off %s (PMU %p, PS_HOLD page %p)\n", on,
+	    PE_halt_restart == starlte_halt_restart ? "armed" : "NOT armed", starlte_halt_pmu_va, starlte_halt_ps_hold_page);
+}
+
+/*
+ * kern.sweethalt_test (USB console "sysctl kern.sweethalt_test=N", only with sweethalt=1): the system's own way down, as
+ * reboot(2) takes it (file systems synced and unmounted), from a kernel thread: 1 = restart, 2 = power off.
+ */
+#include <sys/sysctl.h>
+#include <sys/reboot.h>
+static void
+starlte_halt_test_thread(void *arg, __unused wait_result_t wr)
+{
+	int howto = (int)(uintptr_t)arg;
+	printf("STARLTE HALT: test: reboot_kernel(%s)\n", howto == RB_HALT ? "RB_HALT" : "RB_AUTOBOOT");
+	(void)reboot_kernel(howto, NULL);
+}
+
+static int
+starlte_halt_test_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int value = 0, error = sysctl_handle_int(oidp, &value, 0, req);
+	thread_t thread;
+	if (error != 0 || req->newptr == USER_ADDR_NULL) {
+		return error;
+	}
+	if (PE_halt_restart != starlte_halt_restart || (value != 1 && value != 2)) {
+		return EINVAL;
+	}
+	if (kernel_thread_start(starlte_halt_test_thread, (void *)(uintptr_t)(value == 2 ? RB_HALT : RB_AUTOBOOT), &thread) ==
+	    KERN_SUCCESS) {
+		thread_deallocate(thread);
+	}
+	return 0;
+}
+SYSCTL_PROC(_kern, OID_AUTO, sweethalt_test, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0, starlte_halt_test_sysctl,
+    "I", "sweethalt=1 test: 1 = restart, 2 = power off, the way reboot(2) goes");
+
 static void
 starlte_reboot_early(void)
 {
@@ -1162,6 +1272,7 @@ starlte_reboot_early(void)
 	if (PE_parse_boot_argn("sweetreboot", &secs, sizeof(secs)) && secs != 0) {
 		starlte_reboot_setup();
 	}
+	starlte_halt_setup();
 }
 STARTUP(KMEM, STARTUP_RANK_LAST, starlte_reboot_early);
 
