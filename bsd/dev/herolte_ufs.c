@@ -1160,7 +1160,7 @@ starlte_reboot_setup(void)
  * Boot-arg sweethalt=1: restart and power off from iOS (the power menu's slider, Settings > General > Shut Down, a
  * restart asked by any daemon). Without it this tree has no PE_halt_restart, so halt_all_cpus() printed "MACH Reboot" or
  * "CPU halted" and spun: the panel kept its last frame and the phone looked hung until someone held the keys.
- *   restart (kPERestartCPU, kPEPanicRestartCPU): INFORM2 = 0x12345678, INFORM3 = 0x12345670 (Samsung's reset reason
+ *   restart (kPERestartCPU; never during a panic, which keeps sweetreboot's way to recovery): INFORM2 = 0x12345678, INFORM3 = 0x12345670 (Samsung's reset reason
  *     "unknown" = a plain restart: S-Boot boots BOOT, i.e. iOS again; 0x12345674 would be recovery), SWRESET.
  *   power off (kPEHaltCPU, kPEUPSDelayHaltCPU): PS_HOLD low (PMU PS_HOLD_CONTROL 0x330C bit 8, as Samsung's kernel ends a
  *     power-off). A charger or a held power key keeps the PMIC up; if the phone still runs a second later it restarts
@@ -1187,12 +1187,22 @@ starlte_reset_normal(void)
 	}
 }
 
+extern unsigned panic_active(void);
+
 static int
 starlte_halt_restart(unsigned int type)
 {
+	/* A panic keeps its own way out (sweetreboot's hook: the log into pmsg, recovery), never a restart into the system:
+	 * a panic at every boot must end in TWRP, not in a loop. */
+	if (panic_active()) {
+		if (sweet_panic_hook != NULL && (type == kPERestartCPU || type == kPEPanicRestartCPU ||
+		    type == kPEPanicRestartCPUNoCallouts)) {
+			sweet_panic_hook();
+		}
+		return -1;
+	}
 	switch (type) {
 	case kPERestartCPU:
-	case kPEPanicRestartCPU:
 		printf("STARLTE HALT: restart (type %u): PMU reset into the system\n", type);
 		delay(50 * 1000);               /* the line out on the USB console */
 		starlte_reset_normal();
