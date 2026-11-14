@@ -35,7 +35,7 @@
 #  Standard Apple OS Configurations:
 #  -------- ----- -- ---------------
 #
-#  KERNEL_BASE = [ arm64 config_pmap_ppl medium msgb_large config_embedded config_requires_u32_munging config_delay_idle_sleep config_proc_udata_storage config_uexc config_darkboot nos_arm_asm nos_arm_pmap scion_generic_arm64 ]
+#  KERNEL_BASE = [ arm64 config_pmap_ppl medium msgb_large config_embedded config_requires_u32_munging config_delay_idle_sleep config_proc_udata_storage config_uexc config_darkboot nos_arm_asm nos_arm_pmap scion_generic_arm64 scion_frankel ]
 #  KERNEL_RELEASE = [ KERNEL_BASE release ]
 #  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug config_proc_resource_limits config_ext_paniclog ]
 #  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_waitq_stats config_workloop_debug config_proc_resource_limits config_ext_paniclog ]

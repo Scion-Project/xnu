@@ -2002,4 +2002,20 @@ IOMobileFramebufferUserClient::setProperties(OSObject *properties)
 #if defined(ARM64_BOARD_CONFIG_FRANKEL)
 /* FRANKEL: the first present's time, defined under HEROLTE above for the S9 */
 uint64_t sweet_fb_first_present;
+/* the pointer layer's position (SweetHID's steering reads it; set by the STARLTE present path only) */
+volatile int32_t sweet_fb_cur_x, sweet_fb_cur_y;
+volatile uint32_t sweet_fb_cur_seq;
+/* no property is taken on this board yet (the S9's go to its panel's brightness): as IOService::setProperties */
+IOReturn
+AppleCLCD::setProperties(OSObject *properties)
+{
+	(void)properties;
+	return kIOReturnUnsupported;
+}
+IOReturn
+IOMobileFramebufferUserClient::setProperties(OSObject *properties)
+{
+	(void)properties;
+	return kIOReturnUnsupported;
+}
 #endif
