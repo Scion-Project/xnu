@@ -17,7 +17,13 @@
 extern "C" int herolte_fg_init(void);
 extern "C" int herolte_fg_read(unsigned *percent, unsigned *mv, int *ma,
     unsigned *rem_mah, unsigned *full_mah);
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/* bsd/dev/starlte_muic.c: the MAX77705's fuel gauge, read-only (boot-arg sweetfg=1) */
+extern "C" int starlte_fg_read(unsigned *percent, unsigned *mv, int *ma, unsigned *rem_mah, unsigned *full_mah, bool *vbus);
+#define BATTERY_DESIGN_MAH 3000u        /* SM-G960F EB-BG960ABE */
+#else
 #define BATTERY_DESIGN_MAH 3000u        /* SM-G930F EB-BG930ABE */
+#endif
 #else
 /* bsd/dev/sweet_spmi.c */
 extern "C" int sweet_spmi_init(void);
@@ -224,14 +230,30 @@ SweetBattery::poll(void)
 {
 	unsigned percent, mv, rem, full;
 	int ma;
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	bool vbus = false;
+	int rc = fReal ? starlte_fg_read(&percent, &mv, &ma, &rem, &full, &vbus) : -1;
+#else
+	int rc = fReal ? herolte_fg_read(&percent, &mv, &ma, &rem, &full) : -1;
+#endif
 	/* Zero, floating or implausible data cannot become 0% battery. */
-	if (!fReal || herolte_fg_read(&percent, &mv, &ma, &rem, &full) != 0 ||
-	    mv < 2800 || mv > 4600) {
+	if (rc != 0 || mv < 2800 || mv > 4600) {
 		publish(100, 4200, 0, true, true, false, true, false, false);
 		return;
 	}
 	/* No charger driver: the gauge's charge current marks a cable. */
 	bool charging = ma > 20;
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* On the S9 the switch's VBUS bit says whether a cable is in, charging or not (full, or the charger's watchdog). */
+	if (vbus && !charging) {
+		static unsigned vlogged;
+		if (vlogged++ % 10 == 0) {
+			IOLog("SWEET BATTERY: %u%% %umV %dmA rem=%umAh full=%umAh (cable in, not charging)\n", percent, mv, ma, rem, full);
+		}
+		publish(percent, mv, ma, true, true, false, percent >= 99, true, true);
+		return;
+	}
+#endif
 	static unsigned logged;
 	if (logged++ % 10 == 0) {
 		IOLog("SWEET BATTERY: %u%% %umV %dmA rem=%umAh full=%umAh\n",
@@ -301,8 +323,17 @@ SweetBattery::start(IOService *provider)
 		return false;
 	}
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
-	/* The MAX77854 path is Exynos 8890 pins and HSI2C: static fallback. */
-	fReal = false;
+	/* The MAX77854 path is Exynos 8890 pins and HSI2C. sweetfg=1: the S9's own MAX77705 gauge (read only); else the
+	 * static fallback (100 %, on AC). */
+	{
+		uint32_t fg = 0;
+		unsigned p0, v0, r0, f0;
+		int a0;
+		bool b0;
+		fReal = PE_parse_boot_argn("sweetfg", &fg, sizeof(fg)) && fg != 0 &&
+		    starlte_fg_read(&p0, &v0, &a0, &r0, &f0, &b0) == 0;
+		IOLog("SWEET BATTERY: sweetfg=%u: MAX77705 gauge %s\n", fg, fReal ? "read" : "not used");
+	}
 #elif defined(ARM64_BOARD_CONFIG_HEROLTE)
 	/* Default on; herofg=0 keeps the static fallback. */
 	fReal = herolte_fg_init() == 0;
