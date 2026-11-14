@@ -112,3 +112,10 @@ int sweet_spmi_init(void);
 int sweet_spmi_init(void) { return ENODEV; }
 int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
 int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out) { (void)sid; (void)addr; (void)out; return ENODEV; }
+
+/* The loader's core taken over by the kernel (xnu-8796's core0=1, used by hakios.ufs.c's loader-served mode, ufs=3): not on
+ * this board, where the kernel has the UFS host itself (ufs_native=4) or nothing */
+void hakios_loader_core_take(void);
+void hakios_loader_core_take(void) { }
+int hakios_loader_core_taken(void);
+int hakios_loader_core_taken(void) { return 0; }
