@@ -994,6 +994,10 @@ PEInitiatePanic(void)
 #endif // defined(__arm64__)
 }
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+extern "C" void hakios_shannon_quiesce(void);
+#endif
+
 int
 PEHaltRestartInternal(unsigned int type, uint32_t details)
 {
@@ -1012,6 +1016,11 @@ PEHaltRestartInternal(unsigned int type, uint32_t details)
 		if (panic_begin_called) {
 			goto skip_to_haltRestart;
 		}
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		/* STARLTE: the phone's own modem (scion-kernel drivers/modem/hakios.shannon.c, cp=N) to low power mode and back
+		 * in reset before an iOS shutdown or restart, as the USB console's "return" does; nothing without cp= */
+		hakios_shannon_quiesce();
+#endif
 
 		pmRootDomain = IOService::getPMRootDomain();
 		/* Notify IOKit PM clients of shutdown/restart
