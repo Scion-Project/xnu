@@ -164,6 +164,7 @@ void hakios_scanout_uncarve(uint64_t phys);
 int hakios_mfc_carve(uint64_t bytes, uint64_t * phys);
 void hakios_mfc_uncarve(uint64_t phys);
 int hakios_surface_mfc_frame(uint32_t sid, uint64_t * y, uint64_t * uv, uint32_t * y_stride, uint32_t * uv_stride, uint32_t * y_bytes, uint32_t * uv_bytes);
+void hakios_surface_written(uint32_t sid);
 }
 static uint32_t gScanoutWidth, gScanoutHeight;
 static uint32_t gScanoutMade, gScanoutRefused;
@@ -209,6 +210,61 @@ hakios_surface_mfc_frame(uint32_t sid, uint64_t * y, uint64_t * uv, uint32_t * y
 		MiniIOSurfaceDrop(s);
 	}
 	return result;
+}
+
+/*
+ * The seed: what tells readers that the pixels may have changed. A processor's lock or unlock for writing changes it (lockCommon);
+ * so does a device's write, here, which leaves `cleanSeed` with it where nothing else changed the seed since the lines were
+ * cleaned: a device writes memory, not the processors' caches, and the Mali's submission cleans them only after a processor's
+ * write. Under gSurfaceLock, as lockCommon.
+ */
+void
+MiniIOSurfaceWritten(MiniIOSurface * s)
+{
+	if (s == NULL || gSurfaceLock == NULL) {
+		return;
+	}
+	IOLockLock(gSurfaceLock);
+	struct minisurf_shared * sh = s->shared();
+	uint32_t seed = sh->seed;
+
+	sh->seed = seed + 1;
+	if (s->cleanSeed == seed) {
+		s->cleanSeed = seed + 1;
+	}
+	IOLockUnlock(gSurfaceLock);
+}
+
+/* the video decoder's frame written into a surface of its memory (hakios.exynos_mfc.c) */
+void
+hakios_surface_written(uint32_t sid)
+{
+	MiniIOSurface * s = MiniIOSurfaceCopy(sid);
+
+	if (s != NULL) {
+		MiniIOSurfaceWritten(s);
+		MiniIOSurfaceDrop(s);
+	}
+}
+
+bool
+MiniIOSurfaceLines(MiniIOSurface * s, uint32_t * seed)
+{
+	bool written;
+
+	IOLockLock(gSurfaceLock);
+	*seed = s->shared()->seed;
+	written = s->cleanSeed != *seed;
+	IOLockUnlock(gSurfaceLock);
+	return written;
+}
+
+void
+MiniIOSurfaceCleaned(MiniIOSurface * s, uint32_t seed)
+{
+	IOLockLock(gSurfaceLock);
+	s->cleanSeed = seed;
+	IOLockUnlock(gSurfaceLock);
 }
 
 void
@@ -843,6 +899,7 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
 	struct minisurf_shared * sh = s->shared();
 	sh->registryID = 0x100000000ULL + sid;
 	sh->seed = 1;
+	s->cleanSeed = 0;                       /* (made by the processor: cleaned before the GPU's first use) */
 	sh->valuesSeed = 1;
 	sh->pixelSizeCasting = (uint8_t) dictNumber(props, "IOSurfacePixelSizeCastingAllowed", 1);
 	sh->displayable = 1;
