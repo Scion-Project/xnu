@@ -744,6 +744,9 @@ public:
 	uint16_t *      fColumnWeight;          /* ... with fb_filter: how much of the column after it, of 256 */
 	uint32_t *      fBlendRow;              /* ... and a row of the picture blended from two (fBlendRowSize pixels) */
 	uint32_t        fBlendRowSize;
+	/* the panel rectangles (x0, y0, x1, y1) the layers below the one being drawn covered in this frame (drawLayer()) */
+	int32_t         fUnder[SWAP_LAYERS][4];
+	uint32_t        fUnderCount;
 	uint8_t *       fRecBase;
 	uint64_t        fRecSize, fRecUsed;
 	uint64_t        fFirstFrame, fRecFirst; /* when the first frame was shown, and the first recorded */
@@ -1330,6 +1333,26 @@ blend(uint32_t a, uint32_t b, uint32_t w)
 }
 
 /*
+ * A pixel of a layer over what is under it. The layers are premultiplied (CoreAnimation's are): the result is the pixel
+ * plus what is under it times one minus the pixel's alpha. CoreAnimation hands the display a layer it took out of its
+ * own picture (a CAMetalLayer's drawable, a video) as a layer of its own below the window server's, and leaves the
+ * window server's pixels over it at alpha 0: copied as they were, those pixels painted the layer below black.
+ */
+static inline uint32_t
+over(uint32_t pixel, uint32_t under)
+{
+	uint32_t k = 255 - (pixel >> 24), out = 0xff000000u;
+
+	for (unsigned shift = 0; shift < 24; shift += 8) {
+		uint32_t u = (under >> shift & 0xff) * k + 128;
+		uint32_t c = (pixel >> shift & 0xff) + ((u + (u >> 8)) >> 8);
+
+		out |= (c > 255 ? 255 : c) << shift;            /* (a pixel that is not premultiplied cannot run into the next channel) */
+	}
+	return out;
+}
+
+/*
  * Where the middle of the `i`th of `out` pixels falls among `in` of them, in 256ths of a pixel,
  * kept within the first and the last.
  */
@@ -1356,8 +1379,57 @@ struct RowJob {
 	int32_t         ry0, ry1;       /* the rows of the rectangle that are on the panel: all that is looked at, whatever its size */
 	bool            filter, unscaled;
 	bool force;              /* SCFB: write every row whole (the shadow does not match the panel) */
+	/*
+	 * A layer above others: its pixels go over what the layers below it drew, by its alpha (below), and only where a
+	 * layer below drew is there anything under it; elsewhere it is over black. The bottom layer is copied as it is.
+	 */
+	uint32_t        unders;
+	int32_t         under[SWAP_LAYERS][4];
 	uint64_t        scan;           /* fb_beam: when the scan that is to show the frame begins (0: write at once) */
 };
+
+/* Did a layer below this one draw at panel pixel x, y in this frame? */
+static inline bool
+drawnUnder(const struct RowJob * job, int32_t x, int32_t y)
+{
+	for (uint32_t i = 0; i < job->unders; i++) {
+		const int32_t * r = job->under[i];
+
+		if (x >= r[0] && x < r[2] && y >= r[1] && y < r[3]) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * A pixel of a layer above others onto the panel (and the shadow, with SCFB): true if the panel changed. Opaque pixels are
+ * written as they are; one at alpha 0 over a layer below leaves that layer's pixel; the rest are mixed with what is under
+ * them, read back from the shadow if there is one, else from the panel's memory (slow to read, but CoreAnimation's
+ * pixels are opaque or at alpha 0 nearly everywhere).
+ */
+static inline bool
+putOver(const struct RowJob * job, uint32_t * to, uint32_t * shadow, int32_t x, int32_t y, uint32_t pixel)
+{
+	uint32_t alpha = pixel >> 24, value = pixel;
+
+	if (alpha != 255) {
+		bool under = drawnUnder(job, x, y);
+
+		if (alpha == 0 && under) {
+			return false;
+		}
+		value = over(pixel, under ? (shadow != NULL ? shadow[x] : to[x]) : 0);
+	}
+	if (shadow != NULL) {
+		if (!job->force && shadow[x] == value) {
+			return false;
+		}
+		shadow[x] = value;
+	}
+	to[x] = value;
+	return true;
+}
 
 void
 IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow)
@@ -1377,7 +1449,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 			continue;
 		}
 		to = (uint32_t *) (fBase + (size_t) y * fRowBytes);
-		if (fShadow != NULL && job->unscaled) {
+		if (fShadow != NULL && job->unscaled && job->unders == 0) {
 			/* the changed span of the row, by the shadow; only that goes to the panel */
 			const uint32_t * row = (const uint32_t *) (pixels + (size_t) (sy + y - py0) * stride + (size_t) sx * 4);
 			uint32_t * shadow = fShadow + (size_t) y * fPanelWidth + px0;
@@ -1402,7 +1474,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 			dy1 = (uint32_t) y;
 			continue;
 		}
-		if (job->unscaled) {
+		if (job->unscaled && job->unders == 0) {
 			/* not scaled at all */
 			memcpy(to + px0, pixels + (size_t) (sy + y - py0) * stride + (size_t) sx * 4, (size_t) sw * 4);
 			continue;
@@ -1429,6 +1501,34 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 			}
 		} else {
 			from = (const uint32_t *) (pixels + (size_t) (sy + (int64_t) (y - py0) * sh / (py1 - py0)) * stride);
+		}
+		if (job->unders != 0) {
+			/* a layer above others, pixel by pixel over them (an unscaled one too: fColumn maps it one to one) */
+			uint32_t * shadow = fShadow != NULL ? fShadow + (size_t) y * fPanelWidth : NULL;
+			int32_t a = -1, b = -1;
+
+			for (int32_t x = cx0; x < cx1; x++) {
+				uint32_t c = fColumn[x], value;
+
+				if (filter) {
+					uint32_t w = fColumnWeight[x], p = from[c];
+
+					value = w == 0 || p == from[c + 1] ? p : blend(p, from[c + 1], w);
+				} else {
+					value = from[c];
+				}
+				if (putOver(job, to, shadow, x, y, value)) {
+					a = a < 0 ? x : a;
+					b = x;
+				}
+			}
+			if (a >= 0) {
+				dx0 = (uint32_t) a < dx0 ? (uint32_t) a : dx0;
+				dx1 = (uint32_t) b > dx1 ? (uint32_t) b : dx1;
+				dy0 = (uint32_t) y < dy0 ? (uint32_t) y : dy0;
+				dy1 = (uint32_t) y;
+			}
+			continue;
 		}
 		if (fShadow != NULL) {
 			/* scaled: pixel by pixel against the shadow, only changes written to the panel */
@@ -1819,6 +1919,16 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
 	job.unscaled = px1 - px0 == sw && py1 - py0 == sh && px0 >= 0 && (uint32_t) px1 <= fPanelWidth;
 	job.force = fShadowStale;
 	job.scan = fSettling ? 0 : fBeamScan;
+	/* over the layers drawn below it in this frame; then this one is under the ones after it */
+	job.unders = fUnderCount;
+	memcpy(job.under, fUnder, sizeof(job.under));
+	if (fUnderCount < SWAP_LAYERS) {
+		fUnder[fUnderCount][0] = cx0;
+		fUnder[fUnderCount][1] = job.ry0;
+		fUnder[fUnderCount][2] = cx1;
+		fUnder[fUnderCount][3] = job.ry1;
+		fUnderCount++;
+	}
 	if (fThreads <= 1 || fDiff || fHelpersStarted + 1 < fThreads) {
 		drawRows(&job, job.ry0, job.ry1, fBlendRow);
 		return;
@@ -2845,6 +2955,7 @@ IOMobileFramebuffer::drawLayers(const uint8_t * swap, MiniIOSurface ** surfaces)
 {
 	int32_t src[4], dst[4];
 
+	fUnderCount = 0;
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		MiniIOSurface * s = surfaces[layer];
 
@@ -2970,6 +3081,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	scfbBeginDraw();
 	fDamageX0 = fDamageY0 = ~0u;
 	fDamageX1 = fDamageY1 = 0;
+	fUnderCount = 0;
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
 		int32_t src[4], dst[4];
