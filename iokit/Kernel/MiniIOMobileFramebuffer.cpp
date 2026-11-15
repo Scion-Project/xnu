@@ -448,6 +448,20 @@ static TUNABLE(uint32_t, gFpsLog, "fps_log", 0);
  */
 static TUNABLE(uint32_t, gZeroCopy, "fb_zc", 0);
 /*
+ * Boot-arg fb_planes (with fb_dpp=1 and fb_zc=1; 1 by default, 0 turns it off): a frame of two layers -- a layer
+ * CoreAnimation detached from its picture (a CAMetalLayer's drawable: Maps' map, MAME4iOS's game, PPSSPP's screen) under
+ * the window server's surface over the whole display, clear over it -- is put together by the display controller, not
+ * the processor (planeShow()). The window server's surface, of the scan-out pool, is scanned out as it is by VGF0, as
+ * fb_zc does with one layer, and blended by its alpha; the detached layer is copied into a buffer of the scan-out's, at
+ * its place on the display, and shown under it on a window of its own through VGF1 (hakios_scanout_planes(),
+ * drivers/display/dpu/hakios.exynos_dpu.c). drawOver() read the whole window server's surface from write-combined memory
+ * for every frame the window server drew again: 20 ms a frame while Maps' map was panned (docs/metal.md). The lower
+ * layer is copied only when it changed (its surface, seed, last Mali job or rectangle), and both layers change at the
+ * same refresh. A frame the windows cannot take (a scaled lower layer, more layers, a DPU that said no) is blended by
+ * the processor as before.
+ */
+static TUNABLE(uint32_t, gPlanes, "fb_planes", 1);
+/*
  * fb_zc's surfaces, as the iPhone's display driver keeps them (boot-arg fb_zc_hold, kern.hakios.fb_zc_hold while it runs;
  * a sum, 3 by default; 0 is how fb_zc first was):
  *   1  in use from SwapEnd on: a display surface's use count (IOSurfaceIsInUse()) is raised when its swap is handed over,
@@ -520,6 +534,8 @@ int hakios_scanout_attach(int mode, const uint64_t * phys, unsigned count, uint3
     uint32_t rowbytes, unsigned shown);
 int hakios_scanout_flip(unsigned index);
 int hakios_scanout_show(uint64_t phys, uint32_t rowbytes);
+int hakios_scanout_planes(uint64_t upper, uint32_t upper_rowbytes, uint64_t lower, uint32_t lower_rowbytes, uint32_t x,
+    uint32_t y, uint32_t w, uint32_t h);
 int hakios_mali_second(uint64_t * busy_ns, uint32_t * jobs, uint64_t * queued_ns, uint32_t * mhz, uint32_t * switches,
     int32_t * g3d_mc);
 int hakios_scanout_latched(void);
@@ -797,6 +813,21 @@ public:
 	MiniIOSurface * fZcFront, * fZcPending;
 	bool            fZcSaid;
 	bool            fZcFrame;               /* show(): this frame is scanned out as it is: drawLayer() draws nothing */
+	/*
+	 * fb_planes: the buffer of the scan-out's the lower window shows (NO_BUFFER: the window is off), and the one it shows
+	 * once the flip asked for is taken (fPlaneAsked: every flip says, NO_BUFFER for the window off); what each buffer
+	 * holds of a lower layer (its surface, seed, last Mali job and rectangles); and the windows having said no.
+	 */
+	unsigned        fPlaneFront, fPlanePending;
+	bool            fPlaneAsked, fPlanesRefused, fPlanesSaid;
+	struct {
+		bool     valid;
+		uint32_t sid, seed;
+		uint64_t mali;
+		int32_t  src[4], dst[4];
+	}               fPlaneHeld[SCAN_BUFFERS];
+	uint32_t        fStatPlanes, fStatPlaneCopies;  /* frames put together by the windows, and of them those whose lower layer was copied */
+	uint64_t        fStatPlaneTime;                 /* ... the time it took here */
 	uint32_t        fFpsZc, fFpsZcCopied, fFpsZcBusy;       /* fps_log: frames shown in place, copied, drawn into the one shown */
 	uint32_t        fFpsZcAgain;                            /* ... of those drawn into the one shown, how many not copied (fb_zc_hold 2) */
 	uint32_t        fFpsZcSurfaces[4], fFpsZcSurfaceCount;  /* ... the different surfaces this second's frames came from (up to 4) */
@@ -862,6 +893,8 @@ public:
 	void scanTaken(void);
 	bool scanPoll(void);
 	bool flipAsked(void) { return fScanPending != NO_BUFFER || fZcPending != NULL; }
+	bool planeShown(void) { return fPlaneFront != NO_BUFFER || (fPlaneAsked && fPlanePending != NO_BUFFER); }
+	bool planeShow(const uint8_t * swap, MiniIOSurface ** surfaces);
 	void renderThread(void);
 	void markShown(uint32_t id);
 	void swapWait(uint32_t id);
@@ -1188,6 +1221,7 @@ IOMobileFramebuffer::start(IOService * provider)
 	fBootHeight = fPanelHeight;
 	fBootRowBytes = fRowBytes;
 	fScanFront = fScanPending = fScanTarget = NO_BUFFER;
+	fPlaneFront = fPlanePending = NO_BUFFER;
 	scanSetup();
 	gScanOwner = this;
 	if (gTimerCoalescing == 0 && mach_timer_coalescing_enabled) {
@@ -2584,11 +2618,16 @@ IOMobileFramebuffer::scanBegin(bool covered)
 	if (fScanMode == 0) {
 		return false;
 	}
-	for (t = 0; t < fScanCount && (t == fScanFront || t == fScanPending); t++) {
+	/* (nor one the lower window of fb_planes shows, or will: of three, at most two are taken) */
+	for (t = 0; t < fScanCount && (t == fScanFront || t == fScanPending || t == fPlaneFront ||
+	    (fPlaneAsked && t == fPlanePending)); t++) {
 	}
 	fScanTarget = t;
 	if (!fOverFrame && t < SCAN_BUFFERS) {
 		fOverBuf[t].valid = false;      /* (drawn otherwise now: drawOver() draws it whole next time) */
+	}
+	if (t < SCAN_BUFFERS) {
+		fPlaneHeld[t].valid = false;
 	}
 	if (!fScanSaid) {
 		fScanSaid = true;
@@ -2656,6 +2695,8 @@ IOMobileFramebuffer::scanEnd(void)
 	}
 	hakios_scanout_flip(fScanTarget);
 	fScanPending = fScanTarget;
+	fPlaneAsked = true;                     /* (the flip takes fb_planes' lower window away) */
+	fPlanePending = NO_BUFFER;
 	waited = mach_absolute_time() - began;
 	fFpsWait += waited;
 	fFpsWaitMax = waited > fFpsWaitMax ? waited : fFpsWaitMax;
@@ -2690,6 +2731,12 @@ IOMobileFramebuffer::scanTaken(void)
 {
 	zcLetGo(&fZcFront);
 	markShown(fFlipID);
+	if (fPlaneAsked) {
+		/* (fb_planes: what the lower window shows from this refresh on; NO_BUFFER, it is off) */
+		fPlaneFront = fPlanePending;
+		fPlanePending = NO_BUFFER;
+		fPlaneAsked = false;
+	}
 	if (fScanPending != NO_BUFFER) {
 		fScanFront = fScanPending;
 		fScanPending = NO_BUFFER;
@@ -2772,7 +2819,8 @@ IOMobileFramebuffer::zcShow(const uint8_t * swap, MiniIOSurface ** surfaces)
 	if (gZcHold & 2) {
 		(void) scanPoll();
 	}
-	if (s == fZcPending || (s == fZcFront && !flipAsked())) {
+	/* (not while fb_planes' lower window shows, or will: the flip below takes it away, the surface is shown again alone) */
+	if (!planeShown() && (s == fZcPending || (s == fZcFront && !flipAsked()))) {
 		fFpsZcBusy++;
 		if (gZcHold & 2) {
 			/*
@@ -2809,6 +2857,8 @@ IOMobileFramebuffer::zcShow(const uint8_t * swap, MiniIOSurface ** surfaces)
 		return false;
 	}
 	fZcPending = s;
+	fPlaneAsked = true;                     /* (hakios_scanout_show() takes fb_planes' lower window away) */
+	fPlanePending = NO_BUFFER;
 	fFpsZc++;
 	if (!fZcSaid) {
 		fZcSaid = true;
@@ -2837,7 +2887,10 @@ IOMobileFramebuffer::scanDrop(const char * why)
 	fScanMode = 0;
 	for (unsigned b = 0; b < SCAN_BUFFERS; b++) {
 		fOverBuf[b].valid = false;
+		fPlaneHeld[b].valid = false;
 	}
+	fPlaneFront = fPlanePending = NO_BUFFER;        /* (hakios_scanout_detach() took the lower window away) */
+	fPlaneAsked = false;
 	fBase = fBootBase;
 	fPanelWidth = fBootWidth;
 	fPanelHeight = fBootHeight;
@@ -3264,6 +3317,112 @@ IOMobileFramebuffer::drawOver(const uint8_t * swap, MiniIOSurface ** surfaces)
 	return true;
 }
 
+/*
+ * fb_planes (see the boot-arg): a frame of two layers put together by the display controller. The window server's surface
+ * (of the scan-out pool, over the whole display) is scanned out as it is, as zcShow() does, and held from its flip until
+ * another's is taken; the detached layer is copied into a buffer of the scan-out's at its place on the display -- unless
+ * the buffer the lower window shows, or is about to, holds it already (the same surface, seed, Mali job and rectangles:
+ * a layer the swap does not name is one keepLayers() kept) -- and shown under it. True if the frame is shown so (nothing
+ * is to be drawn); false: draw it as before. The geometry is overEligible()'s: a lower layer not scaled, the upper one
+ * the whole surface over the whole display.
+ */
+bool
+IOMobileFramebuffer::planeShow(const uint8_t * swap, MiniIOSurface ** surfaces)
+{
+	MiniIOSurface * lower = surfaces[0], * upper = surfaces[1], * held;
+	uint32_t seed;
+	uint64_t mali, began;
+	int32_t src[4], dst[4];
+	unsigned t, current;
+	bool copied = false;
+	int refused;
+
+	if (!gPlanes || !gZeroCopy || fPlanesRefused || fScanMode != 2 || upper == NULL || upper->scanPhys == 0 ||
+	    upper->scanMFC || !overEligible(swap, surfaces)) {
+		return false;
+	}
+	memcpy(src, swap + SWAP_SOURCE(0), sizeof(src));
+	memcpy(dst, swap + SWAP_DEST(0), sizeof(dst));
+	if (src[2] <= 0 || src[3] <= 0) {
+		src[0] = src[1] = 0;
+		src[2] = (int32_t) lower->info.width;
+		src[3] = (int32_t) lower->info.height;
+	}
+	if (dst[2] <= 0 || dst[3] <= 0) {
+		dst[0] = dst[1] = 0;
+		dst[2] = (int32_t) fWidth;
+		dst[3] = (int32_t) fHeight;
+	}
+	seed = lower->shared()->seed;
+	mali = lower->maliSeq;
+	/* the lower layer: in the buffer the lower window shows (or is about to) already? */
+	current = fPlaneAsked ? fPlanePending : fPlaneFront;
+	if (current < SCAN_BUFFERS && fPlaneHeld[current].valid && fPlaneHeld[current].sid == lower->sid &&
+	    fPlaneHeld[current].seed == seed && fPlaneHeld[current].mali == mali &&
+	    memcmp(fPlaneHeld[current].src, src, sizeof(src)) == 0 && memcmp(fPlaneHeld[current].dst, dst, sizeof(dst)) == 0) {
+		t = current;
+	} else {
+		/* into a buffer neither shown nor about to be, by either window (of three, at most two are) */
+		for (t = 0; t < fScanCount && (t == fScanFront || t == fScanPending || t == fPlaneFront ||
+		    (fPlaneAsked && t == fPlanePending)); t++) {
+		}
+		if (t >= SCAN_BUFFERS) {
+			return false;
+		}
+		fOverBuf[t].valid = false;
+		fPlaneHeld[t].valid = false;
+		fBase = fScanBase[t];
+		fPanelWidth = fScanWidth;
+		fPanelHeight = fScanHeight;
+		fRowBytes = fScanRowBytes;
+		fUnderCount = 0;
+		began = mach_absolute_time();
+		drawLayer(lower, src, dst);
+		fStatPlaneTime += mach_absolute_time() - began;
+		__asm__ volatile ("dsb sy" ::: "memory");      /* (the write-combined writes out before the controller is told) */
+		fPlaneHeld[t].valid = true;
+		fPlaneHeld[t].sid = lower->sid;
+		fPlaneHeld[t].seed = seed;
+		fPlaneHeld[t].mali = mali;
+		memcpy(fPlaneHeld[t].src, src, sizeof(src));
+		memcpy(fPlaneHeld[t].dst, dst, sizeof(dst));
+		copied = true;
+	}
+	/* the flip before taken first, as for any flip */
+	if (!scanLatch()) {
+		return false;
+	}
+	held = MiniIOSurfaceCopy(upper->sid);   /* (held for as long as it is on the panel) */
+	if (held == NULL) {
+		return false;
+	}
+	MiniIOSurfaceUse(held, 1);
+	refused = hakios_scanout_planes(held->scanPhys + held->info.offset, held->info.bytesPerRow, fScanPhys[t], fScanRowBytes,
+	    (uint32_t) dst[0], (uint32_t) dst[1], (uint32_t) dst[2], (uint32_t) dst[3]);
+	if (refused != 0) {
+		MiniIOSurfaceUse(held, -1);
+		MiniIOSurfaceDrop(held);
+		/* (-1: not this frame, its rectangle; -2: not at all, the windows could not be set up) */
+		if (refused == -2) {
+			fPlanesRefused = true;
+			scanSay("MiniIOMobileFramebuffer: fb_planes: the display controller does not take two layers (%dx%d at %d,%d "
+			    "under the window server's): they are blended here from now on\n", dst[2], dst[3], dst[0], dst[1]);
+		}
+		return false;
+	}
+	fZcPending = held;
+	fPlaneAsked = true;
+	fPlanePending = t;
+	if (!fPlanesSaid) {
+		fPlanesSaid = true;
+		scanSay("MiniIOMobileFramebuffer: fb_planes: the first frame of two layers on two windows: surface %u over surface %u "
+		    "(%dx%d at %d,%d, in buffer %u)\n", upper->sid, lower->sid, dst[2], dst[3], dst[0], dst[1], t);
+	}
+	fStatPlanes++;
+	fStatPlaneCopies += copied;
+	return true;
+}
+
 /* A swap's surfaces onto the panel, once the GPU is done with them. */
 void
 IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
@@ -3367,7 +3526,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		gShownSurface = fLastSurface;
 	}
 	/* (fb_flip/fb_dpp: into a buffer of its own, from the second picture on: the first is the console's end) */
-	inPlace = fGraphics && zcShow(swap, surfaces);
+	inPlace = fGraphics && (zcShow(swap, surfaces) || planeShow(swap, surfaces));
 	fZcFrame = inPlace;
 	/* (two layers, the upper one over the whole display: every pixel is drawn, or kept from the frame drawn into that buffer before) */
 	fOverFrame = !inPlace && fGraphics && overEligible(swap, surfaces);
@@ -3530,6 +3689,15 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			    fStatOverSkipped / fStatOver, took / fStatOver / NSEC_PER_USEC);
 			fStatOver = fStatOverWhole = 0;
 			fStatOverRead = fStatOverSkipped = fStatOverTime = 0;
+		}
+		if (fStatPlanes != 0) {
+			uint64_t took;
+
+			absolutetime_to_nanoseconds(fStatPlaneTime, &took);
+			IOLog("MiniIOMobileFramebuffer: %u of them two layers on two windows (fb_planes), the lower one copied for %u, "
+			    "%llu us each\n", fStatPlanes, fStatPlaneCopies, fStatPlaneCopies ? took / fStatPlaneCopies / NSEC_PER_USEC : 0);
+			fStatPlanes = fStatPlaneCopies = 0;
+			fStatPlaneTime = 0;
 		}
 		if (fBeamIntf != 0) {
 			char shares[8 * 24] = "";
