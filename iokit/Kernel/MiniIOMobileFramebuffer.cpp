@@ -200,7 +200,7 @@ enum {
 #define SWAP_ENABLED(layer)     (0xa4 + 4 * (layer))
 #define SWAP_DEST(layer)        (0xc4 + 16 * (layer))   /* x, y, width, height on the display */
 #define SWAP_LAYERS_SET         0x104                   /* bit per layer given in this swap */
-#define SWAP_LAYERS_CLEARED     0x108
+#define SWAP_LAYERS_CLEARED     0x108                   /* ... of which given no surface: taken away */
 #define SWAP_LAYERS             4
 
 #define kFBNotifyVSync          5
@@ -697,6 +697,14 @@ public:
 	uint8_t         fSwapInUse[SWAP_QUEUE];                 /* ... the layers whose use count SwapEnd raised (fb_zc_hold 1) */
 	unsigned        fSwapFirst, fSwapsWaiting;
 	/*
+	 * ... and what each layer shows as of the last swap handed over (keepLayers()): a swap names only the layers it
+	 * changes, the others keep their surface and rectangles
+	 */
+	struct {
+		uint32_t        surface, enabled;
+		uint8_t         source[16], dest[16];
+	} fLayerKept[SWAP_LAYERS];
+	/*
 	 * ... and not whenever the GPU happens to be done, but on a beat of the refresh rate
 	 * (boot-arg fb_beat=0: at once): frames then follow each other at an even pace whatever
 	 * each took to draw, as long as there is one for every beat. The beat is this driver's own.
@@ -821,6 +829,8 @@ public:
 	void publishRefresh(void);
 	MiniIOSurface * defaultSurface(void);
 	void present(const uint8_t * swap);
+	void keepLayers(const uint8_t * swap, uint8_t * whole);
+	void forgetLayers(void);
 	void show(const uint8_t * swap, MiniIOSurface ** surfaces);
 	void settle(const uint8_t * swap, MiniIOSurface ** surfaces);
 	bool fSettling;                 /* drawing the last frame again, filtered (fb_filter=2) */
@@ -2019,6 +2029,48 @@ IOMobileFramebuffer::reportFrameTimes(void)
 	fFramePauses = fFrameLongest = 0;
 }
 
+/*
+ * A swap names the layers it changes, and only those (IOMobileFramebufferSwapSetLayer, IOMobileFramebuffer of 20F66: a layer
+ * given a surface gets its bit in SWAP_LAYERS_SET and loses it in SWAP_LAYERS_CLEARED; a layer given none gets both); a layer
+ * it does not name keeps the surface and rectangles it had, as on the iPhone's display. CoreAnimation counts on that: a
+ * CAMetalLayer it hands to the display as a layer of its own (docs/metal.md, real apps) stays there while the application
+ * draws nothing new, and the swaps after it name only the window server's surface, which is clear over it. Each such swap
+ * showed nothing in the bottom layer, so the clear pixels over the map came out black (an idle map in Maps or MapKit under
+ * any change of the screen above it, the grid in Photos). The swap handed over (WHOLE, a copy of SWAP) is made to name every
+ * layer that shows something, from what each showed as of the swap before; WHOLE NULL: only what each shows is noted (a swap
+ * not shown). With fSwapLock held.
+ */
+void
+IOMobileFramebuffer::keepLayers(const uint8_t * swap, uint8_t * whole)
+{
+	uint32_t set = swapWord(swap, SWAP_LAYERS_SET), cleared = swapWord(swap, SWAP_LAYERS_CLEARED);
+
+	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+		uint32_t bit = 1u << layer;
+
+		if (set & bit) {
+			fLayerKept[layer].surface = (cleared & bit) ? 0 : swapWord(swap, SWAP_SURFACE(layer));
+			fLayerKept[layer].enabled = swapWord(swap, SWAP_ENABLED(layer));
+			memcpy(fLayerKept[layer].source, swap + SWAP_SOURCE(layer), sizeof(fLayerKept[layer].source));
+			memcpy(fLayerKept[layer].dest, swap + SWAP_DEST(layer), sizeof(fLayerKept[layer].dest));
+		} else if (whole != NULL && fLayerKept[layer].surface != 0) {
+			memcpy(whole + SWAP_SURFACE(layer), &fLayerKept[layer].surface, sizeof(uint32_t));
+			memcpy(whole + SWAP_ENABLED(layer), &fLayerKept[layer].enabled, sizeof(uint32_t));
+			memcpy(whole + SWAP_SOURCE(layer), fLayerKept[layer].source, sizeof(fLayerKept[layer].source));
+			memcpy(whole + SWAP_DEST(layer), fLayerKept[layer].dest, sizeof(fLayerKept[layer].dest));
+		}
+	}
+}
+
+/* The window server that made the swaps is gone: what its layers showed is not kept for the next one. */
+void
+IOMobileFramebuffer::forgetLayers(void)
+{
+	IOLockLock(fSwapLock);
+	bzero(fLayerKept, sizeof(fLayerKept));
+	IOLockUnlock(fSwapLock);
+}
+
 /* the S9's CPU governor's frame boost (drivers/power/exynos/hakios.exynos_cpufreq.c; a stub elsewhere): a stamp, no wait */
 extern "C" void hakios_exynos_cpufreq_frame(void);
 
@@ -2078,6 +2130,7 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 		    fSwapsWaiting >= swapQueue()) {
 			fStatLost++;                    /* (the GPU has stopped answering: the frame before is waiting for it) */
 			fFpsLost++;
+			keepLayers(swap, NULL);         /* (its layers are what the next swaps keep) */
 			IOLockUnlock(fSwapLock);
 			markShown(swapWord(swap, SWAP_ID));     /* (never will be: nobody waits for it) */
 			return;
@@ -2088,6 +2141,8 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 	fLastSwapID = swapWord(swap, SWAP_ID);
 
 	memcpy(fSwap[slot], swap, SWAP_SIZE);
+	keepLayers(swap, fSwap[slot]);
+	swap = fSwap[slot];
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
 
@@ -3306,7 +3361,8 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	 */
 	fFpsUndrawn += undrawn;
 	if (swapWord(swap, SWAP_SURFACE(0)) != 0) {
-		fFpsSameSurface += swapWord(swap, SWAP_SURFACE(0)) == fLastSurface;
+		/* (a bottom layer the swap did not name is the one kept, not drawn again) */
+		fFpsSameSurface += (set & 1) && swapWord(swap, SWAP_SURFACE(0)) == fLastSurface;
 		fLastSurface = swapWord(swap, SWAP_SURFACE(0));
 		gShownSurface = fLastSurface;
 	}
@@ -3531,6 +3587,7 @@ class IOMobileFramebufferUserClient : public IOUserClient
 
 	task_t                  fTask;
 	IOMobileFramebuffer *   fOwner;
+	bool                    fSwapped;       /* it handed swaps over: its layers are forgotten when it goes */
 	IOLock *                fLock;
 	mach_port_t             fPorts[kFBNotifyTypes];
 	mach_vm_address_t       fCallbacks[kFBNotifyTypes];
@@ -3589,6 +3646,9 @@ IOMobileFramebufferUserClient::clientClose(void)
 	}
 	if (fVSyncCall != NULL) {
 		thread_call_cancel_wait(fVSyncCall);
+	}
+	if (fOwner != NULL && fSwapped) {
+		fOwner->forgetLayers();
 	}
 	if (!isInactive()) {
 		terminate();
@@ -3771,6 +3831,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 			IOLog("MiniIOMobileFramebuffer: swap request of %u bytes, expected %u\n", args->structureInputSize, SWAP_SIZE);
 			return kIOReturnBadArgument;
 		}
+		fSwapped = true;
 		fOwner->present((const uint8_t *) args->structureInput);
 		return kIOReturnSuccess;
 
