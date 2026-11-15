@@ -747,6 +747,26 @@ public:
 	/* the panel rectangles (x0, y0, x1, y1) the layers below the one being drawn covered in this frame (drawLayer()) */
 	int32_t         fUnder[SWAP_LAYERS][4];
 	uint32_t        fUnderCount;
+	/*
+	 * Two layers scanned out by the DPU's scaler (fb_dpp, drawOver()): the window server's surface over the whole display
+	 * above a layer CoreAnimation detached (a CAMetalLayer's drawable). For each scan-out buffer, the upper layer last
+	 * drawn into it whole (its surface, seed and last Mali job) and the lower layer's rectangle then; and the upper
+	 * layer's tiles as last read (OVER_*), for that surface, seed and job.
+	 */
+	struct {
+		bool     valid;
+		uint32_t sid, seed;
+		uint64_t mali;
+		int32_t  lower[4];
+	}               fOverBuf[SCAN_BUFFERS];
+	uint8_t *       fOverTiles;
+	uint32_t        fOverTileCols, fOverTileRows;
+	uint32_t        fOverSid, fOverSeed;
+	uint64_t        fOverMali;
+	uint32_t *      fOverRow;               /* a row of a tile of the upper layer, read from its (write-combined) memory */
+	bool            fOverFrame;             /* show(): this frame's upper layer is drawn by drawOver() */
+	uint32_t        fStatOver, fStatOverWhole;      /* frames drawn so, and of them those drawn whole */
+	uint64_t        fStatOverRead, fStatOverSkipped, fStatOverTime; /* tiles of the upper layer read, not read; the time it took */
 	uint8_t *       fRecBase;
 	uint64_t        fRecSize, fRecUsed;
 	uint64_t        fFirstFrame, fRecFirst; /* when the first frame was shown, and the first recorded */
@@ -839,6 +859,8 @@ public:
 	void zcLetGo(MiniIOSurface ** which);
 	void scanDrop(const char * why);
 	void drawLayers(const uint8_t * swap, MiniIOSurface ** surfaces);
+	bool overEligible(const uint8_t * swap, MiniIOSurface ** surfaces);
+	bool drawOver(const uint8_t * swap, MiniIOSurface ** surfaces);
 	static void fpsFired(thread_call_param_t self, thread_call_param_t unused);
 	void fpsLine(void);
 	void swapSource(void);
@@ -2510,6 +2532,9 @@ IOMobileFramebuffer::scanBegin(bool covered)
 	for (t = 0; t < fScanCount && (t == fScanFront || t == fScanPending); t++) {
 	}
 	fScanTarget = t;
+	if (!fOverFrame && t < SCAN_BUFFERS) {
+		fOverBuf[t].valid = false;      /* (drawn otherwise now: drawOver() draws it whole next time) */
+	}
 	if (!fScanSaid) {
 		fScanSaid = true;
 		scion_splash_end();
@@ -2755,6 +2780,9 @@ IOMobileFramebuffer::scanDrop(const char * why)
 		hakios_scanout_detach(why);
 	}
 	fScanMode = 0;
+	for (unsigned b = 0; b < SCAN_BUFFERS; b++) {
+		fOverBuf[b].valid = false;
+	}
 	fBase = fBootBase;
 	fPanelWidth = fBootWidth;
 	fPanelHeight = fBootHeight;
@@ -2968,6 +2996,219 @@ IOMobileFramebuffer::drawLayers(const uint8_t * swap, MiniIOSurface ** surfaces)
 	}
 }
 
+/*
+ * Two layers, fb_dpp (the DPU's scaler enlarges the display's own size, so a layer is drawn one pixel for one): CoreAnimation
+ * hands the display a layer it detached from its picture (a CAMetalLayer's drawable: MAME4iOS's game, PPSSPP's screen) and
+ * the window server's surface over the whole display above it, clear (alpha 0) over the detached layer and opaque nearly
+ * everywhere else. drawLayer() drew the upper layer pixel by pixel from the window server's surface, which with fb_zc is
+ * write-combined memory, slow to read four bytes at a time: 121 ms a frame, 8 frames a second (docs/metal.md, "Real apps").
+ *
+ * Here the lower layer is copied as before (drawLayer(), its rows shared out), and the upper one is taken by tiles of
+ * OVER_TILE pixels square. A tile's row is read with one copy into fOverRow; its opaque runs are copied, its clear pixels
+ * over the lower layer leave it, the others are mixed with the lower layer's pixel read from its own surface (not from the
+ * buffer, write-combined too). A tile read whole is remembered as clear (every pixel 0), opaque or mixed, for as long as
+ * the upper layer's surface keeps its seed (a processor's writes) and its last Mali job (the GPU's): a clear tile is not
+ * read again, over the lower layer nothing is drawn and elsewhere black. And each scan-out buffer remembers the upper layer
+ * drawn into it whole and the lower layer's rectangle: while those stay the same, only the tiles that meet the lower layer
+ * are drawn into it, and of them only that part; the rest of the buffer already holds them. The window server keeps its
+ * surface while only the detached layer changes, so a frame then costs the lower layer's copy and the edges of its
+ * rectangle.
+ */
+#define OVER_TILE       64
+#define OVER_UNKNOWN    0
+#define OVER_CLEAR      1
+#define OVER_OPAQUE     2
+#define OVER_MIXED      3
+
+bool
+IOMobileFramebuffer::overEligible(const uint8_t * swap, MiniIOSurface ** surfaces)
+{
+	MiniIOSurface * lower = surfaces[0], * upper = surfaces[1];
+	int32_t src[4], dst[4];
+
+	if (fScanMode != 2 || fShadow != NULL || fDiff || fScanWidth != fWidth || fScanHeight != fHeight || lower == NULL ||
+	    upper == NULL || swapWord(swap, SWAP_SURFACE(0)) == 0 || swapWord(swap, SWAP_SURFACE(1)) == 0 ||
+	    swapWord(swap, SWAP_SURFACE(2)) != 0 || swapWord(swap, SWAP_SURFACE(3)) != 0) {
+		return false;
+	}
+	if (lower->info.bytesPerElement != 4 || lower->info.planeCount != 0 || upper->info.bytesPerElement != 4 ||
+	    upper->info.planeCount != 0 || upper->info.width != fWidth || upper->info.height != fHeight ||
+	    !surfaceHolds(upper, fHeight, fWidth)) {
+		return false;
+	}
+	/* the upper layer: the whole surface over the whole display */
+	memcpy(src, swap + SWAP_SOURCE(1), sizeof(src));
+	memcpy(dst, swap + SWAP_DEST(1), sizeof(dst));
+	if (!(src[2] <= 0 || src[3] <= 0 || (src[0] == 0 && src[1] == 0 && (uint32_t) src[2] == fWidth && (uint32_t) src[3] == fHeight)) ||
+	    !(dst[2] <= 0 || dst[3] <= 0 || (dst[0] == 0 && dst[1] == 0 && (uint32_t) dst[2] == fWidth && (uint32_t) dst[3] == fHeight))) {
+		return false;
+	}
+	/* the lower layer: not scaled, and on the display whole */
+	memcpy(src, swap + SWAP_SOURCE(0), sizeof(src));
+	memcpy(dst, swap + SWAP_DEST(0), sizeof(dst));
+	if (src[2] <= 0 || src[3] <= 0) {
+		src[0] = src[1] = 0;
+		src[2] = (int32_t) lower->info.width;
+		src[3] = (int32_t) lower->info.height;
+	}
+	if (dst[2] <= 0 || dst[3] <= 0) {
+		dst[0] = dst[1] = 0;
+		dst[2] = (int32_t) fWidth;
+		dst[3] = (int32_t) fHeight;
+	}
+	return src[0] >= 0 && src[1] >= 0 && (int64_t) src[0] + src[2] <= (int64_t) lower->info.width &&
+	       (int64_t) src[1] + src[3] <= (int64_t) lower->info.height &&
+	       surfaceHolds(lower, (uint32_t) (src[1] + src[3]), (uint32_t) (src[0] + src[2])) &&
+	       dst[2] == src[2] && dst[3] == src[3] && dst[0] >= 0 && dst[1] >= 0 &&
+	       (int64_t) dst[0] + dst[2] <= (int64_t) fWidth && (int64_t) dst[1] + dst[3] <= (int64_t) fHeight;
+}
+
+/* The upper layer of a two-layer frame (overEligible()), the lower one drawn already. False: draw it with drawLayer(). */
+bool
+IOMobileFramebuffer::drawOver(const uint8_t * swap, MiniIOSurface ** surfaces)
+{
+	MiniIOSurface * lower = surfaces[0], * upper = surfaces[1];
+	uint32_t cols = (fWidth + OVER_TILE - 1) / OVER_TILE, rows = (fHeight + OVER_TILE - 1) / OVER_TILE;
+	uint32_t seed = upper->shared()->seed;
+	uint64_t mali = upper->maliSeq, began = mach_absolute_time(), read = 0, skipped = 0;
+	unsigned b = fScanTarget;
+	int32_t src[4], dst[4];
+	bool whole;
+
+	if (b >= SCAN_BUFFERS) {
+		return false;
+	}
+	if (fOverTiles == NULL || cols != fOverTileCols || rows != fOverTileRows) {
+		if (fOverTiles != NULL) {
+			IODelete(fOverTiles, uint8_t, fOverTileCols * fOverTileRows);
+		}
+		fOverTileCols = cols;
+		fOverTileRows = rows;
+		fOverTiles = IONewZero(uint8_t, cols * rows);
+		fOverSid = 0;
+	}
+	if (fOverRow == NULL) {
+		fOverRow = IONew(uint32_t, OVER_TILE);
+	}
+	if (fOverTiles == NULL || fOverRow == NULL) {
+		return false;
+	}
+	if (fOverSid != upper->sid || fOverSeed != seed || fOverMali != mali) {
+		bzero(fOverTiles, cols * rows);         /* (OVER_UNKNOWN) */
+		fOverSid = upper->sid;
+		fOverSeed = seed;
+		fOverMali = mali;
+	}
+
+	memcpy(src, swap + SWAP_SOURCE(0), sizeof(src));
+	memcpy(dst, swap + SWAP_DEST(0), sizeof(dst));
+	if (src[2] <= 0 || src[3] <= 0) {
+		src[0] = src[1] = 0;
+	}
+	if (dst[2] <= 0 || dst[3] <= 0) {
+		dst[0] = dst[1] = 0;
+		dst[2] = (int32_t) fWidth;
+		dst[3] = (int32_t) fHeight;
+	}
+	const int32_t lx0 = dst[0], ly0 = dst[1], lx1 = dst[0] + dst[2], ly1 = dst[1] + dst[3];
+	const uint8_t * lp = lower->pixels(), * up = upper->pixels();
+	const uint32_t lstride = lower->info.bytesPerRow, ustride = upper->info.bytesPerRow;
+
+	whole = !(fOverBuf[b].valid && fOverBuf[b].sid == upper->sid && fOverBuf[b].seed == seed && fOverBuf[b].mali == mali &&
+	    fOverBuf[b].lower[0] == lx0 && fOverBuf[b].lower[1] == ly0 && fOverBuf[b].lower[2] == lx1 && fOverBuf[b].lower[3] == ly1);
+
+	for (uint32_t ty = 0; ty < rows; ty++) {
+		const int32_t y0 = (int32_t) (ty * OVER_TILE), y1 = MIN(y0 + OVER_TILE, (int32_t) fHeight);
+
+		for (uint32_t tx = 0; tx < cols; tx++) {
+			const int32_t x0 = (int32_t) (tx * OVER_TILE), x1 = MIN(x0 + OVER_TILE, (int32_t) fWidth);
+			const bool meets = x0 < lx1 && lx0 < x1 && y0 < ly1 && ly0 < y1;
+			uint8_t * kind = &fOverTiles[ty * cols + tx];
+			int32_t ax0 = x0, ax1 = x1, ay0 = y0, ay1 = y1;         /* (the part of the tile drawn) */
+			bool clear = true, opaque = true;
+
+			if (!whole && !meets) {
+				skipped++;      /* (the buffer holds it) */
+				continue;
+			}
+			if (!whole) {
+				ax0 = MAX(x0, lx0);
+				ax1 = MIN(x1, lx1);
+				ay0 = MAX(y0, ly0);
+				ay1 = MIN(y1, ly1);
+			}
+			if (*kind == OVER_CLEAR) {
+				/* clear over the lower layer: it shows; elsewhere over nothing, black */
+				for (int32_t y = ay0; whole && y < ay1; y++) {
+					uint32_t * to = (uint32_t *) (fBase + (size_t) y * fRowBytes);
+					bool under = y >= ly0 && y < ly1;
+
+					for (int32_t x = ax0; x < ax1; x++) {
+						if (!under || x < lx0 || x >= lx1) {
+							to[x] = 0xff000000u;
+						}
+					}
+				}
+				skipped++;
+				continue;
+			}
+			for (int32_t y = ay0; y < ay1; y++) {
+				uint32_t * to = (uint32_t *) (fBase + (size_t) y * fRowBytes);
+				const bool rowUnder = y >= ly0 && y < ly1;
+				/* (the lower layer's pixel at display column x is under[x]) */
+				const uint32_t * under = rowUnder ?
+				    (const uint32_t *) (lp + (size_t) (src[1] + y - ly0) * lstride) + src[0] - lx0 : NULL;
+				const uint32_t * row = fOverRow - ax0;
+
+				memcpy(fOverRow, up + (size_t) y * ustride + (size_t) ax0 * 4, (size_t) (ax1 - ax0) * 4);
+				for (int32_t x = ax0; x < ax1;) {
+					uint32_t pixel = row[x], alpha = pixel >> 24;
+
+					if (alpha == 255) {
+						int32_t end = x + 1;
+
+						while (end < ax1 && (row[end] >> 24) == 255) {
+							end++;
+						}
+						memcpy(to + x, row + x, (size_t) (end - x) * 4);
+						clear = false;
+						x = end;
+						continue;
+					}
+					opaque = false;
+					clear = clear && pixel == 0;
+					if (under != NULL && x >= lx0 && x < lx1) {
+						if (alpha != 0) {
+							to[x] = over(pixel, under[x]);
+						}
+					} else {
+						to[x] = over(pixel, 0);
+					}
+					x++;
+				}
+			}
+			if (*kind == OVER_UNKNOWN && ax0 == x0 && ax1 == x1 && ay0 == y0 && ay1 == y1) {
+				*kind = clear ? OVER_CLEAR : opaque ? OVER_OPAQUE : OVER_MIXED;
+			}
+			read++;
+		}
+	}
+	fOverBuf[b].valid = true;
+	fOverBuf[b].sid = upper->sid;
+	fOverBuf[b].seed = seed;
+	fOverBuf[b].mali = mali;
+	fOverBuf[b].lower[0] = lx0;
+	fOverBuf[b].lower[1] = ly0;
+	fOverBuf[b].lower[2] = lx1;
+	fOverBuf[b].lower[3] = ly1;
+	fStatOver++;
+	fStatOverWhole += whole;
+	fStatOverRead += read;
+	fStatOverSkipped += skipped;
+	fStatOverTime += mach_absolute_time() - began;
+	return true;
+}
+
 /* A swap's surfaces onto the panel, once the GPU is done with them. */
 void
 IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
@@ -3072,7 +3313,10 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	/* (fb_flip/fb_dpp: into a buffer of its own, from the second picture on: the first is the console's end) */
 	inPlace = fGraphics && zcShow(swap, surfaces);
 	fZcFrame = inPlace;
-	scanned = !inPlace && fGraphics && scanBegin(coversDisplay(swap, surfaces, fWidth, fHeight));
+	/* (two layers, the upper one over the whole display: every pixel is drawn, or kept from the frame drawn into that buffer before) */
+	fOverFrame = !inPlace && fGraphics && overEligible(swap, surfaces);
+	scanned = !inPlace && fGraphics && scanBegin(fOverFrame || coversDisplay(swap, surfaces, fWidth, fHeight));
+	fOverFrame = fOverFrame && scanned;
 	if (report) {
 		IOLog("MiniIOMobileFramebuffer: swap %u (#%u): surfaces %u %u %u %u, layers set 0x%x cleared 0x%x\n",
 		    swapWord(swap, SWAP_ID), fSwapsShown, swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)),
@@ -3136,7 +3380,9 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			if (hakios_vgpu3d_host_owns(sid)) {
 				continue;
 			}
-			drawLayer(s, src, dst);
+			if (!(fOverFrame && layer == 1 && drawOver(swap, surfaces))) {
+				drawLayer(s, src, dst);
+			}
 			if (layer == 0) {
 				recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
 				gShownSurface = sid;
@@ -3166,6 +3412,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		record(recorded);
 	}
 	fZcFrame = false;
+	fOverFrame = false;
 	fFpsShown++;
 	fFpsDraw += drawn - began;
 	fFpsDrawMax = drawn - began > fFpsDrawMax ? drawn - began : fFpsDrawMax;
@@ -3218,6 +3465,16 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		    waiting / fStatFrames / NSEC_PER_USEC, fStatOnBeat, fStatOnBeat ? beat / fStatOnBeat / NSEC_PER_USEC : 0,
 		    fStatHeld, fStatLost, fStatSwapsLate, fStatSettled, late);
 		fStatScans = fStatScansMissed = 0;
+		if (fStatOver != 0) {
+			uint64_t took;
+
+			absolutetime_to_nanoseconds(fStatOverTime, &took);
+			IOLog("MiniIOMobileFramebuffer: %u of them two layers, the upper one by tiles (%u drawn whole): %llu of its tiles read "
+			    "and %llu not a frame, %llu us for it\n", fStatOver, fStatOverWhole, fStatOverRead / fStatOver,
+			    fStatOverSkipped / fStatOver, took / fStatOver / NSEC_PER_USEC);
+			fStatOver = fStatOverWhole = 0;
+			fStatOverRead = fStatOverSkipped = fStatOverTime = 0;
+		}
 		if (fBeamIntf != 0) {
 			char shares[8 * 24] = "";
 			size_t at = 0;
