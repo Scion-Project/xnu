@@ -4430,6 +4430,26 @@ is_io_service_wait_quiet_with_options(
 	return service->waitQuietWithOptions(timeoutNS, options);
 }
 
+/*
+ * Routine io_service_get_wait_info: Darwin 27.2's routine 2891 (osfmk/device/device.defs). Scion answers that it is not
+ * supported: the meaning of its values is not public, and no program of iOS 27 calls it at boot. Not run on a phone.
+ */
+kern_return_t
+is_io_service_get_wait_info(
+	io_object_t _service,
+	uint32_t options __unused,
+	io_name_t name __unused,
+	uint64_t *value0 __unused,
+	uint64_t *value1 __unused,
+	uint64_t *value2 __unused,
+	uint32_t *value3 __unused )
+{
+	CHECK( IOService, _service, service );
+	(void)service;
+
+	return kIOReturnUnsupported;
+}
+
 
 /* Routine io_service_request_probe */
 kern_return_t

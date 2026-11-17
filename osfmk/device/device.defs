@@ -849,6 +849,24 @@ routine io_service_wait_quiet_with_options(
 	in  options		: uint32_t
 	);
 
+/*
+ * Scion: routine 2891, IOKit's IOServiceGetWaitInfo of Darwin 27 (xnu-13432), which xnu-12377 does not have. Both iOS
+ * 27.0.1 (24A446) and 27.2.1 (24B156) carry the client stub. The message is the one their stub sends and expects (read
+ * from its code: request id 2891 with one 32-bit argument; reply 2991 with a name of at most 128 bytes, three 64-bit and
+ * one 32-bit value). Its only caller is `ioreg -z` ("list wait information"), whose output line names a service, its
+ * 64-bit id and two 64-bit times. That is all that is known of the values; the kernel answers kIOReturnUnsupported
+ * (is_io_service_get_wait_info). Before this the id had no routine and the answer was MIG_BAD_ID.
+ */
+routine io_service_get_wait_info(
+	    service		: io_object_t;
+	in  options		: uint32_t;
+	out name		: io_name_t;
+	out value0		: uint64_t;
+	out value1		: uint64_t;
+	out value2		: uint64_t;
+	out value3		: uint32_t
+	);
+
 #endif /* IOKIT */
 
 /* vim: set ft=c : */

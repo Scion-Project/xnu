@@ -76,3 +76,20 @@ routine mach_memory_entry_get_page_counts(
 	out	dirty_cnt	: uint64_t;
 	out	swapped_cnt	: uint64_t);
 
+/*
+ * Scion: routine 4904, mach_memory_entry_region_info of Darwin 27 (xnu-13432), which xnu-12377 does not have. Both iOS
+ * 27.0.1 (24A446) and 27.2.1 (24B156) carry it in libsystem_kernel. The message is the one their stub sends and expects
+ * (request id 4904 with one 64-bit in-out value and the caller's array count; reply 5004 with that value, one more
+ * 64-bit value and an array of at most 21 ints). No caller of it is known in either build. What the values mean is not
+ * public; the kernel answers KERN_NOT_SUPPORTED. Before this the id had no routine and the answer was MIG_BAD_ID.
+ * The C type of the array is vm_region_recurse_info_t only because that is an int pointer MIG can name.
+ */
+type mach_memory_entry_region_info_t = array[*:21] of int
+	ctype: vm_region_recurse_info_t;
+
+routine mach_memory_entry_region_info(
+		mem_entry	: mem_entry_name_port_t;
+	inout	value0		: uint64_t;
+	out	value1		: uint64_t;
+	out	info		: mach_memory_entry_region_info_t, CountInOut);
+
