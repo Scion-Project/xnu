@@ -32,6 +32,8 @@ extern bool starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
 extern bool starlte_pmic_write(uint32_t type, uint32_t reg, uint8_t val);
 extern bool starlte_acpm_dvfs(uint32_t domain, uint32_t khz);
 static void sg_clock_up(void);
+static uint32_t sg_boot_khz;            /* the rate sg_clock_up() got from the APM; 0: the clock was never raised */
+static unsigned sg_cool_level;          /* starlte_gpu_thermal(): 0 the boot's rate, 1 455 MHz at most, 2 260 MHz */
 /* SweetFramebuffer.cpp: no CPU copies to the panel before this mach time. */
 extern uint64_t sweet_fb_hold_until;
 void starlte_gpu_probe(void);
@@ -1894,6 +1896,68 @@ sg_clock_up(void)
 	if (sent && after == 0) {
 		(void)starlte_acpm_dvfs(4, 260000);
 		printf("STARLTE GPU: PLL not locked at %u kHz: back to 260000 (%u kHz)\n", want, sg_clock_khz());
+		return;
+	}
+	if (sent) {
+		sg_boot_khz = want;             /* what the heat may take down and gives back (starlte_gpu_thermal) */
+	}
+}
+
+/*
+ * The GPU's clock and the heat. The clock above is raised once and stays, and until 17 November 2026 nothing in this
+ * tree looked at the G3D's temperature: Android cools the GPU from 88 C, Scion's 16.5 governor from 85 (hakios.mali.c,
+ * GOV_CAP1_MC and GOV_CAP2_MC). The same two limits here, with the same 5 degrees between going down and coming back:
+ * 455 MHz at most from 85 C, 260 MHz (S-Boot's own) from 95 C, the boot's rate again below 80 C. Called by the TMU
+ * driver with each reading of the G3D's sensor (bsd/dev/hakios.exynos_tmu.c, tmu=2 or 3); nothing without readings,
+ * nothing if the clock was never raised, and nothing with stargpu_cool=0. The request is the one sg_clock_up() makes
+ * (ACPM DVFS, domain 4), sent with no job chain running (sg_lock). The supply stays at the boot's 950 mV, which is
+ * enough for every rate. A request the APM does not answer is tried again at the next reading.
+ */
+#define SG_COOL1_MC     85000
+#define SG_COOL2_MC     95000
+#define SG_COOL_HYST_MC 5000
+#define SG_NOT_READ_MC  (-273000)
+
+void starlte_gpu_thermal(int32_t g3d_mc);
+
+void
+starlte_gpu_thermal(int32_t g3d_mc)
+{
+	static int cool_on = -1;
+	unsigned level = 0;
+	uint32_t khz;
+	bool sent;
+
+	if (cool_on < 0) {
+		uint32_t v = 1;
+
+		PE_parse_boot_argn("stargpu_cool", &v, sizeof(v));
+		cool_on = v != 0;
+	}
+	if (!cool_on || sg_boot_khz == 0 || g3d_mc == SG_NOT_READ_MC) {
+		return;
+	}
+	if (g3d_mc >= SG_COOL1_MC || (sg_cool_level >= 1 && g3d_mc >= SG_COOL1_MC - SG_COOL_HYST_MC)) {
+		level = 1;
+	}
+	if (g3d_mc >= SG_COOL2_MC || (sg_cool_level >= 2 && g3d_mc >= SG_COOL2_MC - SG_COOL_HYST_MC)) {
+		level = 2;
+	}
+	if (level == sg_cool_level) {
+		return;
+	}
+	khz = level == 2 ? 260000 : level == 1 ? 455000 : sg_boot_khz;
+	if (khz > sg_boot_khz) {
+		khz = sg_boot_khz;              /* (a boot that asked for less than a limit: never above what it asked) */
+	}
+	lck_mtx_lock(&sg_lock);
+	sent = starlte_acpm_dvfs(4, khz);
+	lck_mtx_unlock(&sg_lock);
+	printf("STARLTE GPU: the G3D at %d.%d C: %u kHz %s (%s; the clock reads %u kHz)\n", g3d_mc / 1000,
+	    (g3d_mc % 1000) / 100, khz, level > sg_cool_level ? "at most now" : "again", sent ? "sent" : "NO REPLY, tried again "
+	    "at the next reading", sg_clock_khz());
+	if (sent) {
+		sg_cool_level = level;
 	}
 }
 
