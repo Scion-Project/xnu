@@ -35,8 +35,8 @@
 #include <sys/param.h>
 #include <sys/time.h>
 
-#ifdef __linux__
-/* strlcat is provided by libc on Darwin and the BSDs, but not by glibc. */
+#if defined(__linux__) && !(defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 38)))
+/* strlcat is provided by libc on Darwin and the BSDs, and by glibc from 2.38; older glibc has none. */
 static size_t
 strlcat(char *dst, const char *src, size_t size)
 {
