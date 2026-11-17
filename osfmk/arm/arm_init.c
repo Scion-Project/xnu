@@ -80,6 +80,9 @@
 #include <pexpert/pexpert.h>
 
 #include <console/serial_protos.h>
+#if defined(__arm64__)
+#include <arm64/sweet_c2.h>
+#endif
 
 #if CONFIG_TELEMETRY
 #include <kern/telemetry.h>
@@ -1162,6 +1165,11 @@ arm_init_idle_cpu(
 	}
 
 	fiq_context_init(FALSE);
+
+#if SWEET_C2
+	/* back from a power-down that sweetc2 asked for (osfmk/arm64/sweet_c2.c): PMU, GIC, timer */
+	sweet_c2_resume(cpu_data_ptr);
+#endif
 
 	cpu_idle_exit(TRUE);
 }

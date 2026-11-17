@@ -324,6 +324,31 @@ pe_init_fiq(void)
 	__builtin_arm_dsb(DSB_SY);
 	__builtin_arm_isb(ISB_SY);
 }
+
+#if defined(STARLTE)
+/*
+ * osfmk/arm64/sweet_c2.c, on a core back from a power-down (sweetc2, NOT run on a phone): which of the settings
+ * pe_init_fiq() made for this core are gone. bit 0: GICC_CTLR's enable; bit 1: GICC_PMR; bit 2: the banked enables
+ * of the virtual timer and SGI 1. The GIC-400 is outside the cores, so the answer is expected to be 0.
+ */
+uint32_t a5xelte_gic_cpu_lost(void);
+uint32_t
+a5xelte_gic_cpu_lost(void)
+{
+	uint32_t lost = 0;
+	if (!(a5_gic_read32(a5_gicc_base, 0x000) & 1U)) {
+		lost |= 1;
+	}
+	if ((a5_gic_read32(a5_gicc_base, 0x004) & 0xf0U) != 0xf0U) {
+		lost |= 2;
+	}
+	uint32_t want = (1U << 27) | (1U << 1);
+	if ((a5_gic_read32(a5_gicd_base, 0x100) & want) != want) {
+		lost |= 4;
+	}
+	return lost;
+}
+#endif
 #else
 void
 pe_init_fiq()

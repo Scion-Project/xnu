@@ -72,6 +72,7 @@
 
 
 #include <libkern/section_keywords.h>
+#include <arm64/sweet_c2.h>
 
 extern boolean_t        idle_enable;
 extern uint64_t         wake_abstime;
@@ -610,6 +611,13 @@ cpu_idle(void)
 		__builtin_arm_dsb(DSB_SY);
 #if HAS_RETENTION_STATE
 		arm64_retention_wfi();
+#elif SWEET_C2
+		/* sweetc2/sweetc2dry (osfmk/arm64/sweet_c2.c): without either, sweet_c2_on is 0 and this is the WFI as before */
+		if (__improbable(os_atomic_load(&sweet_c2_on, relaxed) != 0) && wfi == 1) {
+			sweet_c2_idle(cpu_data_ptr);
+		} else {
+			__builtin_arm_wfi();
+		}
 #else
 		__builtin_arm_wfi();
 #endif
