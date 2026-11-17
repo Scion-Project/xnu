@@ -26,6 +26,7 @@
 #include <pexpert/pexpert.h>
 #include <kern/locks.h>
 #include <sys/errno.h>
+#include <sys/hakios.exynos_acpm.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern bool starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
@@ -1375,6 +1376,11 @@ sgu_irq_attach(void)
 	    SGU_INTID_GPU, gpu, sgu_irq_us);
 }
 
+/* sgu_pri: kern/sched.h's BASEPRI_KERNEL (81) and MAXPRI_KERNEL (95), which a BSD file does not see */
+#define SGU_PRI_KERNEL  81
+#define SGU_PRI_MOST    95
+extern kern_return_t kernel_thread_start_priority(thread_continue_t continuation, void *parameter, integer_t priority,
+    thread_t *new_thread);
 static LCK_MTX_DECLARE(sgu_q_lock, &sg_lck_grp);
 static LCK_MTX_DECLARE(sgu_q_nap_lock, &sg_lck_grp);
 extern uint32_t sweet_speed_flags(void);                /* boot-arg sweetspeed (osfmk/arm64/sweet_a64e.c) */
@@ -1792,7 +1798,17 @@ sgu_q_enqueue(uint64_t jc, uint32_t requirements)
 	lck_mtx_lock(&sgu_q_lock);
 	if (!sgu_q_started) {
 		thread_t thread;
-		if (kernel_thread_start(sgu_q_worker, NULL, &thread) == KERN_SUCCESS) {
+		/*
+		 * boot-arg sgu_pri=N (81 to 95; absent: 81, kernel_thread_start's BASEPRI_KERNEL, as before; NOT run on a phone): the
+		 * worker's priority. Between two chains the GPU stands still until this thread runs again (after its nap or the
+		 * job interrupt); a user thread with a time constraint (97 and up) or a kernel thread above 81 on its core delays
+		 * that. 92 is BASEPRI_PREEMPT, what the touch screen's thread can be given (startouch=).
+		 */
+		uint32_t pri = 0;
+		kern_return_t started = PE_parse_boot_argn("sgu_pri", &pri, sizeof(pri)) && pri > SGU_PRI_KERNEL && pri <= SGU_PRI_MOST ?
+		    kernel_thread_start_priority(sgu_q_worker, NULL, (integer_t)pri, &thread) :
+		    kernel_thread_start(sgu_q_worker, NULL, &thread);
+		if (started == KERN_SUCCESS) {
 			thread_set_thread_name(thread, "the Mali's app chains");
 			thread_deallocate(thread);
 			sgu_q_started = true;
@@ -2156,6 +2172,73 @@ starlte_gpu_thermal(int32_t g3d_mc)
 	}
 }
 
+/*
+ * perfmap=1 (off by default; NOT run on a phone): once, with the 60 s probe below, the clocks that bound how long the GPU
+ * takes over a frame, read only, for scion-kernel docs/ios27/PERFORMANCE.md. Nothing on this tree asks for a memory-bus
+ * (MIF) or INT rate, so those are what the boot loader left; nobody had looked.
+ *   - PLL_MIF's CON0 (CMU_MIF 0x1B800000 + 0x120: Samsung's cal-if for the 9810, cmucal-sfr.c, PLL_CON0_PLL_MIF; the same
+ *     layout as PLL_G3D's: P [13:8], M [25:16], S [2:0], bit 29 stable, 26 MHz in), and PLL_G3D's as now.
+ *   - The APM's own level tables (its "fvmap", read from its SRAM: hakios_acpm_dvfs_table()) for MIF (DVFS 0), INT (1) and
+ *     G3D (4), and its answer to a rate query for each (it answers 0 for both CPU domains: hakios.exynos_cpufreq.c).
+ * What to compare it with, from Samsung's tree for this phone (exynos9810-starlte_eur_open_26.dts): devfreq_mif's
+ * freq_info <2093000 208000 1014000 208000 2093000 2093000> (initial, default QoS, suspend, min, max, reboot, in the order
+ * exynos-devfreq.c reads them) and boot_info <40 1794000> (held at 1794 MHz for the first 40 s); gpu_dvfs_table asks for
+ * MIF at 1794000 or more while the G3D runs at 546 or 572 MHz, and gpu_max_clock_limit is 572000. So: a MIF below 1794 MHz
+ * would starve the GPU of bandwidth Samsung gives it at that clock; a G3D level above 572 MHz in the APM's table is what
+ * 16.5's mali_max would add.
+ * The registers read are ones Samsung's own kernel reads from the same exception level (its cal-if computes every PLL's
+ * rate from CON0); the ACPM requests are the governor's (bsd/dev/hakios.exynos_acpm_dvfs.c: one get per domain).
+ */
+#define SG_CMU_MIF_PA           0x1B800000u
+#define SG_PLL_CON0_MIF         0x120u
+#define SG_PERFMAP_LEVELS       24
+
+static uint32_t
+sg_pll_khz(uint32_t con0)
+{
+	uint64_t m = (con0 >> 16) & 0x3ff, p = (con0 >> 8) & 0x3f, s = con0 & 7;
+	if (!(con0 & (1u << 29)) || p == 0) {
+		return 0;                       /* not stable: no rate */
+	}
+	return (con0 & 0x10) ? (uint32_t)(26000ull * m / (p << s)) : 26000;
+}
+
+static void
+sg_perfmap_domain(uint32_t index, const char *name)
+{
+	uint32_t khz[SG_PERFMAP_LEVELS], uv[SG_PERFMAP_LEVELS], got = 0;
+	char line[480];
+	unsigned len = 0;
+
+	uint32_t n = hakios_acpm_dvfs_table(index, khz, uv, SG_PERFMAP_LEVELS, printf);
+	line[0] = 0;
+	for (uint32_t l = 0; l < n && len < sizeof(line) - 24; l++) {
+		len += (unsigned)snprintf(line + len, sizeof(line) - len, " %u/%u", khz[l], uv[l]);
+	}
+	int err = hakios_acpm_dvfs_get(index, &got);
+	printf("STARLTE PERFMAP: %s (DVFS %u): the APM's levels, kHz/uV:%s; its answer to a rate query: %u kHz (%d)\n", name,
+	    index, n ? line : " (not read)", got, err);
+}
+
+static void
+sg_perfmap(void)
+{
+	uint32_t on = 0;
+
+	if (!PE_parse_boot_argn("perfmap", &on, sizeof(on)) || on == 0) {
+		return;
+	}
+	vm_offset_t mif = ml_io_map(SG_CMU_MIF_PA, 0x1000);
+	vm_offset_t g3d = ml_io_map(SG_CMU_PA, 0x1000);
+	uint32_t mif0 = mif ? sg_rd(mif, SG_PLL_CON0_MIF) : 0, g3d0 = g3d ? sg_rd(g3d, 0x140) : 0;
+	printf("STARLTE PERFMAP: PLL_MIF CON0=%#x (%u kHz%s); PLL_G3D CON0=%#x (%u kHz); the G3D's rate asked at start %u kHz, "
+	    "heat level %u (perfmap=1, read only)\n", mif0, sg_pll_khz(mif0), mif ? "" : ", NOT mapped", g3d0, sg_pll_khz(g3d0),
+	    sg_boot_khz, sg_cool_level);
+	sg_perfmap_domain(0, "MIF");
+	sg_perfmap_domain(1, "INT");
+	sg_perfmap_domain(4, "G3D");
+}
+
 static void
 sg_thread(void *arg, __unused wait_result_t wr)
 {
@@ -2175,6 +2258,7 @@ sg_thread(void *arg, __unused wait_result_t wr)
 	}
 	sg_msleep(52000);
 	sg_probe(pmu, "60s");
+	sg_perfmap();
 }
 
 void
