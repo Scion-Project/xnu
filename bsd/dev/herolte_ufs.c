@@ -1281,6 +1281,11 @@ starlte_reboot_early(void)
 	uint32_t secs = 0;
 	if (PE_parse_boot_argn("sweetreboot", &secs, sizeof(secs)) && secs != 0) {
 		starlte_reboot_setup();
+	} else {
+		/* The USB console's "return" resets through the PMU too (starlte_reboot_recovery): mapped here, at boot, with
+		 * or without sweetreboot, so that a command line without it still has its way out (9 Nov: a test cmdline
+		 * without sweetreboot left "return" printing "PMU mapping failed" in a loop). Nothing is written until asked. */
+		starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);
 	}
 	starlte_halt_setup();
 }
@@ -1537,6 +1542,9 @@ static void
 starlte_reboot_recovery(void)
 {
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (starlte_pmu_va == NULL) {
+		starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);   /* last try */
+	}
 	/* the front camera's sensor, lens and supplies off again, if a stream had them on (nothing without cam_s9=) */
 	extern void hakios_exynos_camera_quiesce(void);
 	hakios_exynos_camera_quiesce();
