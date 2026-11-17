@@ -1272,8 +1272,8 @@ starlte_halt_test_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, 
 	}
 	return 0;
 }
-SYSCTL_PROC(_kern, OID_AUTO, sweethalt_test, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0, starlte_halt_test_sysctl,
-    "I", "sweethalt=1 test: 1 = restart, 2 = power off, the way reboot(2) goes");
+SYSCTL_PROC(_kern, OID_AUTO, sweethalt_test, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
+    starlte_halt_test_sysctl, "I", "sweethalt=1 test: 1 = restart, 2 = power off, the way reboot(2) goes");
 
 static void
 starlte_reboot_early(void)
