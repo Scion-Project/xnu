@@ -411,6 +411,16 @@ sweet_amfi_syscall(struct proc *p, int call, user_addr_t arg)
 		if (PE_parse_boot_argn("sweetinject", NULL, 0)) {
 			flags |= (1ULL << 1) | (1ULL << 4) | (1ULL << 5) | (1ULL << 6);
 		}
+		/*
+		 * sweetatpath=1: also bit 0 (AMFI_DYLD_OUTPUT_ALLOW_AT_PATH), as AMFI answers an ordinary signed process
+		 * on a stock phone. Without it dyld refuses every @rpath / @executable_path / @loader_path ("security
+		 * policy does not allow @ path expansion"): app extensions and apps that carry their own frameworks
+		 * (Books' and Podcasts' widgets died in dyld at every boot). Off by default.
+		 */
+		uint32_t atpath = 0;
+		if (PE_parse_boot_argn("sweetatpath", &atpath, sizeof(atpath)) && atpath != 0) {
+			flags |= 1ULL << 0;
+		}
 		if (copyin(arg, &a, sizeof(a)) != 0) {
 			return EFAULT;
 		}
