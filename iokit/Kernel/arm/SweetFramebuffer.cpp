@@ -64,7 +64,7 @@ extern "C" uint32_t sweet_speed_flags(void);     /* boot-arg sweetspeed (osfmk/a
  * was doing: held in a swap call, GPU chains of it queued or running (the frame is being drawn, its swap has not come), or
  * nothing of it on the GPU at all (it is computing, or waiting for something else). Counters only: two clock reads a swap.
  */
-static uint32_t sweet_fb_prof;
+static uint32_t sweet_fb_prof; extern "C" uint64_t sweet_fb_first_present; /* defined under HEROLTE below, at the end for FRANKEL */
 static volatile int32_t sweet_fb_pf_inswap;
 static struct {
 	uint64_t swaps, held_ns, held_max;                      /* swap calls, and how long they were held */
@@ -714,7 +714,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 	}
 	uint64_t pf_woke = sweet_fb_prof ? mach_absolute_time() : 0;
 #else
-	(void)recSeq;
+	(void)recSeq; uint64_t pf_woke = sweet_fb_prof ? mach_absolute_time() : 0; /* FRANKEL (generic boards): as STARLTE */
 #endif
 	if (rec != NULL) {
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
@@ -1999,3 +1999,23 @@ IOMobileFramebufferUserClient::setProperties(OSObject *properties)
 }
 #endif
 #endif /* SWEET || A5XELTE */
+#if defined(ARM64_BOARD_CONFIG_FRANKEL)
+/* FRANKEL: the first present's time, defined under HEROLTE above for the S9 */
+uint64_t sweet_fb_first_present;
+/* the pointer layer's position (SweetHID's steering reads it; set by the STARLTE present path only) */
+volatile int32_t sweet_fb_cur_x, sweet_fb_cur_y;
+volatile uint32_t sweet_fb_cur_seq;
+/* no property is taken on this board yet (the S9's go to its panel's brightness): as IOService::setProperties */
+IOReturn
+AppleCLCD::setProperties(OSObject *properties)
+{
+	(void)properties;
+	return kIOReturnUnsupported;
+}
+IOReturn
+IOMobileFramebufferUserClient::setProperties(OSObject *properties)
+{
+	(void)properties;
+	return kIOReturnUnsupported;
+}
+#endif

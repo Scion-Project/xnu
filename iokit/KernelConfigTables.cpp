@@ -41,7 +41,7 @@ const char * gIOKernelConfigTables =
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
     "     'IONameMatch'     = 'samsung,a5xelte';"
 #else
-    "     'IONameMatch'     = 'xiaomi,sweet';"
+    "     'IONameMatch'     = ('xiaomi,sweet', 'google,lga');"       /* FRANKEL: the Pixel 10's loader adds "google,lga" (adt_layer=s9) */
 #endif
     "     'IOProbeScore'    = 10000:32;"
     "   },"
@@ -51,7 +51,7 @@ const char * gIOKernelConfigTables =
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
     "     'IONameMatch'     = 'arm,cortex-a53';"
 #else
-    "     'IONameMatch'     = 'qcom,kryo470';"
+    "     'IONameMatch'     = ('qcom,kryo470', 'arm,armv9');"        /* FRANKEL: the Tensor G5's A520, A725, X4 */
 #endif
     "     'IOProbeScore'    = 10000:32;"
     "   },"

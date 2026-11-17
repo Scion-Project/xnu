@@ -45,7 +45,7 @@ CFLAGS+= -include meta_features.h -DDRIVER_PRIVATE \
 SFLAGS+= -include meta_features.h
 
 # This provider is built into SWEET; other boards use their normal kext.
-ifneq ($(filter $(CURRENT_MACHINE_CONFIG),SWEET A5XELTE HEROLTE STARLTE),)
+ifneq ($(filter $(CURRENT_MACHINE_CONFIG),SWEET A5XELTE HEROLTE STARLTE FRANKEL),)
 SWEET_PTHREAD_ROOT = $(SRCROOT)/bsd/pthread/sweet_libpthread
 SWEET_PTHREAD_INC = -I$(SWEET_PTHREAD_ROOT) -I$(SWEET_PTHREAD_ROOT)/private -I$(SWEET_PTHREAD_ROOT)/include
 sweet_pthread_init.o_INCFLAGS = $(SWEET_PTHREAD_INC)
@@ -64,6 +64,15 @@ hfs_encodinghint.o_CFLAGS_ADD += -Dhfs_allocated=hfs_encodings_allocated
 # Scion's Wi-Fi: the station layer (hakios.sta.c) is in this kernel
 # (and its kmem_alloc_contig() is starlte_wifi.c's: the radio's 44 MB, taken at boot while memory is in large pieces)
 hakios.lx.o_CFLAGS_ADD += -DHAKIOS_WIFI_STA -Dkmem_alloc_contig_guard=starlte_wifi_kmem_alloc_contig_guard -include vm/vm_kern_xnu.h
+# FRANKEL (scion_frankel only): Scion's UFS driver from scion-kernel. kmem_alloc_contig() is in vm/vm_kern_xnu.h on this
+# base; the S9 host entry of the driver names its DMA carve-out, which this tree's sys/hakios.exynos9810_mem.h (the
+# Starbite path's) does not: the values of scion-kernel's socs/exynos9810/include/hakios.exynos9810_mem.h.
+hakios.ufshc.o_CFLAGS_ADD += $(HAKIOS_UFS_FRANKEL_NAMES) -include vm/vm_kern_xnu.h -DEXYNOS9810_MEM_UFS_PA=0xDA000000ULL -DEXYNOS9810_MEM_UFS_END=0xDA400000ULL
+# starlte_usbcon.c (built for every generic board) has no-op hakios_ufs_summary() and hakios_var_save_on_return() for the
+# S9's USB console; on FRANKEL the driver's own keep their names apart from those
+HAKIOS_UFS_FRANKEL_NAMES = -Dhakios_ufs_summary=hakios_ufs_summary_frankel -Dhakios_var_save_on_return=hakios_var_save_on_return_frankel
+hakios.ufs.o_CFLAGS_ADD += -include vm/vm_kern_xnu.h $(HAKIOS_UFS_FRANKEL_NAMES)
+hakios.pci.o_CFLAGS_ADD += -include vm/vm_kern_xnu.h
 hakios.brcmfmac.o_CFLAGS_ADD += -DHAKIOS_WIFI_STA
 # ... and iOS 27's Apple80211 layouts (scan request 5528 bytes, scan result 2280, join 656)
 hakios.apple80211.o_CFLAGS_ADD += -DHAKIOS_APPLE80211_27
