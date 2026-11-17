@@ -44,6 +44,7 @@ extern "C" {
 int starlte_gpu_user_ready(void);
 bool starlte_gpu_user_param(uint32_t param, uint64_t *value);
 bool starlte_gpu_user_map(uint64_t va, const uint64_t *pages, unsigned n);
+bool starlte_gpu_user_map_prot(uint64_t va, const uint64_t *pages, unsigned n, bool gpu_writes);
 void starlte_gpu_user_unmap(uint64_t va, unsigned n);
 int starlte_gpu_user_submit(uint64_t jc, uint32_t requirements);
 int starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_t *seq);
@@ -136,6 +137,8 @@ struct sbm_bo {
 	bool host;                              /* the caller's own pages, wired for the GPU (IMPORT_HOST) */
 	uint64_t seq;                           /* last chain that named it (async submits) */
 	uint64_t dying;                         /* closed by its owner: it goes once this chain is done (the queue); 0 = live */
+	bool unmapped;                          /* out of AS1 already; its pages go once chain `freeing` is done */
+	uint64_t freeing;
 };
 
 /*
@@ -307,6 +310,7 @@ class StarbiteMaliUserClient : public IOUserClient {
 	IOReturn importHost(sbm_import_host *a);
 	IOReturn mmapBO(sbm_mmap_bo *a);
 	sbm_bo *lookup(uint32_t handle);
+	void unmapBO(sbm_bo *bo);
 	void closeBO(sbm_bo *bo);
 	void reap(void);
 	uint32_t fDying[256];                   /* handles closed by the client whose buffers still wait for their chains */
@@ -365,25 +369,52 @@ StarbiteMaliUserClient::reap(void)
 	uint32_t kept = 0;
 	for (uint32_t i = 0; i < fDyingCount; i++) {
 		sbm_bo *bo = &fBos[fDying[i] - 1];
-		if (bo->mem != NULL && bo->dying != 0 && starlte_gpu_user_wait_seq(bo->dying, false) != 0) {
-			fDying[kept++] = fDying[i];             /* its chain is still queued or running */
+		if (bo->mem == NULL || bo->dying == 0) {
 			continue;
 		}
-		if (bo->mem != NULL && bo->dying != 0) {
-			closeBO(bo);
+		if (!bo->unmapped) {
+			if (starlte_gpu_user_wait_seq(bo->dying, false) != 0) {
+				fDying[kept++] = fDying[i];     /* its chain is still queued or running */
+				continue;
+			}
+			/* out of AS1 now; its pages only once every chain submitted by now, any client's, is done too */
+			unmapBO(bo);
+			bo->freeing = starlte_gpu_user_seq();
 		}
+		if (bo->freeing != 0 && starlte_gpu_user_wait_seq(bo->freeing, false) != 0) {
+			fDying[kept++] = fDying[i];
+			continue;
+		}
+		closeBO(bo);
 	}
 	fDyingCount = kept;
 }
 
+/*
+ * A buffer's pages out of AS1. They and its GPU addresses go back (closeBO) only once every chain that was submitted by
+ * then is done: AS1 is every client's, and a chain reaches any buffer its submit does not list (see GEM_CLOSE), so a chain
+ * of this client's or of another's may still be at work on them; each chain ends with the GPU's caches cleaned, so none
+ * of its writes is left to land in pages given back.
+ */
+void
+StarbiteMaliUserClient::unmapBO(sbm_bo *bo)
+{
+	starlte_gpu_user_unmap(bo->va, bo->pages);
+	bo->unmapped = true;
+}
+
+/* fLock held. Unmapped first and waited for here, unless reap() has done both already. */
 void
 StarbiteMaliUserClient::closeBO(sbm_bo *bo)
 {
+	if (!bo->unmapped) {
+		unmapBO(bo);
+		(void)starlte_gpu_user_wait_seq(0, true);
+	}
 	sbm_count_pages(bo, -1);
 	if (bo->surface == 0 && !bo->host && fBufferPages >= bo->pages) {
 		fBufferPages -= bo->pages;
 	}
-	starlte_gpu_user_unmap(bo->va, bo->pages);
 	sbm_va_free(bo->va, (uint64_t)bo->pages * 0x1000);
 	OSSafeReleaseNULL(bo->map);
 	/* an imported surface's pages were wired for the GPU (importSurface) */
@@ -411,6 +442,8 @@ StarbiteMaliUserClient::closeBO(sbm_bo *bo)
 	bo->host = false;
 	bo->dying = 0;
 	bo->seq = 0;
+	bo->unmapped = false;
+	bo->freeing = 0;
 }
 
 /* Async submits: the buffers a chain names are not closed or waited for as idle before it is done. */
@@ -525,7 +558,7 @@ StarbiteMaliUserClient::importSurface(sbm_surface *a)
 		return kIOReturnSuccess;
 	}
 	for (uint32_t i = 0; i < fCount; i++) {
-		if (fBos[i].mem != NULL && fBos[i].surface == a->surface && fBos[i].mem == s->memory) {
+		if (fBos[i].mem != NULL && fBos[i].dying == 0 && fBos[i].surface == a->surface && fBos[i].mem == s->memory) {
 			a->handle = i + 1;
 			s->release();
 			return kIOReturnSuccess;
@@ -568,7 +601,8 @@ StarbiteMaliUserClient::importSurface(sbm_surface *a)
 		pa[i] = s->memory->getPhysicalSegment((IOByteCount)i * 0x1000, &len, kIOMemoryMapperNone);
 		ok = pa[i] != 0;
 	}
-	ok = ok && starlte_gpu_user_map(va, pa, pages);
+	/* a surface over pages its maker may only read (SweetSurface wraps them kIODirectionOut): the GPU only reads them */
+	ok = ok && starlte_gpu_user_map_prot(va, pa, pages, (s->memory->getDirection() & kIODirectionIn) != 0);
 	if (pa != NULL) {
 		IOFreeData(pa, (vm_size_t)pages * sizeof(uint64_t));
 	}
@@ -611,11 +645,17 @@ StarbiteMaliUserClient::importHost(sbm_import_host *a)
 		handle = ++fCount;
 	}
 	IOMemoryDescriptor *mem = IOMemoryDescriptor::withAddressRange(a->addr, a->size, kIODirectionInOut, fTask);
+	bool gpu_writes = true;
 	if (mem == NULL) {
 		return kIOReturnNoMemory;
 	}
 	if (mem->prepare() != kIOReturnSuccess) {
-		/* read-only memory (a mapped file, a constant buffer): wired for the GPU to read */
+		/*
+		 * read-only memory (a mapped file, a constant buffer, a shared library): wired for the GPU to read, and mapped
+		 * so that it can only read it. Its pages are the file's own, shared with every process that maps it; a GPU
+		 * that could write them would change them for all of those.
+		 */
+		gpu_writes = false;
 		mem->release();
 		mem = IOMemoryDescriptor::withAddressRange(a->addr, a->size, kIODirectionOut, fTask);
 		if (mem == NULL) {
@@ -635,7 +675,7 @@ StarbiteMaliUserClient::importHost(sbm_import_host *a)
 		pa[i] = mem->getPhysicalSegment((IOByteCount)i * 0x1000, &len, kIOMemoryMapperNone);
 		ok = pa[i] != 0;
 	}
-	ok = ok && starlte_gpu_user_map(va, pa, pages);
+	ok = ok && starlte_gpu_user_map_prot(va, pa, pages, gpu_writes);
 	if (pa != NULL) {
 		IOFreeData(pa, (vm_size_t)pages * sizeof(uint64_t));
 	}
@@ -1002,9 +1042,13 @@ IOReturn
 StarbiteMaliUserClient::clientClose(void)
 {
 	IOLockLock(fLock);
-	if (fAsync) {
-		(void)starlte_gpu_user_wait_seq(0, true);
+	/* every buffer out of AS1, then one wait for every chain submitted by now (any client's: AS1 is shared), then the pages */
+	for (uint32_t i = 0; i < fCount; i++) {
+		if (fBos[i].mem != NULL && !fBos[i].unmapped) {
+			unmapBO(&fBos[i]);
+		}
 	}
+	(void)starlte_gpu_user_wait_seq(0, true);
 	for (uint32_t i = 0; i < fCount; i++) {
 		if (fBos[i].mem != NULL) {
 			closeBO(&fBos[i]);
