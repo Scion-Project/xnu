@@ -2035,6 +2035,75 @@ proc_handle_critical_exit(proc_t p, int rv)
 	}
 }
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * sweetcrashimg=N (17 Nov 2026; off by default; NOT run on a phone yet): for the first N crashes of a boot (at most
+ * 1000), after the CRASH lines of sweet_crash_log, one line for each of the crashing thread's pc, lr and frame-pointer
+ * return addresses saying which image it falls in, so that a crash can be symbolicated offline against the root's own
+ * files (tools/ios27/crashlog-symbolicate.py):
+ *   CRASH <name> img <what> <addr>: dsc 0x<unslid>             inside the shared cache (unslid = addr - the cache's slide)
+ *   CRASH <name> img <what> <addr>: <path> +0x<file offset>    a mapped file (the process's own binary, an app's framework,
+ *                                                              a library outside the cache)
+ *   CRASH <name> img <what> <addr>: anonymous tag <n> | not mapped
+ * Addresses, file names and offsets only; no memory contents. Called on the crashing thread from proc_prepareexit,
+ * where sweet_crash_log already walks the same map. iOS's own crash reports need ReportCrash, which the S9 root build
+ * leaves out by default (docs/ios27/CONTROL-CENTRE.md).
+ */
+static void
+sweet_crash_images(proc_t p)
+{
+	static int limit = -1;
+	static uint32_t done;
+	extern unsigned sweet_crash_frames(uint64_t *out, unsigned max, uint64_t *slide);
+	static const char *const what[] = { "pc", "lr", "bt0", "bt1", "bt2", "bt3", "bt4", "bt5", "bt6", "bt7", "bt8", "bt9" };
+	uint64_t f[12], slide;
+	unsigned n;
+	char *path;
+
+	if (limit < 0) {
+		int v = 0;
+		PE_parse_boot_argn("sweetcrashimg", &v, sizeof(v));
+		limit = v < 0 ? 0 : (v > 1000 ? 1000 : v);
+	}
+	if (limit == 0 || os_atomic_inc_orig(&done, relaxed) >= (uint32_t)limit) {
+		return;
+	}
+	n = sweet_crash_frames(f, 12, &slide);
+	if (n == 0) {
+		return;
+	}
+	path = kalloc_data(MAXPATHLEN, Z_WAITOK | Z_ZERO);
+	if (path == NULL) {
+		return;
+	}
+	for (unsigned i = 0; i < n; i++) {
+		struct proc_regioninfo_internal pri;
+		uintptr_t vnodeaddr = 0;
+		uint32_t vid = 0;
+		uint64_t a = f[i] & 0x00007fffffffffffULL;     /* no signature bits in a user address */
+
+		bzero(&pri, sizeof(pri));
+		if (fill_procregioninfo(proc_task(p), a, &pri, &vnodeaddr, &vid) == 0 || pri.pri_address > a) {
+			printf("CRASH %s img %s 0x%llx: not mapped\n", p->p_comm, what[i], a);
+		} else if (pri.pri_flags & PROC_REGION_SUBMAP) {
+			printf("CRASH %s img %s 0x%llx: dsc 0x%llx\n", p->p_comm, what[i], a, a - slide);
+		} else if (vnodeaddr != 0 && vnode_getwithvid((vnode_t)vnodeaddr, vid) == 0) {
+			int len = MAXPATHLEN;
+			if (vn_getpath((vnode_t)vnodeaddr, path, &len) != 0) {
+				strlcpy(path, "?", MAXPATHLEN);
+			}
+			path[MAXPATHLEN - 1] = '\0';
+			vnode_put((vnode_t)vnodeaddr);
+			printf("CRASH %s img %s 0x%llx: %s +0x%llx\n", p->p_comm, what[i], a, path,
+			    pri.pri_offset + (a - pri.pri_address));
+		} else {
+			printf("CRASH %s img %s 0x%llx: anonymous tag %u\n", p->p_comm, what[i], a, pri.pri_user_tag);
+		}
+	}
+	kfree_data(path, MAXPATHLEN);
+}
+#endif
+
 void
 proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 {
@@ -2138,6 +2207,7 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 			extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
 			sweet_crash_log(p->p_comm, proc_getpid(p), WTERMSIG(rv),
 			    ((uint64_t)ut->uu_exception << 32) | (uint32_t)ut->uu_code, ut->uu_subcode);
+			sweet_crash_images(p);
 			/* abort_with_payload messages (_objc_fatal, os_crash_fmt, ...) */
 			if (PROC_HAS_EXITREASON(p)) {
 				char *desc = exit_reason_get_string_desc(p->p_exit_reason);
