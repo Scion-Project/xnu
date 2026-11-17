@@ -76,6 +76,8 @@ UNUSED_SYMBOL(decmpfs_validate_compressed_file)
 #include <sys/kdebug_triage.h>
 
 #include <ptrauth.h>
+#include <pexpert/pexpert.h>
+#include <libkern/OSAtomic.h>
 
 #pragma mark --- debugging ---
 
@@ -202,6 +204,35 @@ extern void IOServicePublishResource( const char * property, boolean_t value );
 extern boolean_t IOServiceWaitForMatchingResource( const char * property, uint64_t timeout );
 extern boolean_t IOCatalogueMatchingDriversPresent( const char * property );
 
+/*
+ * Scion: decmpfs_path=1 names the file of each of the first 64 reads of a compressed file whose type no
+ * decompressor registered (the line before it says "<private>"). On iOS 27 for the S9 such reads, of type 16,
+ * come where the app switcher shows saved snapshots (scion-kernel docs/ios27/RENDERING.md): this says which
+ * files they are. Off by default (one boot argument read, nothing else); not run on a phone.
+ */
+static void
+decmpfs_name_unregistered(vnode_t vp, uint32_t type)
+{
+	static int wanted = -1;
+	static SInt32 named;
+
+	if (wanted < 0) {
+		int on = 0;
+		wanted = (PE_parse_boot_argn("decmpfs_path", &on, sizeof(on)) && on != 0) ? 1 : 0;
+	}
+	if (wanted == 0 || vp == NULL || OSIncrementAtomic(&named) >= 64) {
+		return;
+	}
+	char *path = zalloc(ZV_NAMEI);
+	int len = MAXPATHLEN;
+	path[0] = 0;
+	if (vn_getpath(vp, path, &len) != 0) {
+		strlcpy(path, "(no path)", MAXPATHLEN);
+	}
+	printf("decmpfs: a compressed file of type %u, which no decompressor reads: %s\n", type, path);
+	zfree(ZV_NAMEI, path);
+}
+
 static void *
 _decmp_get_func(vnode_t vp, uint32_t type, uintptr_t offset, uint32_t discriminator)
 {
@@ -255,6 +286,7 @@ _decmp_get_func(vnode_t vp, uint32_t type, uintptr_t offset, uint32_t discrimina
 
 	// the compressor hasn't registered, so it never will unless someone manually kextloads it
 	ErrorLogWithPath("tried to access a compressed file of unregistered type %d\n", type);
+	decmpfs_name_unregistered(vp, type);
 	return NULL;
 }
 
@@ -2363,6 +2395,9 @@ decmpfs_init(void)
 	decmpfs_ctx = vfs_context_create(vfs_context_kernel());
 
 	register_decmpfs_decompressor(CMP_Type1, &Type1Reg);
+	/* Scion: type 16 (LZ4 in chunks in the resource fork), with the boot argument decmpfs_lz4=1 (decmpfs_lz4.c) */
+	extern void decmpfs_lz4_init(void);
+	decmpfs_lz4_init();
 
 	ktriage_register_subsystem_strings(KDBG_TRIAGE_SUBSYS_DECMPFS, &ktriage_decmpfs_subsystem_strings);
 
