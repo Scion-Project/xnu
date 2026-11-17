@@ -163,6 +163,7 @@ static void sleh_interrupt_handler_prologue(arm_saved_state_t *, unsigned int ty
 static void sleh_interrupt_handler_epilogue(void);
 
 static void handle_svc(arm_saved_state_t *);
+extern volatile uint32_t sweet_wdog_mark;       /* osfmk/arm64/sweet_a64e.c: 0 while the hang watchdog waits for a system call */
 static void handle_mach_absolute_time_trap(arm_saved_state_t *);
 static void handle_mach_continuous_time_trap(arm_saved_state_t *);
 
@@ -1330,6 +1331,7 @@ handle_uncategorized(arm_saved_state_t *state)
 	if (PSR64_IS_USER64(get_saved_state_cpsr(state))) {
 		extern bool sweet_a64e_emulate(arm_saved_state_t *, uint32_t);
 		if (sweet_a64e_emulate(state, instr)) {
+			extern void sweet_m3_residual_note(uint32_t); sweet_m3_residual_note(instr); /*sm3r-emul*/
 			return;
 		}
 		/*
@@ -1342,7 +1344,7 @@ handle_uncategorized(arm_saved_state_t *state)
 			int cpu = (int)(thread_tid(current_thread()) % 4);
 			processor_t little = cpu_to_processor(cpu);
 			if (little != PROCESSOR_NULL) {
-				sweet_m3_pins++;
+				sweet_m3_pins++; sweet_m3_residual_note(instr); /*sm3r-pin*/
 				thread_bind(little);
 				extern void sweet_m3_pin_note(thread_t);
 				sweet_m3_pin_note(current_thread());
@@ -1377,6 +1379,7 @@ handle_uncategorized(arm_saved_state_t *state)
 			/* trapped on an M3, migrated to an A55 before the checks above: run it again here */
 			extern bool sweet_a55_retry_ok(uint32_t, thread_t, uint64_t);
 			if (sweet_a55_retry_ok(instr, current_thread(), get_saved_state_pc(state))) {
+				extern void sweet_m3_residual_note(uint32_t); sweet_m3_residual_note(instr); /*sm3r-retry*/
 				return;
 			}
 		}
@@ -2920,10 +2923,16 @@ handle_svc(arm_saved_state_t *state)
 
 		/* Counting perhaps better in the handler, but this is how it's been done */
 		thread->syscalls_mach++;
+		if (__improbable(sweet_wdog_mark == 0)) {
+			sweet_wdog_mark = 1;    /* sweetwdog: user space is alive (osfmk/arm64/sweet_a64e.c) */
+		}
 		mach_syscall(state);
 	} else {
 		/* Counting perhaps better in the handler, but this is how it's been done */
 		thread->syscalls_unix++;
+		if (__improbable(sweet_wdog_mark == 0)) {
+			sweet_wdog_mark = 1;
+		}
 		p = get_bsdthreadtask_info(thread);
 
 		assert(p);

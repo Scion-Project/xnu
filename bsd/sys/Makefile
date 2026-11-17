@@ -255,6 +255,7 @@ XNU_ONLY_EXPORTS = \
 	file_internal.h \
 	filedesc.h \
 	guarded.h \
+	hakios.sensors.h \
 	kern_memorystatus_xnu.h \
 	mount_internal.h \
 	munge.h \

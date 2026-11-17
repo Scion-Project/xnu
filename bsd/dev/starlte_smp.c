@@ -351,6 +351,24 @@ st_top_a64e(uint64_t window_ns)
 	}
 	pins_last = sweet_m3_pins;
 
+	/* per-class residual: every non-ARMv8.0 insn an M3 still ran this window (0 => fully rewritten) */
+	{
+		extern uint64_t sweet_m3_residual[16];
+		extern const char * const sweet_m3_residual_name[16];
+		static uint64_t resid_last[16];
+		char rl[400]; int rn2 = snprintf(rl, sizeof(rl), "STARLTE M3 RESIDUAL (%llus):", window_ns / NSEC_PER_SEC);
+		int any = 0;
+		for (unsigned i = 0; i < 16; i++) {
+			uint64_t d = sweet_m3_residual[i] - resid_last[i];
+			resid_last[i] = sweet_m3_residual[i];
+			if (d && rn2 < (int)sizeof(rl) - 32) {
+				rn2 += snprintf(rl + rn2, sizeof(rl) - (size_t)rn2, " %s %llu", sweet_m3_residual_name[i], d);
+				any = 1;
+			}
+		}
+		if (any) { printf("%s\n", rl); }
+	}
+
 	/* the hottest trapping PCs of the window */
 	struct sweet_lse_site { uint64_t pc, count; };
 	extern struct sweet_lse_site sweet_lse_sites[512];

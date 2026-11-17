@@ -82,6 +82,18 @@ extern int proc_selfpid(void);
  * 65536  recommended cores 0xf1 (cpu0 + the four M3s) once the machine is up: the scheduler here is symmetric, so UI work else lands on
  *        the A55s; threads bound to an A55 (FP16 pins) still run there
  *131072  the A55s' governor floor 1456 MHz (measured: no change, kept for the record)
+ * The Liquid Glass run (docs/ios27/LIQUID-GLASS.md):
+ *262144  the GPU's app chains in a queue with a thread of their own (bsd/dev/starlte_gpu.c): a submit only appends, waits
+ *        sleep, and the framebuffer shows a frame once the chains queued before its swap are done (needs bit 64)
+ *524288  the GPU present cleans a frame out of the CPU caches only when its IOSurface seed moved (a CPU wrote it)
+ * (1048576, 2097152 and 4194304 are the data-protection work's.)
+ *8388608 an IOSurface that is a snapshot of its maker's unwireable memory is compared with it again at the maker's locks,
+ *        use counts and release, and brought up to date (iokit/Kernel/arm/SweetSurface.cpp sweet_surface_resnap)
+ * (16777216, 33554432 and 67108864 are the data-protection work's too.)
+ *134217728 a cap on the GPU buffers' wired memory: all clients 35 % of the memory, one client half of that; a buffer beyond
+ *        it is refused (iokit/Kernel/arm/StarbiteMali.cpp; sbm_cap_mb= and sbm_client_cap_mb= set the caps by hand)
+ *268435456 IOSurface's limits answer (selector 13) carries the largest width, height and bytes per row for iOS callers too, not
+ *        only for macOS ones (without it IOSurfaceGetPropertyMaximum is 0 in every iOS process; iokit/Kernel/arm/SweetSurface.cpp)
  * The FP16 forms emulated under bit 2 now include FCCMP/FCCMPE/FCSEL H, FMOV/FABS/FNEG H and FABS/FNEG .4H/.8H (tools/ios27/perf/test/fp16t.c
  * checks them bit for bit); and, always on, a trap that was taken on an M3 but is handled after the thread migrated to an A55 is
  * retried (the A55 runs it) instead of ending in SIGILL.
@@ -91,6 +103,13 @@ extern int proc_selfpid(void);
 #define SWEET_SPEED_PACGA   4
 #define SWEET_SPEED_BOOTLOG 8
 #define SWEET_SPEED_PINLOG  16
+
+/*
+ * The hang watchdog's sign of life from user space (boot-arg sweetwdog, bsd/dev/herolte_ufs.c): the watchdog's check
+ * sets this to 0, the next system call or Mach trap from user space (sleh.c handle_svc) sets it back to 1. Read-mostly:
+ * 1 for good while the watchdog is off, written at most once per check and CPU while it is on.
+ */
+volatile uint32_t sweet_wdog_mark = 1;
 
 uint32_t sweet_speed_flags(void);
 static uint32_t sweet_speed_value;
@@ -622,6 +641,62 @@ sweet_a55_retry_ok(uint32_t w, thread_t th, uint64_t pc)
 
 uint64_t sweet_m3_pins;          /* threads pinned to an A55 (sleh.c) */
 uint64_t sweet_m3_unpins;        /* soft pins released (sweetm3unpin) */
+
+/*
+ * Per-class residual counters: each time an M3 still runs an instruction it architecturally lacks
+ * (emulated here, pinned to an A55, or A55-retried in sleh.c), classify the word and bump a bucket.
+ * After the ahead-of-time rewrite every bucket should be 0 and "STARLTE M3 RESIDUAL" should vanish.
+ * Racy increments are fine (diagnostic only).
+ */
+enum { SM3R_LDOP, SM3R_CAS, SM3R_CASP, SM3R_SWP, SM3R_LDAPR, SM3R_FP16, SM3R_FCADD, SM3R_FCMLA,
+       SM3R_DOT, SM3R_RDM, SM3R_I8MM, SM3R_BF16, SM3R_SHA3, SM3R_JSCVT, SM3R_FHM, SM3R_OTHER, SM3R_N };
+uint64_t sweet_m3_residual[SM3R_N];
+const char * const sweet_m3_residual_name[SM3R_N] = {
+    "ldop", "cas", "casp", "swp", "ldapr", "fp16", "fcadd", "fcmla",
+    "dot", "rdm", "i8mm", "bf16", "sha3", "jscvt", "fhm", "other" };
+
+static int
+sweet_m3_classify(uint32_t w)
+{
+	if ((w & 0x3FA07C00) == 0x08A07C00) { return SM3R_CAS; }
+	if (((w & 0xBFA07C00) == 0x08207C00) && (((w >> 10) & 31) == 31)) { return SM3R_CASP; }
+	if ((w & 0x3F200C00) == 0x38200000) {
+		unsigned o3 = (w >> 15) & 1, opc = (w >> 12) & 7;
+		if (o3 == 0) { return SM3R_LDOP; }
+		if (opc == 0) { return SM3R_SWP; }
+		if (opc == 4 && (((w >> 16) & 31) == 31) && (((w >> 22) & 3) == 2)) { return SM3R_LDAPR; }
+	}
+	if ((w & 0x3FFFFC00) == 0x38BFC000) { return SM3R_LDAPR; }
+	if ((w & 0xFFFFFC00) == 0x1E7E0000) { return SM3R_JSCVT; }
+	if ((w & 0xBF20EC00) == 0x2E00E400) { return SM3R_FCADD; }
+	if (((w & 0xBF20E400) == 0x2E00C400) || ((w & 0xBF009400) == 0x2F001000)) { return SM3R_FCMLA; }
+	if (((w & 0xBF20FC00) == 0x0E009400) || ((w & 0xBF00F400) == 0x0F00E000)) { return SM3R_DOT; }
+	if (((w & 0xBF20F400) == 0x2E008400) || ((w & 0xFF20F400) == 0x7E008400) ||
+	    ((w & 0xBF00D400) == 0x2F00D000) || ((w & 0xFF00D400) == 0x7F00D000)) { return SM3R_RDM; }
+	if (((w & 0xBF20FC00) == 0x0E809C00) || ((w & 0xBFE0FC00) == 0x4E80A400) ||
+	    ((w & 0xBF20FC00) == 0x0E80A400)) { return SM3R_I8MM; }
+	if (((w & 0x9FA0FC00) == 0x0E20EC00) || ((w & 0x9FA0FC00) == 0x2E20CC00)) { return SM3R_FHM; }
+	if (((w & 0xFFE08000) == 0xCE000000) || ((w & 0xFFE0FC00) == 0xCE608400) ||
+	    ((w & 0xFFFFFC00) == 0xCEC08000) || ((w & 0xFFE0FC00) == 0xCE800000) ||
+	    ((w & 0xFFE0FC00) == 0xCE808400)) { return SM3R_SHA3; }
+	if ((w & 0xFFFFFC00) == 0x1E634000) { return SM3R_BF16; }
+	{
+		unsigned ftype = (w >> 22) & 3;
+		if (((w & 0x5F200000) == 0x1E200000) && ftype == 3) { return SM3R_FP16; }
+		if (((w & 0x5F000000) == 0x1F000000) && ftype == 3) { return SM3R_FP16; }
+		if (((w & 0x9F60C400) == 0x0E400400) || ((w & 0xDF60C400) == 0x5E400400)) { return SM3R_FP16; }
+		if (((w & 0x9F7E0C00) == 0x0E780800) || ((w & 0xDF7E0C00) == 0x5E780800)) { return SM3R_FP16; }
+	}
+	return SM3R_OTHER;
+}
+
+void sweet_m3_residual_note(uint32_t w);
+void
+sweet_m3_residual_note(uint32_t w)
+{
+	sweet_m3_residual[sweet_m3_classify(w)]++;
+}
+
 
 /*
  * Soft M3 pins (boot-arg sweetm3unpin=N, milliseconds; default 0 = off = pins are permanent):

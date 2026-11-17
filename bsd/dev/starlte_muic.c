@@ -16,6 +16,7 @@
 #include <sys/systm.h>
 #include <sys/hakios.exynos_hsi2c.h>
 #include <sys/hakios.xnu.h>
+#include <kern/locks.h>
 
 #define MUIC                    0x25
 #define OPCODE_WRITE            0x21
@@ -65,13 +66,17 @@ ctrl1_read(void)
 	return -1;
 }
 
-static void
-muic_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+/* the bus is shared by the switch (muic_tick) and the fuel gauge (starlte_fg_read): one at a time */
+static LCK_GRP_DECLARE(muic_lck_grp, "starlte_muic");
+static LCK_MTX_DECLARE(muic_bus_lock, &muic_lck_grp);
+
+static bool
+muic_bus_up(void)
 {
 	if (!muic_up) {
 		if (!hakios_hsi2c_map(&bus, hakios_say)) {
 			printf("STARLTE MUIC: HSI2C map failed\n");
-			return;
+			return false;
 		}
 		hakios_hsi2c_power(&bus);
 		vm_offset_t g = ml_io_map(0x14220000, 0x1000);         /* GPM14-0 SCL, GPM15-0 SDA: function 2, no pull */
@@ -85,6 +90,17 @@ muic_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 		hakios_hsi2c_reset(&bus);
 		muic_up = true;
 	}
+	return true;
+}
+
+static void
+muic_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+{
+	lck_mtx_lock(&muic_bus_lock);
+	if (!muic_bus_up()) {
+		lck_mtx_unlock(&muic_bus_lock);
+		return;
+	}
 	uint8_t bc = 0;
 	(void)hakios_hsi2c_read_reg(&bus, MUIC, MUIC_BC_STATUS, &bc, 1);
 	int c = ctrl1_read();
@@ -97,6 +113,7 @@ muic_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 	} else if (muic_ticks % 15 == 0) {
 		printf("STARLTE MUIC: CONTROL1 %#x (USB to the AP); BC_STATUS %#x\n", c, bc);
 	}
+	lck_mtx_unlock(&muic_bus_lock);
 	if (++muic_ticks < 60) {
 		uint64_t deadline;
 		clock_interval_to_deadline(2, NSEC_PER_SEC, &deadline);
@@ -120,3 +137,52 @@ starlte_muic_init(void)
 	thread_call_enter(muic_call);
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, starlte_muic_init);
+
+/*
+ * The Galaxy S9's fuel gauge for iOS's battery (iokit/Kernel/arm/SweetBattery.cpp, boot-arg sweetfg=1): the MAX77705's
+ * gauge at 0x36 on this same bus, READ ONLY (16-bit little-endian registers; facts from Scion's 16.5 driver
+ * drivers/power/max77705/hakios.max77705.c): 0x00 status (bit 3: no battery), 0x06 RepSOC (1/256 %), 0x09 VCELL
+ * (78.125 uV), 0x0A Current (signed, 312.5 uA with the S9's 5 mOhm sense resistor; above 0 while charging), 0x05 RepCap
+ * and 0x35 FullCapRep (mAh). Nothing is written to the chip; the bus is brought up as the switch's code does.
+ * 0, or EIO. The cable: the MUIC's BC_STATUS bit 7 (VBUS), into *vbus.
+ */
+int starlte_fg_read(unsigned *percent, unsigned *mv, int *ma, unsigned *rem_mah, unsigned *full_mah, bool *vbus);
+
+static uint32_t
+fg_read16(uint8_t reg, uint16_t *v)
+{
+	uint8_t b[2] = { 0, 0 };
+	uint32_t e = hakios_hsi2c_read_reg(&bus, 0x36, reg, b, 2);
+	*v = (uint16_t)(b[0] | (b[1] << 8));
+	return e;
+}
+
+int
+starlte_fg_read(unsigned *percent, unsigned *mv, int *ma, unsigned *rem_mah, unsigned *full_mah, bool *vbus)
+{
+	uint16_t status = 0, soc = 0, vcell = 0, cur = 0, cap = 0, full = 0;
+	uint8_t bc = 0;
+	uint32_t e;
+	lck_mtx_lock(&muic_bus_lock);
+	if (!muic_bus_up()) {
+		lck_mtx_unlock(&muic_bus_lock);
+		return EIO;
+	}
+	e = fg_read16(0x00, &status) | fg_read16(0x06, &soc) | fg_read16(0x09, &vcell) | fg_read16(0x0A, &cur) |
+	    fg_read16(0x05, &cap) | fg_read16(0x35, &full);
+	(void)hakios_hsi2c_read_reg(&bus, MUIC, MUIC_BC_STATUS, &bc, 1);
+	lck_mtx_unlock(&muic_bus_lock);
+	if (e != 0 || (status & 0x8) != 0) {
+		return EIO;
+	}
+	*percent = (unsigned)soc / 256u;
+	if (*percent > 100) {
+		*percent = 100;
+	}
+	*mv = (unsigned)((uint64_t)vcell * 78125u / 1000000u);
+	*ma = (int)((int64_t)(int16_t)cur * 3125 / 10000);
+	*rem_mah = cap;
+	*full_mah = full;
+	*vbus = (bc & 0x80) != 0;
+	return 0;
+}

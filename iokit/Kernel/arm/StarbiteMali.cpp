@@ -48,6 +48,8 @@ void starlte_gpu_user_unmap(uint64_t va, unsigned n);
 int starlte_gpu_user_submit(uint64_t jc, uint32_t requirements);
 int starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_t *seq);
 int starlte_gpu_user_wait_seq(uint64_t seq, bool block);
+int starlte_gpu_user_wait_seq_for(uint64_t seq, uint64_t timeout_ns, uint64_t *done);
+uint64_t starlte_gpu_user_seq(void);
 void starbite_mali_publish(void);
 }
 
@@ -57,6 +59,11 @@ struct sbm_submit {
 	uint32_t in_sync_count, out_sync;
 	uint64_t bo_handles;
 	uint32_t bo_handle_count, requirements, jm_ctx_handle, pad;
+};
+struct sbm_wait_seq {
+	uint64_t seq;
+	int64_t timeout_ns;
+	uint64_t done;
 };
 struct sbm_wait_bo {
 	uint32_t handle, pad;
@@ -106,6 +113,13 @@ enum {
 	SBM_SUBMIT = 0, SBM_WAIT_BO = 1, SBM_CREATE_BO = 2, SBM_MMAP_BO = 3, SBM_GET_PARAM = 4,
 	SBM_GET_BO_OFFSET = 5, SBM_MADVISE = 8, SBM_GEM_CLOSE = 0x100, SBM_VERSION = 0x101,
 	SBM_LOG = 0x102, SBM_SURFACE = 0x103, SBM_IMPORT_HOST = 0x104, SBM_ASYNC = 0x105, SBM_WAIT_IDLE = 0x106,
+	/*
+	 * A chain's own number. SUBMIT_SEQ is SUBMIT that answers, in the request's jc field, the number the queue gave the
+	 * chain (0: it ran to its end inside the call); WAIT_SEQ { number, nanoseconds, done } waits for that one chain, at
+	 * most so long (0: only looks), and answers the number of the last chain the GPU has finished. With them a client's
+	 * fence is a number and a wait on it ends when its own chain has: WAIT_IDLE ends only when every client's have.
+	 */
+	SBM_SUBMIT_SEQ = 0x107, SBM_WAIT_SEQ = 0x108,
 };
 
 #define SBM_MAX_BOS     8192u
@@ -121,6 +135,7 @@ struct sbm_bo {
 	uint32_t surface;                       /* IOSurface ID of an imported buffer, else 0 */
 	bool host;                              /* the caller's own pages, wired for the GPU (IMPORT_HOST) */
 	uint64_t seq;                           /* last chain that named it (async submits) */
+	uint64_t dying;                         /* closed by its owner: it goes once this chain is done (the queue); 0 = live */
 };
 
 /*
@@ -212,6 +227,65 @@ sbm_count_pages(const sbm_bo *bo, int64_t sign)
 	OSAddAtomic64(sign * (int64_t)bo->pages, &sbm_live_pages[sbm_bo_kind(bo)]);
 }
 
+/*
+ * A cap on the buffers this driver makes (CREATE_BO: wired kernel memory, write-combined, that nothing can page out or
+ * reclaim). Every PanVK device wires 57 MiB when it is made (tiler heap, varyings, TLS) and textures follow: backboardd
+ * alone holds about 285 MiB while it composites on Metal, and several Metal clients at once (the poster renderers) had
+ * nothing to stop them from wiring the VM into a hard hang. With the cap a CREATE_BO beyond it fails (kIOReturnNoMemory:
+ * the client sees an allocation failure) instead.
+ *   boot-arg sweetspeed&134217728: on, with the defaults: all clients together 35 % of the memory, one client half of that
+ *   boot-args sbm_cap_mb=<MiB>, sbm_client_cap_mb=<MiB>: the two caps by hand (either one turns the cap on; 0 = that one off)
+ * Imported surfaces and host memory are not counted: they are another owner's pages, wired where they were made.
+ */
+extern "C" {
+void proc_selfname(char *buf, int size);
+int proc_selfpid(void);
+}
+static uint64_t sbm_cap_pages, sbm_client_cap_pages;   /* in 4 KiB pages; 0 = no cap */
+static uint64_t sbm_refused, sbm_refused_bytes;
+
+static void
+sbm_cap_init(void)
+{
+	uint32_t mb = 0, client_mb = 0;
+	bool by_hand = PE_parse_boot_argn("sbm_cap_mb", &mb, sizeof(mb));
+	bool client_by_hand = PE_parse_boot_argn("sbm_client_cap_mb", &client_mb, sizeof(client_mb));
+	if ((sweet_speed_flags() & 134217728) != 0) {
+		if (!by_hand) {
+			mb = (uint32_t)((max_mem >> 20) * 35 / 100);
+		}
+		if (!client_by_hand) {
+			client_mb = mb / 2;
+		}
+	}
+	sbm_cap_pages = (uint64_t)mb << 8;
+	sbm_client_cap_pages = (uint64_t)client_mb << 8;
+	IOLog("STARLTE GPU: buffer cap: all clients %u MiB, one client %u MiB (0 = none; memory %llu MiB; sweetspeed&134217728, "
+	    "sbm_cap_mb, sbm_client_cap_mb)\n", mb, client_mb, max_mem >> 20);
+}
+
+/* May this client (holding `mine` pages of buffers) have `pages` more? Says so when not (the first 10, then every 100th). */
+static bool
+sbm_cap_allows(uint64_t mine, uint32_t pages)
+{
+	uint64_t all = (uint64_t)sbm_live_pages[0];
+	bool over_all = sbm_cap_pages != 0 && all + pages > sbm_cap_pages;
+	bool over_mine = sbm_client_cap_pages != 0 && mine + pages > sbm_client_cap_pages;
+	if (!over_all && !over_mine) {
+		return true;
+	}
+	uint64_t n = (uint64_t)OSIncrementAtomic64((SInt64 *)&sbm_refused);
+	OSAddAtomic64((SInt64)pages * 4096, (SInt64 *)&sbm_refused_bytes);
+	if (n < 10 || (n % 100) == 0) {
+		char name[32];
+		proc_selfname(name, sizeof(name));
+		IOLog("STARLTE GPU: buffer of %u KiB REFUSED for %s[%d]: %s (all clients %llu of %llu MiB, this one %llu of %llu MiB; "
+		    "%llu refused so far)\n", pages * 4, name, proc_selfpid(), over_all ? "the cap for all clients" : "this client's cap",
+		    all >> 8, sbm_cap_pages >> 8, mine >> 8, sbm_client_cap_pages >> 8, n + 1);
+	}
+	return false;
+}
+
 class StarbiteMali : public IOService {
 	OSDeclareDefaultStructors(StarbiteMali);
 };
@@ -225,6 +299,7 @@ class StarbiteMaliUserClient : public IOUserClient {
 	sbm_bo *fBos = NULL;            /* handle h is fBos[h - 1] */
 	uint32_t fCount = 0;
 	bool fAsync = false;
+	uint64_t fBufferPages = 0;              /* buffers of its own (CREATE_BO), 4 KiB pages: for the per-client cap */
 	void markBOs(uint64_t list, uint32_t count, uint64_t seq);
 
 	IOReturn createBO(sbm_create_bo *a);
@@ -233,6 +308,9 @@ class StarbiteMaliUserClient : public IOUserClient {
 	IOReturn mmapBO(sbm_mmap_bo *a);
 	sbm_bo *lookup(uint32_t handle);
 	void closeBO(sbm_bo *bo);
+	void reap(void);
+	uint32_t fDying[256];                   /* handles closed by the client whose buffers still wait for their chains */
+	uint32_t fDyingCount = 0;
 
 public:
 	bool initWithTask(task_t owningTask, void *securityID, UInt32 type,
@@ -272,14 +350,39 @@ StarbiteMaliUserClient::initWithTask(task_t owningTask, void *securityID, UInt32
 sbm_bo *
 StarbiteMaliUserClient::lookup(uint32_t handle)
 {
-	return (handle >= 1 && handle <= fCount && fBos[handle - 1].mem != NULL) ? &fBos[handle - 1] :
-	       NULL;
+	return (handle >= 1 && handle <= fCount && fBos[handle - 1].mem != NULL && fBos[handle - 1].dying == 0) ?
+	       &fBos[handle - 1] : NULL;
+}
+
+/*
+ * fLock held. The buffers the client has closed whose chains are done by now go; the others stay on the list. With the
+ * queue a GEM_CLOSE used to wait for every chain queued by then (up to 90 ms on the thread that closed, seen on a
+ * phone); now it only notes the chain, and the buffer is unmapped and freed here, at one of the client's next calls.
+ */
+void
+StarbiteMaliUserClient::reap(void)
+{
+	uint32_t kept = 0;
+	for (uint32_t i = 0; i < fDyingCount; i++) {
+		sbm_bo *bo = &fBos[fDying[i] - 1];
+		if (bo->mem != NULL && bo->dying != 0 && starlte_gpu_user_wait_seq(bo->dying, false) != 0) {
+			fDying[kept++] = fDying[i];             /* its chain is still queued or running */
+			continue;
+		}
+		if (bo->mem != NULL && bo->dying != 0) {
+			closeBO(bo);
+		}
+	}
+	fDyingCount = kept;
 }
 
 void
 StarbiteMaliUserClient::closeBO(sbm_bo *bo)
 {
 	sbm_count_pages(bo, -1);
+	if (bo->surface == 0 && !bo->host && fBufferPages >= bo->pages) {
+		fBufferPages -= bo->pages;
+	}
 	starlte_gpu_user_unmap(bo->va, bo->pages);
 	sbm_va_free(bo->va, (uint64_t)bo->pages * 0x1000);
 	OSSafeReleaseNULL(bo->map);
@@ -306,6 +409,7 @@ StarbiteMaliUserClient::closeBO(sbm_bo *bo)
 	bo->pages = 0;
 	bo->surface = 0;
 	bo->host = false;
+	bo->dying = 0;
 	bo->seq = 0;
 }
 
@@ -350,6 +454,9 @@ StarbiteMaliUserClient::createBO(sbm_create_bo *a)
 	/* whole 16 KiB pages: Mesa maps the buffer into a task with 16 KiB pages */
 	uint64_t bytes = ((uint64_t)a->size + 0x3fff) & ~0x3fffull;
 	uint32_t pages = (uint32_t)(bytes / 0x1000);
+	if (!sbm_cap_allows(fBufferPages, pages)) {
+		return kIOReturnNoMemory;
+	}
 	uint64_t va = sbm_va_alloc(bytes);
 	if (va == 0) {
 		return kIOReturnNoSpace;
@@ -386,6 +493,7 @@ StarbiteMaliUserClient::createBO(sbm_create_bo *a)
 	}
 	fBos[handle - 1] = (sbm_bo){ .mem = mem, .map = NULL, .va = va, .pages = pages };
 	sbm_count_pages(&fBos[handle - 1], 1);
+	fBufferPages += pages;
 	a->handle = handle;
 	a->offset = va;
 	return kIOReturnSuccess;
@@ -592,6 +700,7 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 		char text[256];
 		int64_t timeout;
 		uint32_t flag;
+		sbm_wait_seq waitseq;
 	} u;
 	size_t want;
 	switch (selector) {
@@ -609,6 +718,8 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 	case SBM_IMPORT_HOST: want = sizeof(u.host); break;
 	case SBM_ASYNC: want = sizeof(u.flag); break;
 	case SBM_WAIT_IDLE: want = sizeof(u.timeout); break;
+	case SBM_SUBMIT_SEQ: want = sizeof(u.submit); break;
+	case SBM_WAIT_SEQ: want = sizeof(u.waitseq); break;
 	default:
 		return kIOReturnUnsupported;
 	}
@@ -617,7 +728,7 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 		if (want == 0 || want >= sizeof(u.text)) {
 			return kIOReturnBadArgument;
 		}
-	} else if (selector == SBM_SUBMIT && args->structureInputSize == SBM_SUBMIT_V1_SIZE) {
+	} else if ((selector == SBM_SUBMIT || selector == SBM_SUBMIT_SEQ) && args->structureInputSize == SBM_SUBMIT_V1_SIZE) {
 		want = SBM_SUBMIT_V1_SIZE;              /* Mesa 25.0's uapi: no jm_ctx_handle */
 	} else if (args->structureInputSize != want) {
 		return kIOReturnBadArgument;
@@ -627,12 +738,58 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 	}
 
 	IOReturn ret = kIOReturnSuccess;
+	/*
+	 * The waits sleep (or spin) for as long as the GPU works: not under fLock, or this client's other threads
+	 * (the render thread's next submit while a completion thread waits on a fence) would wait with them.
+	 */
+	if (selector == SBM_WAIT_IDLE) {
+		return starlte_gpu_user_wait_seq(0, u.timeout != 0) == 0 ? kIOReturnSuccess : kIOReturnTimeout;
+	}
+	if (selector == SBM_WAIT_SEQ) {
+		int waited = starlte_gpu_user_wait_seq_for(u.waitseq.seq, u.waitseq.timeout_ns > 0 ? (uint64_t)u.waitseq.timeout_ns : 0,
+		    &u.waitseq.done);
+		if (args->structureOutput != NULL && args->structureOutputSize >= want) {
+			bcopy(&u, args->structureOutput, want);
+			args->structureOutputSize = (uint32_t)want;
+		}
+		return waited == 0 ? kIOReturnSuccess : kIOReturnTimeout;
+	}
+	if (selector == SBM_WAIT_BO || selector == SBM_GEM_CLOSE) {
+		IOLockLock(fLock);
+		sbm_bo *bo = lookup(selector == SBM_WAIT_BO ? u.wait.handle : u.close.handle);
+		uint64_t seq = bo ? bo->seq : 0;
+		IOLockUnlock(fLock);
+		if (bo == NULL) {
+			return kIOReturnBadArgument;
+		}
+		if (selector == SBM_GEM_CLOSE && starlte_gpu_user_seq() != 0) {
+			seq = 0;                        /* (the queue: nothing is waited for here, see GEM_CLOSE below) */
+		}
+		bool block = selector == SBM_GEM_CLOSE || u.wait.timeout_ns != 0;
+		if (seq != 0 && starlte_gpu_user_wait_seq(seq, block) != 0 && selector == SBM_WAIT_BO) {
+			return kIOReturnTimeout;
+		}
+		if (selector == SBM_WAIT_BO) {
+			if (args->structureOutput != NULL) {
+				if (args->structureOutputSize < want) {
+					return kIOReturnBadArgument;
+				}
+				bcopy(&u, args->structureOutput, want);
+				args->structureOutputSize = (uint32_t)want;
+			}
+			return kIOReturnSuccess;
+		}
+	}
 	IOLockLock(fLock);
+	if (fDyingCount != 0) {
+		reap();
+	}
 	switch (selector) {
-	case SBM_SUBMIT: {
+	case SBM_SUBMIT:
+	case SBM_SUBMIT_SEQ: {
 		int err;
+		uint64_t seq = 0;
 		if (fAsync) {
-			uint64_t seq = 0;
 			err = starlte_gpu_user_submit2(u.submit.jc, u.submit.requirements, true, &seq);
 			if (seq != 0) {
 				markBOs(u.submit.bo_handles, u.submit.bo_handle_count, seq);
@@ -640,24 +797,15 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 		} else {
 			err = starlte_gpu_user_submit(u.submit.jc, u.submit.requirements);
 		}
-		ret = err == 0 ? kIOReturnSuccess : err == ETIMEDOUT ? kIOReturnTimeout : kIOReturnIOError;
-		break;
-	}
-	case SBM_WAIT_BO: {
-		sbm_bo *bo = lookup(u.wait.handle);
-		ret = bo ? kIOReturnSuccess : kIOReturnBadArgument;
-		if (bo != NULL && bo->seq != 0 && starlte_gpu_user_wait_seq(bo->seq, u.wait.timeout_ns != 0) != 0) {
-			ret = kIOReturnTimeout;
+		if (selector == SBM_SUBMIT_SEQ) {
+			u.submit.jc = seq;              /* (answered through the request, as every call's answer is) */
 		}
+		ret = err == 0 ? kIOReturnSuccess : err == ETIMEDOUT ? kIOReturnTimeout : kIOReturnIOError;
 		break;
 	}
 	case SBM_ASYNC:
 		fAsync = sbm_async_ok && u.flag != 0;
 		u.flag = fAsync;
-		break;
-	case SBM_WAIT_IDLE:
-		ret = starlte_gpu_user_wait_seq(0, u.timeout != 0) == 0 ? kIOReturnSuccess : kIOReturnTimeout;
-		want = 0;
 		break;
 	case SBM_CREATE_BO:
 		ret = createBO(&u.create);
@@ -682,10 +830,25 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 	case SBM_GEM_CLOSE: {
 		sbm_bo *bo = lookup(u.close.handle);
 		if (bo) {
-			if (bo->seq != 0) {
-				(void)starlte_gpu_user_wait_seq(bo->seq, true);
+			/*
+			 * With the queue, a buffer goes only once every chain queued by now is done, not just the last one
+			 * that listed it: a chain reaches buffers its submit does not list (PanVK lists a batch's pools and
+			 * targets; a descriptor may point at any live buffer), and chains wait in a queue behind others. The
+			 * close does not wait for that: the buffer is marked and goes at a later call (reap()).
+			 */
+			uint64_t last = starlte_gpu_user_seq();
+			uint64_t need = last > bo->seq ? last : bo->seq;
+			if (last != 0 && need != 0 && fDyingCount < sizeof(fDying) / sizeof(fDying[0]) &&
+			    starlte_gpu_user_wait_seq(need, false) != 0) {
+				bo->dying = need;
+				fDying[fDyingCount++] = u.close.handle;
+			} else {
+				/* (no queue, or its chains are done, or the list is full: as before, wait and close) */
+				if (need != 0) {
+					(void)starlte_gpu_user_wait_seq(need, true);
+				}
+				closeBO(bo);
 			}
-			closeBO(bo);
 		}
 		ret = bo ? kIOReturnSuccess : kIOReturnBadArgument;
 		break;
@@ -723,16 +886,27 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
  * every 10 s while calls come: "STARLTE GPU CALLS: submit N x avg us (max), create ..., close ...".
  */
 static uint64_t sbm_calls[6], sbm_call_ns[6], sbm_call_max[6], sbm_calls_since;
+/*
+ * boot-arg sbm_prof=1 (off by default): who waits. With the ten-second line, "STARLTE GPU WAITS: ...": the waits for one
+ * buffer and the waits for the whole queue, and the four threads that waited longest, by thread id and name.
+ */
+static uint32_t sbm_prof;
+static int sbm_prof_checked;
+static struct { uint64_t tid, n, ns; char name[24]; } sbm_waiter[8];
+static uint64_t sbm_wait_kind_n[3], sbm_wait_kind_ns[3];
+extern "C" uint64_t thread_tid(thread_t thread);
+extern "C" void bsd_getthreadname(void *uth, char *buffer);
+extern "C" void *current_uthread(void);
 
 static unsigned
 sbm_call_kind(uint32_t selector)
 {
 	switch (selector) {
-	case SBM_SUBMIT: return 0;
+	case SBM_SUBMIT: case SBM_SUBMIT_SEQ: return 0;
 	case SBM_CREATE_BO: return 1;
 	case SBM_GEM_CLOSE: return 2;
 	case SBM_SURFACE: case SBM_IMPORT_HOST: return 3;
-	case SBM_WAIT_BO: case SBM_WAIT_IDLE: return 5;
+	case SBM_WAIT_BO: case SBM_WAIT_IDLE: case SBM_WAIT_SEQ: return 5;
 	default: return 4;
 	}
 }
@@ -746,7 +920,34 @@ StarbiteMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArgume
 	uint64_t t1 = mach_absolute_time(), ns = 0;
 	absolutetime_to_nanoseconds(t1 - t0, &ns);
 	unsigned k = sbm_call_kind(selector);
+	if (!sbm_prof_checked) {
+		sbm_prof_checked = 1;
+		PE_parse_boot_argn("sbm_prof", &sbm_prof, sizeof(sbm_prof));
+	}
 	IOLockLock(sbm_va_lock);
+	if (sbm_prof && k == 5) {
+		uint64_t tid = thread_tid(current_thread());
+		unsigned w = selector == SBM_WAIT_IDLE ? 1 : selector == SBM_WAIT_SEQ ? 2 : 0, slot = 8;
+		sbm_wait_kind_n[w]++;
+		sbm_wait_kind_ns[w] += ns;
+		for (unsigned i = 0; i < 8; i++) {
+			if (sbm_waiter[i].tid == tid || sbm_waiter[i].n == 0) {
+				slot = i;
+				break;
+			}
+		}
+		if (slot < 8) {
+			if (sbm_waiter[slot].n == 0) {
+				sbm_waiter[slot].tid = tid;
+				sbm_waiter[slot].name[0] = 0;
+				char tn[64] = "";
+				bsd_getthreadname(current_uthread(), tn);
+				strlcpy(sbm_waiter[slot].name, tn, sizeof(sbm_waiter[slot].name));
+			}
+			sbm_waiter[slot].n++;
+			sbm_waiter[slot].ns += ns;
+		}
+	}
 	sbm_calls[k]++;
 	sbm_call_ns[k] += ns;
 	if (ns > sbm_call_max[k]) {
@@ -770,8 +971,27 @@ StarbiteMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArgume
 		snprintf(line + n, sizeof(line) - (size_t)n, " wired: buffers %lld MiB, surfaces %lld MiB, host %lld MiB",
 		    sbm_live_pages[0] / 256, sbm_live_pages[1] / 256, sbm_live_pages[2] / 256);
 		sbm_calls_since = t1;
+		char wline[400];
+		wline[0] = 0;
+		if (sbm_prof) {
+			int wn = snprintf(wline, sizeof(wline), "STARLTE GPU WAITS: one buffer %llu x %llu us, whole queue %llu x %llu us, "
+			    "one chain %llu x %llu us; by thread:",
+			    sbm_wait_kind_n[0], sbm_wait_kind_n[0] ? sbm_wait_kind_ns[0] / sbm_wait_kind_n[0] / 1000 : 0,
+			    sbm_wait_kind_n[1], sbm_wait_kind_n[1] ? sbm_wait_kind_ns[1] / sbm_wait_kind_n[1] / 1000 : 0,
+			    sbm_wait_kind_n[2], sbm_wait_kind_n[2] ? sbm_wait_kind_ns[2] / sbm_wait_kind_n[2] / 1000 : 0);
+			for (unsigned i = 0; i < 8 && sbm_waiter[i].n != 0 && wn < (int)sizeof(wline) - 60; i++) {
+				wn += snprintf(wline + wn, sizeof(wline) - (size_t)wn, " %llu(%s) %llu x %llu us", sbm_waiter[i].tid,
+				    sbm_waiter[i].name, sbm_waiter[i].n, sbm_waiter[i].ns / sbm_waiter[i].n / 1000);
+			}
+			bzero(sbm_waiter, sizeof(sbm_waiter));
+			bzero(sbm_wait_kind_n, sizeof(sbm_wait_kind_n));
+			bzero(sbm_wait_kind_ns, sizeof(sbm_wait_kind_ns));
+		}
 		IOLockUnlock(sbm_va_lock);
 		IOLog("%s\n", line);
+		if (wline[0]) {
+			IOLog("%s\n", wline);
+		}
 		return ret;
 	}
 	IOLockUnlock(sbm_va_lock);
@@ -790,6 +1010,7 @@ StarbiteMaliUserClient::clientClose(void)
 			closeBO(&fBos[i]);
 		}
 	}
+	fDyingCount = 0;
 	IOLockUnlock(fLock);
 	terminate();
 	return kIOReturnSuccess;
@@ -812,6 +1033,7 @@ void
 starbite_mali_publish(void)
 {
 	sbm_async_ok = (sweet_speed_flags() & 64) != 0;
+	sbm_cap_init();
 	IOLog("STARLTE GPU: StarbiteMali async submits %s (sweetspeed&64)\n", sbm_async_ok ? "allowed" : "off");
 	sbm_va_lock = IOLockAlloc();
 	StarbiteMali *service = OSTypeAlloc(StarbiteMali);

@@ -50,6 +50,7 @@
 #include "hfs_mount.h"
 #include "hfs_dbg.h"
 #include "hfs_attrlist.h"
+#include "sweet_hfs_pclass.h"
 #include "hfs_btreeio.h"
 #include "hfs_cprotect.h"
 
@@ -474,6 +475,16 @@ hfs_readdirattr_internal(struct vnode *dvp, struct attrlist *alist,
 				if (!cp_vnode_getclass(vp, &class)) {
 					VATTR_RETURN(vap, va_dataprotect_class,
 					    (uint32_t)class);
+				}
+			}
+#else
+			/* the class as a label (sweet_hfs_pclass.c), for the items that are in core, as above */
+			if ((alist->commonattr & ATTR_CMN_DATA_PROTECT_FLAGS) &&
+			    vp && sweet_hfs_pclass_enabled()) {
+				uint32_t pclass;
+
+				if (!sweet_hfs_pclass_get_vp(vp, &pclass)) {
+					VATTR_RETURN(vap, va_dataprotect_class, pclass);
 				}
 			}
 #endif

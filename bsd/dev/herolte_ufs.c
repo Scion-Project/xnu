@@ -40,6 +40,7 @@
 #include <vm/vm_kern_xnu.h>     /* 11417: kmem_alloc_contig, KMA_* */
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
+#include <IOKit/IOPlatformExpert.h>        /* PE_halt_restart, kPE* (sweethalt=) */
 #include <libkern/libkern.h>
 #include <machine/atomic.h>
 
@@ -463,6 +464,112 @@ ufs_find_partition(const char *want)
 	}
 	printf("HEROLTE UFS: no GPT partition named \"%s\"\n", want);
 	return ENOENT;
+}
+
+/*
+ * hakios_ufs_read_partition() (sys/hakios.input.h): a GPT partition of LUN 0 read by name, for Scion's shared drivers.
+ * On this tree two names are given, and only ever READ (this function has no write path; the UFS write path checks every
+ * write against the root partition's bounds, su.first_block/su.nblocks, which this does not touch):
+ *   RADIO  the modem's image (bsd/dev/hakios.shannon.c, boot-arg cp=N)
+ *   EFS    the modem's non-volatile data, /efs/nv_data.bin, read by the same driver with cp_nv=2 only (the owner's
+ *          decision, 13 Nov 2026: read at boot, kept in RAM, never written, never mounted)
+ * Every other name is refused. With dst NULL or len 0 it only gives the partition's size.
+ */
+int hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes);
+int
+hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes)
+{
+	static const char *const names[] = { "RADIO", "EFS" };
+	static uint64_t firsts[2], counts[2];
+	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
+	uint64_t radio_first, radio_blocks;
+	const char *want;
+	unsigned which;
+	int error = 0;
+
+	for (which = 0; which < 2; which++) {
+		if (name != NULL && strcmp(name, names[which]) == 0) {
+			break;
+		}
+	}
+	if (which == 2) {
+		return EPERM;
+	}
+	want = names[which];
+	if (!su.ready) {
+		return ENXIO;
+	}
+	lck_mtx_lock(&herolte_ufs_lock);
+	radio_first = firsts[which];
+	radio_blocks = counts[which];
+	if (radio_blocks == 0) {
+		uint64_t entry_lba = 0;
+		uint32_t nent = 0, esz = 0;
+
+		error = ufs_read_blocks(1, 1);
+		if (!error && memcmp(b, "EFI PART", 8) != 0) {
+			error = ENXIO;
+		}
+		if (!error) {
+			memcpy(&entry_lba, b + 72, 8);
+			memcpy(&nent, b + 80, 4);
+			memcpy(&esz, b + 84, 4);
+			if (esz != 128 || nent == 0 || nent * esz > BOUNCE_SIZE) {
+				error = ENXIO;
+			}
+		}
+		if (!error) {
+			error = ufs_read_blocks(entry_lba, (nent * esz + UFS_BLOCK - 1) / UFS_BLOCK);
+		}
+		for (uint32_t i = 0; !error && i < nent && radio_blocks == 0; i++) {
+			const uint8_t *e = b + i * esz;
+			size_t wlen = strlen(want) + 1;
+			uint64_t first, last;
+			unsigned c;
+
+			for (c = 0; c < wlen; c++) {    /* the name with its end, UTF-16 */
+				if ((uint16_t)(e[56 + 2 * c] | e[57 + 2 * c] << 8) != (uint16_t)(uint8_t)want[c]) {
+					break;
+				}
+			}
+			if (c != wlen) {
+				continue;
+			}
+			memcpy(&first, e + 32, 8);
+			memcpy(&last, e + 40, 8);
+			if (last >= first && last <= UINT32_MAX) {
+				radio_first = first;
+				radio_blocks = last - first + 1;
+			}
+		}
+		if (!error && radio_blocks == 0) {
+			error = ENOENT;
+		}
+		firsts[which] = radio_first;
+		counts[which] = radio_blocks;
+	}
+	if (!error && bytes != NULL) {
+		*bytes = radio_blocks * UFS_BLOCK;
+	}
+	if (!error && dst != NULL && len != 0) {
+		if (offset > radio_blocks * UFS_BLOCK || len > radio_blocks * UFS_BLOCK - offset) {
+			error = EINVAL;
+		}
+		for (uint64_t done = 0; !error && done < len;) {
+			uint64_t pos = offset + done;
+			uint32_t skip = (uint32_t)(pos % UFS_BLOCK);
+			uint32_t want = (uint32_t)MIN(len - done, (uint64_t)(BOUNCE_SIZE - skip));
+			uint32_t blocks = (skip + want + UFS_BLOCK - 1) / UFS_BLOCK;
+
+			error = ufs_read_blocks(radio_first + pos / UFS_BLOCK, blocks);
+			if (!error) {
+				memcpy(dst + done, b + skip, want);
+			}
+			done += want;
+		}
+	}
+	lck_mtx_unlock(&herolte_ufs_lock);
+	return error;
 }
 
 /*
@@ -1049,6 +1156,125 @@ starlte_reboot_setup(void)
 }
 
 /* Armed as soon as kmem works, so early panics reach TWRP too. */
+/*
+ * Boot-arg sweethalt=1: restart and power off from iOS (the power menu's slider, Settings > General > Shut Down, a
+ * restart asked by any daemon). Without it this tree has no PE_halt_restart, so halt_all_cpus() printed "MACH Reboot" or
+ * "CPU halted" and spun: the panel kept its last frame and the phone looked hung until someone held the keys.
+ *   restart (kPERestartCPU; never during a panic, which keeps sweetreboot's way to recovery): INFORM2 = 0x12345678, INFORM3 = 0x12345670 (Samsung's reset reason
+ *     "unknown" = a plain restart: S-Boot boots BOOT, i.e. iOS again; 0x12345674 would be recovery), SWRESET.
+ *   power off (kPEHaltCPU, kPEUPSDelayHaltCPU): PS_HOLD low (PMU PS_HOLD_CONTROL 0x330C bit 8, as Samsung's kernel ends a
+ *     power-off). A charger or a held power key keeps the PMIC up; if the phone still runs a second later it restarts
+ *     as above instead (Samsung goes to its charging screen there).
+ * Off by default. Lines "STARLTE HALT: ...".
+ */
+#define STARLTE_PS_HOLD_PAGE    0x14063000
+#define STARLTE_PS_HOLD_OFF     0x30C
+static volatile uint32_t *starlte_halt_pmu_va, *starlte_halt_ps_hold_page;
+
+__attribute__((noreturn))
+static void
+starlte_reset_normal(void)
+{
+	volatile uint32_t *pmu = starlte_halt_pmu_va;
+	(void)ml_set_interrupts_enabled(FALSE);
+	pmu[0x808 / 4] = 0x12345678U;
+	pmu[0x80c / 4] = 0x12345670U;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	pmu[0x400 / 4] = 1;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	for (;;) {
+		__asm__ volatile ("wfe");
+	}
+}
+
+extern unsigned panic_active(void);
+
+static int
+starlte_halt_restart(unsigned int type)
+{
+	/* A panic keeps its own way out (sweetreboot's hook: the log into pmsg, recovery), never a restart into the system:
+	 * a panic at every boot must end in TWRP, not in a loop. */
+	if (panic_active()) {
+		if (sweet_panic_hook != NULL && (type == kPERestartCPU || type == kPEPanicRestartCPU ||
+		    type == kPEPanicRestartCPUNoCallouts)) {
+			sweet_panic_hook();
+		}
+		return -1;
+	}
+	switch (type) {
+	case kPERestartCPU:
+		printf("STARLTE HALT: restart (type %u): PMU reset into the system\n", type);
+		delay(50 * 1000);               /* the line out on the USB console */
+		starlte_reset_normal();
+	case kPEHaltCPU:
+	case kPEUPSDelayHaltCPU: {
+		volatile uint32_t *ps_hold = starlte_halt_ps_hold_page + STARLTE_PS_HOLD_OFF / 4;
+		uint32_t v = *ps_hold;
+		printf("STARLTE HALT: power off (type %u): PS_HOLD_CONTROL %08x, PS_HOLD low\n", type, v);
+		delay(50 * 1000);
+		*ps_hold = v & ~(1u << 8);
+		__asm__ volatile ("dsb sy" ::: "memory");
+		delay(1000 * 1000);
+		printf("STARLTE HALT: still running a second after PS_HOLD (%08x: a charger or the power key): restart instead\n",
+		    *ps_hold);
+		delay(50 * 1000);
+		starlte_reset_normal();
+	}
+	default:
+		return -1;
+	}
+}
+
+static void
+starlte_halt_setup(void)
+{
+	uint32_t on = 0;
+	if (!PE_parse_boot_argn("sweethalt", &on, sizeof(on)) || on == 0) {
+		return;
+	}
+	starlte_halt_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);
+	starlte_halt_ps_hold_page = (volatile uint32_t *)ml_io_map(STARLTE_PS_HOLD_PAGE, PAGE_SIZE);
+	if (starlte_halt_pmu_va != NULL && starlte_halt_ps_hold_page != NULL) {
+		PE_halt_restart = starlte_halt_restart;
+	}
+	printf("STARLTE HALT: sweethalt=%u: restart and power off %s (PMU %p, PS_HOLD page %p)\n", on,
+	    PE_halt_restart == starlte_halt_restart ? "armed" : "NOT armed", starlte_halt_pmu_va, starlte_halt_ps_hold_page);
+}
+
+/*
+ * kern.sweethalt_test (USB console "sysctl kern.sweethalt_test=N", only with sweethalt=1): the system's own way down, as
+ * reboot(2) takes it (file systems synced and unmounted), from a kernel thread: 1 = restart, 2 = power off.
+ */
+#include <sys/sysctl.h>
+#include <sys/reboot.h>
+static void
+starlte_halt_test_thread(void *arg, __unused wait_result_t wr)
+{
+	int howto = (int)(uintptr_t)arg;
+	printf("STARLTE HALT: test: reboot_kernel(%s)\n", howto == RB_HALT ? "RB_HALT" : "RB_AUTOBOOT");
+	(void)reboot_kernel(howto, NULL);
+}
+
+static int
+starlte_halt_test_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int value = 0, error = sysctl_handle_int(oidp, &value, 0, req);
+	thread_t thread;
+	if (error != 0 || req->newptr == USER_ADDR_NULL) {
+		return error;
+	}
+	if (PE_halt_restart != starlte_halt_restart || (value != 1 && value != 2)) {
+		return EINVAL;
+	}
+	if (kernel_thread_start(starlte_halt_test_thread, (void *)(uintptr_t)(value == 2 ? RB_HALT : RB_AUTOBOOT), &thread) ==
+	    KERN_SUCCESS) {
+		thread_deallocate(thread);
+	}
+	return 0;
+}
+SYSCTL_PROC(_kern, OID_AUTO, sweethalt_test, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0, starlte_halt_test_sysctl,
+    "I", "sweethalt=1 test: 1 = restart, 2 = power off, the way reboot(2) goes");
+
 static void
 starlte_reboot_early(void)
 {
@@ -1061,6 +1287,7 @@ starlte_reboot_early(void)
 		 * without sweetreboot left "return" printing "PMU mapping failed" in a loop). Nothing is written until asked. */
 		starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);
 	}
+	starlte_halt_setup();
 }
 STARTUP(KMEM, STARTUP_RANK_LAST, starlte_reboot_early);
 
@@ -1109,6 +1336,206 @@ starlte_reboot_timer(void)
 	}
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, starlte_reboot_timer);
+
+/*
+ * Boot-arg sweetwdog=SECONDS (0 or absent: off; at least 60): a watchdog for hard hangs. A phone that stops with no
+ * panic (9 November: dead 66 s into a boot, the console gone, nothing in pstore) never comes back by itself.
+ *
+ * Every 2 s a timer call (so: from the timer interrupt, with no thread to schedule and no lock taken) looks at two signs
+ * of life. The kernel's: a thread of ordinary priority that wakes every second and notes the time. User space's: a
+ * system call or Mach trap from EL0 since the last look (sweet_wdog_mark, osfmk/arm64/sleh.c). The watchdog is armed
+ * by the first system call it sees, so a boot that never reaches user space is the panic paths' business, not its.
+ * When either sign is older than SECONDS it writes one line (which sign, both ages, the uptime) and the console's
+ * tail into the ramoops pmsg ring, as a panic does (TWRP: /sys/fs/pstore/pmsg-ramoops-0), and resets into recovery
+ * through the PMU. It cannot see a hang in which no CPU takes timer interrupts any more (that needs the SoC's own
+ * watchdog timer, which this kernel does not drive), nor one on the single CPU its timer call lives on.
+ *
+ * kern.sweetwdog_test (the USB console: "sysctl kern.sweetwdog_test=N") provokes it without hanging anything:
+ * 1 = signs of life from user space are not counted any more, 2 = the kernel thread stops noting the time.
+ * kern.sweetwdog_ages reads "kernel-age user-age" in ms as the last look saw them.
+ */
+#include <kern/timer_call.h>
+#include <sys/sysctl.h>
+extern volatile uint32_t sweet_wdog_mark;
+static uint32_t starlte_wdog_secs, starlte_wdog_test, starlte_wdog_armed;
+static volatile uint64_t starlte_wdog_kbeat, starlte_wdog_ubeat;
+static uint64_t starlte_wdog_limit, starlte_wdog_step, starlte_wdog_kage_ms, starlte_wdog_uage_ms;
+static timer_call_data_t starlte_wdog_tc;
+static char starlte_wdog_why[160];
+SYSCTL_UINT(_kern, OID_AUTO, sweetwdog_test, CTLFLAG_RW | CTLFLAG_LOCKED, &starlte_wdog_test, 0,
+    "hang watchdog test: 1 = ignore user space's signs of life, 2 = stop the kernel thread's");
+SYSCTL_QUAD(_kern, OID_AUTO, sweetwdog_kernel_age_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &starlte_wdog_kage_ms,
+    "hang watchdog: ms since the kernel thread's last sign of life, at the last look");
+SYSCTL_QUAD(_kern, OID_AUTO, sweetwdog_user_age_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &starlte_wdog_uage_ms,
+    "hang watchdog: ms since user space's last system call, at the last look");
+
+/* From the timer interrupt: the reason and the console's tail into the pmsg ring, then the reset. No lock, no allocation. */
+static void
+starlte_wdog_fire(void)
+{
+	static const char mid[] = "--- console before the hang:\n";
+	volatile uint32_t *h = (volatile uint32_t *)(void *)starlte_pmsg_va;
+	const char *ring;
+	uint32_t rsize, o = 0;
+	uint64_t total;
+
+	if (h != NULL) {
+		volatile uint8_t *d = starlte_pmsg_va + 12;
+		starlte_pmsg_put(d, &o, starlte_wdog_why, (uint32_t)strlen(starlte_wdog_why));
+		starlte_pmsg_put(d, &o, mid, sizeof(mid) - 1);
+		a5xelte_log_snapshot(&ring, &rsize, &total);
+		uint64_t n = MIN(total, MIN((uint64_t)rsize, (uint64_t)(STARLTE_PMSG_DATA - o)));
+		for (uint64_t k = total - n; k < total; k++) {
+			starlte_pmsg_put(d, &o, &ring[k % rsize], 1);
+		}
+		h[0] = 0x43474244U;                     /* "DBGC" */
+		h[1] = o % STARLTE_PMSG_DATA;
+		h[2] = o;
+		__asm__ volatile ("dsb sy" ::: "memory");
+	}
+	starlte_reset_to_recovery();
+}
+
+static void
+starlte_wdog_tick(__unused timer_call_param_t p0, __unused timer_call_param_t p1)
+{
+	uint64_t now = mach_absolute_time(), kage = 0, uage = 0;
+
+	if (sweet_wdog_mark != 0) {
+		if (starlte_wdog_test != 1) {
+			starlte_wdog_ubeat = now;
+			if (!starlte_wdog_armed) {
+				starlte_wdog_armed = 1;         /* (the first system call: user space is up) */
+				starlte_wdog_kbeat = now;
+			}
+		}
+		sweet_wdog_mark = 0;
+	}
+	if (starlte_wdog_armed) {
+		kage = now - starlte_wdog_kbeat;
+		uage = now - starlte_wdog_ubeat;
+		absolutetime_to_nanoseconds(kage, &starlte_wdog_kage_ms);
+		absolutetime_to_nanoseconds(uage, &starlte_wdog_uage_ms);
+		starlte_wdog_kage_ms /= NSEC_PER_MSEC;
+		starlte_wdog_uage_ms /= NSEC_PER_MSEC;
+		if (kage > starlte_wdog_limit || uage > starlte_wdog_limit) {
+			uint64_t up = 0;
+			absolutetime_to_nanoseconds(now, &up);
+			snprintf(starlte_wdog_why, sizeof(starlte_wdog_why),
+			    "STARBITE: HANG WATCHDOG (sweetwdog=%u): no sign of life from %s; kernel thread %llu ms ago, user space %llu ms ago, "
+			    "up %llu s, test %u\n", starlte_wdog_secs, kage > starlte_wdog_limit ? "the kernel's thread" : "user space",
+			    starlte_wdog_kage_ms, starlte_wdog_uage_ms, up / NSEC_PER_SEC, starlte_wdog_test);
+			starlte_wdog_fire();
+		}
+	}
+	timer_call_enter(&starlte_wdog_tc, now + starlte_wdog_step, TIMER_CALL_SYS_CRITICAL);
+}
+
+static void
+starlte_wdog_thread(__unused void *arg, __unused wait_result_t wr)
+{
+	static int chan;
+	/* armed from here, a running thread, not from the start-up hook: the timer calls are surely up */
+	timer_call_setup(&starlte_wdog_tc, starlte_wdog_tick, NULL);
+	timer_call_enter(&starlte_wdog_tc, mach_absolute_time() + starlte_wdog_step, TIMER_CALL_SYS_CRITICAL);
+	for (;;) {
+		if (starlte_wdog_test != 2) {
+			starlte_wdog_kbeat = mach_absolute_time();
+		}
+		(void)tsleep(&chan, PZERO, "sweetwdog", hz);
+	}
+}
+
+static void
+starlte_wdog_start(void)
+{
+	uint32_t secs = 0;
+	thread_t th;
+	if (!PE_parse_boot_argn("sweetwdog", &secs, sizeof(secs)) || secs == 0) {
+		return;
+	}
+	if (secs < 60) {
+		secs = 60;
+	}
+	if (starlte_pmu_va == NULL || starlte_pmsg_va == NULL) {
+		starlte_reboot_setup();                 /* (no sweetreboot on the line: the reset's mappings are still needed) */
+	}
+	if (starlte_pmu_va == NULL) {
+		printf("HEROLTE LOG: sweetwdog: not armed (no PMU mapping)\n");
+		return;
+	}
+	starlte_wdog_secs = secs;
+	nanoseconds_to_absolutetime((uint64_t)secs * NSEC_PER_SEC, &starlte_wdog_limit);
+	nanoseconds_to_absolutetime(2ull * NSEC_PER_SEC, &starlte_wdog_step);
+	starlte_wdog_kbeat = starlte_wdog_ubeat = mach_absolute_time();
+	sweet_wdog_mark = 0;                            /* the first system call arms it */
+	if (kernel_thread_start(starlte_wdog_thread, NULL, &th) != KERN_SUCCESS) {
+		sweet_wdog_mark = 1;
+		printf("HEROLTE LOG: sweetwdog: not armed (no thread)\n");
+		return;
+	}
+	thread_deallocate(th);
+	printf("HEROLTE LOG: sweetwdog=%u: the hang watchdog starts with the first system call (looks every 2 s; "
+	    "kern.sweetwdog_test provokes it)\n", secs);
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, starlte_wdog_start);
+
+/*
+ * Boot-arg scionup=1 (off by default): the loader's boot record gets its "user space is up" mark, so that the loader
+ * can tell a boot that reached user space from one that did not (its failed-boot fallback; the record's layout and
+ * owner: the loader's docs/BOOT-RECORD.md). The record is 64 bytes at PA 0x91ffe000, the loader's but for two words:
+ * when its first eight bytes are the magic "SCIONBR1", the sequence number at +0x08 is copied to +0x2c and "SNUP" is
+ * written at +0x28, once per boot, at the first system call from user space (the same sign of life the hang watchdog
+ * uses, seen within a second by a thread that then ends). No other byte of the page is written; without the magic,
+ * nothing is. The page is mapped at boot, not when the mark is made.
+ */
+#define SCION_BOOT_RECORD_PA    0x91ffe000ULL
+#define SCION_BOOT_RECORD_MAGIC 0x3152424e4f494353ULL   /* "SCIONBR1" */
+#define SCION_BOOT_RECORD_UP    0x50554e53U             /* "SNUP" */
+static volatile uint8_t *starlte_bootrec_va;
+
+static void
+starlte_upmark_thread(__unused void *arg, __unused wait_result_t wr)
+{
+	static int chan;
+	/* (with the watchdog on, its look clears the mark every 2 s: its "armed" says the same) */
+	while (sweet_wdog_mark == 0 && !starlte_wdog_armed) {
+		(void)tsleep(&chan, PZERO, "scionup", hz);
+	}
+	volatile uint8_t *r = starlte_bootrec_va;
+	if (*(volatile uint64_t *)(void *)r == SCION_BOOT_RECORD_MAGIC) {
+		uint32_t seq = *(volatile uint32_t *)(void *)(r + 0x08);
+		*(volatile uint32_t *)(void *)(r + 0x2c) = seq;
+		__asm__ volatile ("dsb sy" ::: "memory");
+		*(volatile uint32_t *)(void *)(r + 0x28) = SCION_BOOT_RECORD_UP;
+		__asm__ volatile ("dsb sy" ::: "memory");
+		printf("HEROLTE LOG: scionup: the loader's boot record (sequence %u) is marked: user space is up\n", seq);
+	} else {
+		printf("HEROLTE LOG: scionup: no boot record of the loader's at %#llx (no magic): nothing written\n", SCION_BOOT_RECORD_PA);
+	}
+}
+
+static void
+starlte_upmark_start(void)
+{
+	uint32_t on = 0;
+	thread_t th;
+	if (!PE_parse_boot_argn("scionup", &on, sizeof(on)) || on == 0) {
+		return;
+	}
+	starlte_bootrec_va = (volatile uint8_t *)ml_io_map(SCION_BOOT_RECORD_PA, PAGE_SIZE);
+	if (starlte_bootrec_va == NULL) {
+		printf("HEROLTE LOG: scionup: the boot record's page is not mapped: no mark\n");
+		return;
+	}
+	if (starlte_wdog_secs == 0) {
+		sweet_wdog_mark = 0;                    /* (no watchdog: this is the only reader; the first system call sets it for good) */
+	}
+	if (kernel_thread_start(starlte_upmark_thread, NULL, &th) == KERN_SUCCESS) {
+		thread_deallocate(th);
+	}
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, starlte_upmark_start);
 #endif
 
 static void
@@ -1118,6 +1545,12 @@ starlte_reboot_recovery(void)
 	if (starlte_pmu_va == NULL) {
 		starlte_pmu_va = (volatile uint32_t *)ml_io_map(STARLTE_PMU_PA, PAGE_SIZE);   /* last try */
 	}
+	/* the front camera's sensor, lens and supplies off again, if a stream had them on (nothing without cam_s9=) */
+	extern void hakios_exynos_camera_quiesce(void);
+	hakios_exynos_camera_quiesce();
+	/* the modem back in reset, if cp=3 or 4 started it (nothing without cp=) */
+	extern void hakios_shannon_quiesce(void);
+	hakios_shannon_quiesce();
 	starlte_reset_to_recovery();
 	printf("HEROLTE LOG: PMU mapping failed, no reboot\n");
 #else

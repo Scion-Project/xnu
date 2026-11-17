@@ -824,8 +824,20 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		/* Boot-arg extra_ram_canary=1 (with extra_ram=1): the extra RAM's canary pages checked every 10 s (arm_vm_init.c). */
 		extern void hakios_extra_ram_canary_start(void);
 		hakios_extra_ram_canary_start();
-		extern void hakios_exynos_pcie_init(void);
-		hakios_exynos_pcie_init();
+		extern void starlte_wifi_init(void);
+		starlte_wifi_init();       /* wifi_pcie=N: en0's options, then the link and (6) brcmfmac (bsd/dev/starlte_wifi.c) */
+		/* Boot-arg cam_s9=N: Scion's front camera driver (bsd/dev/hakios.exynos_camera.c; its lens with cam_af=N,
+		 * bsd/dev/hakios.ak737x.c); off: nothing mapped, nothing powered. */
+		extern void hakios_exynos_camera_init(void);
+		hakios_exynos_camera_init();
+		/* Boot-arg shub=N: Scion's driver for the sensor hub (bsd/dev/hakios.ssp.c: the accelerometer, gyroscope and
+		 * the others behind the BCM4775's hub, /dev/hakios-sensors); off: nothing mapped, nothing powered. */
+		extern void hakios_ssp_init(void);
+		hakios_ssp_init();
+		/* Boot-arg cp=N: Scion's driver of the S9's own modem, the Shannon CP (bsd/dev/hakios.shannon.c): 1 a look,
+		 * 2 its image loaded from RADIO and checked by the secure world, 3 started, 4 the link; off: nothing. */
+		extern void hakios_shannon_init(void);
+		hakios_shannon_init();
 		/* Boot-arg dpu_probe=1: Scion's DPU scan-out service, its read-only probe (bsd/dev/hakios.exynos_dpu.c). */
 		extern void hakios_exynos_dpu_boot_probe(void);
 		hakios_exynos_dpu_boot_probe();

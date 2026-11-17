@@ -1227,9 +1227,23 @@ gc_update_color(int color, boolean_t fore)
 	gc_ops.update_color(color, fore);
 }
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+extern int sweet_console_muted;     /* osfmk/console/serial_console.c: set when the GUI presents (boot-arg a5fb_noconsole / sweetfb_noconsole) */
+#endif
+
 void
 vcputc_options(char c, __unused bool poll)
 {
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	/*
+	 * The one sink every kernel text path ends in: console_write (checked in _cnputs), kprintf's unbuffered fallback
+	 * (PE_kputc = console_write_unbuffered, which never went through _cnputs), the message-buffer replay. Once the GUI
+	 * presents, no text is drawn over it; a panic draws again.
+	 */
+	if (sweet_console_muted && !panic_active()) {
+		return;
+	}
+#endif
 	if (gc_initialized && gc_enabled) {
 		VCPUTC_LOCK_LOCK();
 		if (gc_enabled) {
