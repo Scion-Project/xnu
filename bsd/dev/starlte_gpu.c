@@ -1935,7 +1935,7 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 		lck_mtx_lock(&sgu_q_lock);
 		sgu_q_head = (sgu_q_head + 1) % SGU_QUEUE;
 		sgu_q_count--;
-		sgu_q_done = seq;
+		__atomic_store_n(&sgu_q_done, seq, __ATOMIC_RELEASE);  /* (read without the lock by starlte_gpu_user_done) */
 		sgu_trace_run++;
 		if (sgu_q_count == 0) {
 			sweet_fb_trace_event('E', sgu_trace_run);
@@ -2166,6 +2166,18 @@ unsigned
 starlte_gpu_user_pending(void)
 {
 	return sgu_q_count;
+}
+
+/*
+ * The number of the last app chain the queue's worker has retired (0 also without the queue, where frames record no chain):
+ * read without a lock by the framebuffer's vsync tick (sweetfb_nowait), which never sleeps for the GPU. The worker writes it
+ * as it retires each chain, woken by the GPU's job interrupt with sgu_irq=1, so the tick sees a frame done by a load.
+ */
+uint64_t starlte_gpu_user_done(void);
+uint64_t
+starlte_gpu_user_done(void)
+{
+	return __atomic_load_n(&sgu_q_done, __ATOMIC_ACQUIRE);
 }
 
 /* The number of the last chain an app has submitted (0: none, or no queue): what a frame shown now must wait for. */
