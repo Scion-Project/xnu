@@ -203,7 +203,17 @@ static const char starlte_default_bootargs[] =
      */
     "tmu=3 shub=6 shub_hid=3 sweethalt=1 sweetfg=1 rtc_pmic=1 persona_lax=1 wifi_pcie=6 brcmfmac=8 "
     "abox=8 max98512=3 cs47l93=6 abox_mic=1 abox_rmem=1 bt=7 "
-    "cp=7 cp_nv=2 cp_delay=40 cp_rfs=1 cp_if=1";
+    "cp=7 cp_nv=2 cp_delay=40 cp_rfs=1 cp_if=1 "
+    /*
+     * On by default since 18 November 2026, at the owner's word ("enable all features"; faults are for follow-ups):
+     * the cameras (cam_s9=7, front and rear in one boot with cam_switch=1; without the root's camera step nothing
+     * opens the device), the GPU's job interrupt (sgu_irq=1: attached and measured on a phone, 17 November), files
+     * compressed as decmpfs type 16 read (decmpfs_lz4=1: the app switcher's snapshots; not yet run on a phone), and
+     * dyld's @rpath for the AMFI stand-in's processes (sweetatpath=1: Books' and Podcasts' widgets).
+     * Not here on purpose: sweetfb_dpp (the display's scaler: after its probe boot), sweetc2 (a core powered down has
+     * never come back on a phone), gov_policy=3 and ocp_guard=4 (above 1794 MHz), sgu_depth (measured harmful).
+     */
+    "cam_s9=7 cam_switch=1 sgu_irq=1 decmpfs_lz4=1 sweetatpath=1";
 
 static bool
 starlte_bootarg_sep(char c)
