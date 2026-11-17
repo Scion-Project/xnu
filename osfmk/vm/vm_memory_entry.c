@@ -1861,6 +1861,24 @@ mach_memory_entry_ownership_from_user(
 	return kr;
 }
 
+/*
+ * mach_memory_entry_region_info: Darwin 27.2's routine 4904 (osfmk/mach/memory_entry.defs). Scion answers that it is not
+ * supported: the meaning of its values is not public, and no program of iOS 27 calls it at boot. Not run on a phone.
+ */
+kern_return_t
+mach_memory_entry_region_info(
+	ipc_port_t              entry_port,
+	uint64_t                *value0 __unused,
+	uint64_t                *value1 __unused,
+	vm_region_recurse_info_t info __unused,
+	mach_msg_type_number_t  *count __unused)
+{
+	if (mach_memory_entry_from_port(entry_port) == NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	return KERN_NOT_SUPPORTED;
+}
+
 kern_return_t
 mach_memory_entry_get_page_counts(
 	ipc_port_t      entry_port,
