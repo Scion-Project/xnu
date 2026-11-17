@@ -25,7 +25,7 @@ SYSCTL_NODE(_kern_hakios, OID_AUTO, c2, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
 static int
 starlte_c2_stats(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
 {
-	const size_t len = 2048;
+	const size_t len = 4096;
 	char *buf = kalloc_data(len, Z_WAITOK | Z_ZERO);
 	if (buf == NULL) {
 		return ENOMEM;

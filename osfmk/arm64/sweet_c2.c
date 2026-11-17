@@ -317,6 +317,9 @@ static uint32_t
 c2_check_core(cpu_data_t *cdp, unsigned int cpu)
 {
 	uint32_t why = 0;
+#if !defined(STARLTE)
+	(void)cpu;
+#endif
 #if defined(STARLTE)
 	uint64_t midr = __builtin_arm_rsr64("MIDR_EL1");
 	uint64_t mpidr = __builtin_arm_rsr64("MPIDR_EL1");
@@ -707,7 +710,7 @@ c2_check_system(void)
 static void
 c2_print(void)
 {
-	static char buf[2048];
+	static char buf[4096];
 	size_t n = sweet_c2_format(buf, sizeof(buf));
 	buf[n < sizeof(buf) ? n : sizeof(buf) - 1] = 0;
 	char *line = buf;
