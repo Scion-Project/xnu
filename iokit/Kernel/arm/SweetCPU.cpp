@@ -20,6 +20,9 @@
 
 extern "C" void sweet_secondary_entry(void);
 extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+#if defined(STARLTE) || defined(FRANKEL)
+extern "C" void sweet_c2_start(void);
+#endif
 #if defined(HEROLTE)
 /* kern/sched_prim.h declares it for MACH_KERNEL_PRIVATE only. */
 extern "C" processor_t thread_bind(processor_t processor);
@@ -285,6 +288,10 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
 	ml_set_max_cpus(topology->max_cpu_id + 1);
 	IOLog(CPU_PORT_NAME " CPU: %u/%u CPUs initialized, SGI1 verified\n",
 	    topology->num_cpus, topology->num_cpus);
+#if defined(STARLTE) || defined(FRANKEL)
+	/* core power-down in idle: nothing unless sweetc2 or sweetc2dry (osfmk/arm64/sweet_c2.c) */
+	sweet_c2_start();
+#endif
 #if defined(HEROLTE)
 	/* A CPU whose timer interrupt never fires still answers SGIs: sleep once
 	 * on each CPU. Boot does not wait for this thread, so a CPU that never
