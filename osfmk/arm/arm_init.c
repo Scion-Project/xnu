@@ -232,6 +232,15 @@ starlte_bootarg_named(const char *line, const char *key, size_t klen)
 	return false;
 }
 
+/*
+ * A default that does not fit the kernel's line is left out, and until 17 November 2026 nothing said so: with a long
+ * line from the loader the last defaults (the modem's, then the other hardware's) fell off silently and a feature
+ * "did not start". Their names are kept here and said once the log is up (starlte_bootargs_report).
+ */
+static char starlte_bootargs_dropped[256];
+static unsigned starlte_bootargs_dropped_n;
+static unsigned starlte_bootargs_len;
+
 static void
 starlte_bootargs_defaults(boot_args *ba)
 {
@@ -259,7 +268,23 @@ starlte_bootargs_defaults(boot_args *ba)
 		if (tlen == 0) {
 			break;
 		}
-		if (starlte_bootarg_named(line, t, (size_t)(k - t)) || len + 1 + tlen >= BOOT_LINE_LENGTH) {
+		if (starlte_bootarg_named(line, t, (size_t)(k - t))) {
+			continue;
+		}
+		if (len + 1 + tlen >= BOOT_LINE_LENGTH) {
+			/* no room: its name (not its value) for the report */
+			size_t nlen = (size_t)(k - t), have = strlen(starlte_bootargs_dropped);
+
+			starlte_bootargs_dropped_n++;
+			if (have + nlen + 2 < sizeof(starlte_bootargs_dropped)) {
+				if (have != 0) {
+					starlte_bootargs_dropped[have++] = ' ';
+				}
+				for (size_t i = 0; i < nlen; i++) {
+					starlte_bootargs_dropped[have++] = t[i];
+				}
+				starlte_bootargs_dropped[have] = '\0';
+			}
 			continue;
 		}
 		if (len != 0) {
@@ -270,7 +295,24 @@ starlte_bootargs_defaults(boot_args *ba)
 		}
 		line[len] = '\0';
 	}
+	starlte_bootargs_len = (unsigned)len;
 }
+
+/* Said once, when the log can carry it: how full the line is, and loudly which defaults are NOT in force. */
+__startup_func
+static void
+starlte_bootargs_report(void)
+{
+	if (starlte_bootargs_dropped_n != 0) {
+		printf("STARLTE BOOTARGS: WARNING: %u built-in default(s) did NOT fit the kernel's line (%u of %u bytes; the "
+		    "loader's line is too long) and are NOT IN FORCE: %s\n", starlte_bootargs_dropped_n, starlte_bootargs_len,
+		    (unsigned)BOOT_LINE_LENGTH, starlte_bootargs_dropped);
+	} else if (starlte_bootargs_len != 0) {
+		printf("STARLTE BOOTARGS: the line is %u of %u bytes; no built-in default was left out for room\n",
+		    starlte_bootargs_len, (unsigned)BOOT_LINE_LENGTH);
+	}
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, starlte_bootargs_report);
 #endif /* STARLTE */
 
 #ifdef  APPLETYPHOON
