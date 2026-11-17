@@ -334,6 +334,19 @@ enum {
 #define SWEET_FB_NOTIFY_RELBUF          7
 /* relbuf state (defined with sweet_fb_swap_id() further down) */
 static int sweet_fb_relbuf;
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/*
+ * boot-arg sweetfb_nowait=1 (off by default; NOT run on a phone when written, 17 Nov 2026): the vsync tick does not sleep
+ * for the GPU. Without it a tick that takes a frame whose chains are still running sleeps until they are done, then
+ * presents it; the tick handler holds the timer the whole time, so the next tick, and with it the window server's next
+ * vsync callback, comes late: on 12 Nov phone 1 measured "tick slept for the GPU avg 13-16 ms" and "ticks avg 20-22 ms"
+ * while swiping (sweetfb_prof=1), i.e. the 60 Hz callback stretched to 45-50 Hz before anything else. With it a frame whose
+ * chains are not done stays pending and a later tick takes it once they are (never before: what is shown is always a
+ * finished frame), unless a newer frame has come in meanwhile, which is then the one shown (the older is released as a
+ * replaced one is). The cost: a frame done just after a tick waits up to a refresh to be shown.
+ */
+static uint32_t sweet_fb_nowait, sweet_fb_nowait_deferred, sweet_fb_nowait_dropped;
+#endif
 static uint32_t sweet_fb_relbuf_sent;
 /*
  * sweetfb_cav=1 (default off): CoreAnimation pacing aids for iOS 27.
@@ -649,6 +662,11 @@ AppleCLCD::start(IOService *provider)
 	PE_parse_boot_argn("sweetfb_prof", &sweet_fb_prof, sizeof(sweet_fb_prof));
 	PE_parse_boot_argn("sweetfb_trace", &sweet_fb_trace, sizeof(sweet_fb_trace));
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (PE_parse_boot_argn("sweetfb_nowait", &sweet_fb_nowait, sizeof(sweet_fb_nowait)) && sweet_fb_nowait != 0) {
+		sweet_fb_nowait = 1;
+		IOLog("A5XELTE FB: sweetfb_nowait=1: a tick does not sleep for a frame's GPU chains; a frame not done waits for a "
+		    "later tick\n");
+	}
 	{
 		uint32_t dpp = 0;
 		if (PE_parse_boot_argn("sweetfb_dpp", &dpp, sizeof(dpp)) && dpp == 1) {
@@ -830,6 +848,25 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 			fb->dppLeave("switched off (kern.hakios.sweetfb_dpp=0)", true, SWEET_FB_DPP_LEAVE_OFF);
 		}
 	}
+	if (rec != NULL && recSeq != 0 && sweet_fb_nowait && starlte_gpu_user_wait_seq(recSeq, false) != 0) {
+		/* sweetfb_nowait: its chains are not done; back to pending unless a newer frame came in meanwhile (see above) */
+		IOLockLock(fb->fLock);
+		bool newer = fb->fDirty;
+		if (!newer) {
+			fb->fDirty = true;              /* (fPending is still this frame: nothing has been recorded since) */
+		}
+		IOLockUnlock(fb->fLock);
+		if (newer) {
+			sweet_fb_nowait_dropped++;
+			if (sweet_fb_relbuf) {
+				fb->relbuf(sweet_fb_swap_id(rec));
+			}
+		} else {
+			sweet_fb_nowait_deferred++;
+		}
+		IOFreeData(rec, SWEET_FB_SWAP_REC_MAX);
+		rec = NULL;
+	}
 	if (rec != NULL) {
 		sweet_fb_trace_event('F', sweet_fb_swap_id(rec));
 	}
@@ -925,6 +962,13 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 			if ((sweet_fb_sbx & 16384) != 0) {
 				IOLog("A5XELTE FB gaps: 1:%u 2:%u 3:%u 4-6:%u 7+:%u\n", sweet_fb_gaps[0], sweet_fb_gaps[1], sweet_fb_gaps[2],
 				    sweet_fb_gaps[3], sweet_fb_gaps[4]);
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+				if (sweet_fb_nowait) {
+					IOLog("A5XELTE FB nowait: ticks that left a frame for a later one (its chains not done) %u, frames a "
+					    "newer one replaced meanwhile %u\n", sweet_fb_nowait_deferred, sweet_fb_nowait_dropped);
+					sweet_fb_nowait_deferred = sweet_fb_nowait_dropped = 0;
+				}
+#endif
 			}
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
 			if (sweet_fb_dpp_want || sweet_fb_dp.tried) {
