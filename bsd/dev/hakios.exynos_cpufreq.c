@@ -44,7 +44,7 @@
  * So stock Android on this phone never runs the M3s above 1794000 with all four online, and above 2314000 never at all
  * (2704000, the S9's advertised top, and 2886000 are in the table and nowhere allowed). The ceiling here: for the M3s
  * the online count's limit, and by default no more than 1794000 in any case (the phone's tree's max-freq;
- * cpufreq_gov_big_max= may raise it as far as the online count's limit, never further); for the A55s 1794000 by default
+ * cpufreq_gov_big_max= and gov_policy=3 held there too unless ocp_guard=4's rule allows more); for the A55s 1794000 by default
  * (cpufreq_gov_lit_max= up to 1950000). The floors: the M3s' min-freq; the A55s' 1053000 by default, not 455000, because
  * core 0, which runs the loader's UFS service, is an A55 the scheduler does not see: its load is not counted here.
  *
@@ -132,7 +132,7 @@
  *   cpufreq_gov=1            run it (0, or none: the fixed rates of cpufreq_lit= and cpufreq_big=)
  *   cpufreq_gov_ms=<ms>      the load window (20 to 200; 40)
  *   cpufreq_gov_log=<s>      a summary line this often (0: none; 1)
- *   cpufreq_gov_lit_max=<kHz>, cpufreq_gov_big_max=<kHz>   the ceilings (at most 1950000 and the online count's limit)
+ *   cpufreq_gov_lit_max=<kHz>, cpufreq_gov_big_max=<kHz>   the ceilings (at most 1950000; the M3s 1794000 below ocp_guard=4)
  *   cpufreq_gov_lit_min=<kHz>, cpufreq_gov_big_min=<kHz>   the floors (at least 455000 and 650000)
  *   gov_boost_big=<kHz>      the M3s' floor while touched (1469000; 0: no touch boost for them)
  *   gov_boost_lit=<kHz>      the A55s' floor while touched (1690000; 0: none)
@@ -170,6 +170,7 @@
 #include <sys/hakios.exynos_acpm.h>
 #include <sys/hakios.exynos_soc.h>
 #include <sys/hakios.scion_gov.h>
+#include "hakios.exynos_cpufreq_ceiling.h"
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/sysctl.h>
@@ -534,7 +535,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
  *   1  observe: the PMIC's OCP_WARN1/OCP_WARN2 read (never written), the M3s' power status read from the PMU each
  *      second, SPI 213 attached and counted, and the interrupt path tested once by pending SPI 213 at the GIC by
  *      software. No M3 register is touched. The M3s' ceiling is held at 1794000 whatever else is asked (gov_policy=3,
- *      cpufreq_gov_big_max=).
+ *      cpufreq_gov_big_max=), as it is without the guard: hakios.exynos_cpufreq_ceiling.h is the rule for every option.
  *   2  probe: the OCP block's five registers read once on cpu 4, and its flag read with each interrupt and once a
  *      second; nothing written. (On an S9+ under iOS 16.5 the governor's thread never came back from this read: kernel
  *      commit dab99986. Here it runs on a thread of its own, so the governor keeps the heat in hand if it does not.)
@@ -558,10 +559,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #define OCPG_INT5               0x04u           /* S2MPS18_PMIC_REG_INT5: OCPB1..8 */
 #define OCPG_WARN_EN            0x80u           /* S2MPS18_OCP_WARN_EN_SHIFT 7 */
 #define OCPG_WO_KHZ             1794000u        /* max-freq-wo-ocp */
-#define OCPG_DUAL_KHZ           2314000u        /* hotplug_governor single_freq, dual_freq */
-#define OCPG_DUAL_CORES         2u              /* ... for this many M3s on at most */
 #define OCPG_MIN_KHZ            650000u         /* domain@1 min-freq: the driver's min_freq */
-#define OCPG_COOL_MC            83000           /* BIG's control point */
 #define OCPG_RELEASE_MS         15u             /* release-duration */
 #define OCPG_RELEASE_SUM        200u            /* release-threshold 50% of four cores: summed busy percent */
 #define OCPG_ERRA               (1ull << 27)    /* OCPTHROTTCTL OCPTHROTTERRA */
@@ -926,44 +924,43 @@ ocpg_alive(void)
 	return ocpg.armed && !ocpg.dead && ocpg.pmic_on && beat != 0 && mach_absolute_time() - beat < ocpg_ms_to_abs(1000);
 }
 
-/* level 4's rule: the fastest the M3s may run now, and why (said once a change) */
-static uint32_t
+/* level 4's rule (hakios.exynos_cpufreq_ceiling.h) as it stands now; stage two's decision said once a change */
+static enum ceil_why
 ocpg_top(struct cluster *c)
 {
-	uint32_t on = SCION_BIG_CORES - MIN(ocpg_m3s_off(), (uint32_t)SCION_BIG_CORES), why;
-	int32_t mc = hakios_exynos_tmu_zone_mc(c->tmu_zone);
-	static const char *const reasons[] = {
-		"", "level under 4", "stage one not armed or not alive", "no fresh temperature", "the big zone at its cooling point",
-		"more M3s on than Samsung allows above 1794000 (no M3 can be taken offline in this kernel)", "ALLOWED: 2314000",
-	};
+	struct ceil_in in = { .guard = ocpg_mode, .alive = ocpg_alive(), .temp_fresh = temp_fresh(c),
+		              .big_mc = hakios_exynos_tmu_zone_mc(c->tmu_zone), .m3s_off = ocpg_m3s_off() };
+	enum ceil_why why = ceil_why(&in);
 
-	if (ocpg_mode < 4) {
-		why = 1;
-	} else if (!ocpg_alive()) {
-		why = 2;
-	} else if (!temp_fresh(c) || mc == NOT_READ_MC) {
-		why = 3;
-	} else if (mc >= OCPG_COOL_MC) {
-		why = 4;
-	} else if (on > OCPG_DUAL_CORES) {
-		why = 5;
-	} else {
-		why = 6;
-	}
 	if (why != ocpg.two_said && ocpg_mode >= 4) {
 		ocpg.two_said = why;
-		say("cpufreq_gov: ocp_guard: stage two: %s (%u M3s on, big %d mC)\n", why == 6 ? reasons[6] : reasons[why], on, mc);
+		say("cpufreq_gov: ocp_guard: stage two: %s (%u M3s on, big %d mC)\n", ceil_reason(why), ceil_m3s_on(&in), in.big_mc);
 	}
-	return why == 6 ? OCPG_DUAL_KHZ : OCPG_WO_KHZ;
+	return why;
 }
 
-/* ceiling_now()'s last step for the M3s with the guard on: at most 1794000 unless level 4's rule holds; the clip after a throttle */
+/* every option's ceiling for the M3s through the one rule: 1794000 unless level 4's holds; said once when it holds them */
+static uint32_t
+big_held(struct cluster *c, uint32_t max)
+{
+	static bool said;
+	uint32_t held = ceil_big(max, ocpg_top(c));
+
+	if (held == CEIL_HELD_KHZ && max > held && !said) {
+		said = true;
+		say("cpufreq_gov: big: %s asks up to %u kHz; held at 1794 MHz: needs ocp_guard=4 (docs/ios27/OCP.md)\n",
+		    gov_policy == 3 ? "gov_policy=3" : "cpufreq_gov_big_max=", max);
+	}
+	return held;
+}
+
+/* ceiling_now()'s last step for the M3s: at most 1794000 unless level 4's rule holds (big_held()); the clip after a throttle */
 static uint32_t
 ocpg_ceiling(struct cluster *c, uint32_t max)
 {
 	uint32_t clip = __atomic_load_n(&ocpg_clip, __ATOMIC_ACQUIRE);
 
-	max = MIN(max, ocpg_top(c));
+	max = big_held(c, max);
 	__atomic_store_n(&ocpg_seen_ceiling, max, __ATOMIC_RELEASE);
 	return clip != 0 ? MIN(max, clip) : max;
 }
@@ -1071,8 +1068,8 @@ ceiling_now(struct cluster *c)
 	if (c->thermal > 0) {
 		max = MIN(max, c->levels[MIN(c->thermal, c->n - 1)]);
 	}
-	if (c == &clusters[1] && ocpg_mode != 0) {
-		max = ocpg_ceiling(c, max);  /* (ocp_guard=: 1794000 unless stage two's rule holds; a throttle's clip) */
+	if (c == &clusters[1]) {
+		max = ocpg_ceiling(c, max);  /* (every option: 1794000 unless ocp_guard=4's rule holds; a throttle's clip) */
 	}
 	return c->levels[level_at_most(c, max)];
 }
@@ -1276,6 +1273,9 @@ set_rate(struct cluster *c, uint32_t khz, uint32_t max)
 	uint64_t began, took, bounce;
 	int e;
 
+	if (c == &clusters[1]) {
+		khz = big_held(c, khz); /* (as ceiling_now(): the boot's first rate and every other request too) */
+	}
 	if (c == &clusters[1] && ocpg_mode != 0) {
 		khz = ocpg_prechange(c, khz);   /* (ocp_guard=3 and up: the IRP first, as exynos-ocp's PRECHANGE notifier) */
 	}
