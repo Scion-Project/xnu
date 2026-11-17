@@ -12,6 +12,7 @@ iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitc
 iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/SweetEntitlements.cpp                           optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/SweetKeyStore.cpp                               optional iokitcpp scion_generic_arm64
+iokit/Kernel/arm/SweetKeyStorePasscode.cpp                       optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/SweetWatchdog.cpp                               optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/SweetSurface.cpp                                optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp scion_generic_arm64
