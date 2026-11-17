@@ -144,6 +144,10 @@
  *   gov_wake=1               a finger coming down asks for the GPU's frame floor at once, before the first frame needs it (off)
  *   gov_policy=<n>           1 the policy above; 3 the scion governor; 2 scion without parking; 4 that with frame pacing (1 for now)
  *   gov_stat=<n>             the line of numbers to compare by (1; 0: none)
+ *   ocp_guard=<n>            the over-current guard, NOT run on a phone (docs/ios27/OCP.md; 0, the default: off)
+ *                            1 observe, 2 and the OCP block's registers read, 3 stage one (armed, the M3s still at
+ *                            1794000 at most), 4 stage two (refuses: no M3 can be taken offline yet)
+ *   ocp_guard_flags=1        with ocp_guard: also the S2MPS18's INT5 read each second (BUCK2 at its current limit)
  *
  * Sources (Samsung's kernel for the S9, Scion-Project/android_kernel_samsung_exynos9810, lineage-24.0 at e5906667068e,
  * and Silicium's Resources/DTBs/starlte.dts, the phone's own tree): arch/arm64/boot/dts/exynos/
@@ -498,6 +502,555 @@ temp_fresh(const struct cluster *c)
 	return scion_temp_ok(hakios_exynos_tmu_zone_mc(c->tmu_zone), hakios_exynos_tmu_age_ms());
 }
 
+
+/* (Starbite) the over-current guard's ties to this tree: the PMIC through starlte_touch.c's ACPM client, SPIs through pe_fiq.c */
+extern bool starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
+extern kern_return_t starlte_gic_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid), void *context);
+extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+#define OCPG_PMIC_READ(reg, v)  (starlte_pmic_read(1, (reg), (v)) ? 0 : EIO)
+#define OCPG_SPI_ATTACH         starlte_gic_spi_attach
+#define OCPG_CPU_CLUSTER(cpu)   cpu_affinity(cpu)
+
+/*
+ * The over-current guard (ocp_guard=N; off by default, NOT run on a phone). docs/ios27/OCP.md (scion-kernel) has the facts,
+ * the design and the phone tests; in short:
+ *
+ * Samsung's kernel runs the M3s above 1794000 (max-freq-wo-ocp, the exynos-ocp node of exynos9810-starlte_eur_open_26.dts)
+ * only while three things hold: its OCP driver runs (drivers/soc/samsung/exynos-ocp.c), the S2MPS18's CPU over-current
+ * warning is on (drivers/regulator/s2mps18.c writes OCP_WARN1, 0xD3, = 0x80 at every boot from the PMIC node's
+ * cpu_ocp_warn_en/reset/lv 1/0/0), and the hotplug governor has taken the other M3s offline (exynos-hotplug_governor.c:
+ * a core counts toward the limit until CPU_DEAD, after PSCI CPU_OFF; 2314000 for one or two, 1794000 for three or four).
+ * The OCP block is the M3 cluster's own, reached only through implementation-defined system registers on an M3 (the
+ * driver uses the first, cpu 4): OCPTHROTTCTL S3_0_C15_C12_7 (bit 27 OCPTHROTTERRA: a throttle event; written 0 to
+ * clear), GCUCTL S3_1_C15_C11_0 (bit 24 OCPTHROTTERRAEN: its interrupt), OCPINTCTL S3_0_C15_C12_5 ([9:4] IRP, set before
+ * every rate change to 2 x rate / min-freq - 2, at most 63), and two the driver names and never touches,
+ * OCPTHROTTCNTA S3_0_C15_C14_4 and OCPTIDEPBOTTHRESH S3_0_C15_C15_1 (their values are the firmware's). Its interrupt is SPI
+ * 181 (INTID 213), rising edge. On it the driver turns the interrupt off, and when the flag is set clears it and lowers
+ * the M3s' ceiling one level under the last ceiling (down-step 1), turns the interrupt back on, and 15 ms later
+ * (release-duration) releases the ceiling at once if the M3s' summed load is under 50% of the four cores' capacity
+ * (release-mode 1, release-threshold 50), else looks again 15 ms later.
+ *
+ * Here, by level (each includes the ones under it):
+ *   1  observe: the PMIC's OCP_WARN1/OCP_WARN2 read (never written), the M3s' power status read from the PMU each
+ *      second, SPI 213 attached and counted, and the interrupt path tested once by pending SPI 213 at the GIC by
+ *      software. No M3 register is touched. The M3s' ceiling is held at 1794000 whatever else is asked (gov_policy=3,
+ *      cpufreq_gov_big_max=).
+ *   2  probe: the OCP block's five registers read once on cpu 4, and its flag read with each interrupt and once a
+ *      second; nothing written. (On an S9+ under iOS 16.5 the governor's thread never came back from this read: kernel
+ *      commit dab99986. Here it runs on a thread of its own, so the governor keeps the heat in hand if it does not.)
+ *   3  stage one: armed as Samsung's driver runs it, the ceiling still 1794000: IRP kept to the rate, the interrupt
+ *      handled with Samsung's step down and release, the interrupt path tested at arming and every minute, the flag
+ *      polled each second (set with no interrupt behind it: the path is dead), the enable bit and the PMIC's warning
+ *      read back. Any failure latches "dead" for the boot.
+ *   4  stage two: rates above 1794000 (2314000 at most, the dual_freq) only while stage one is armed and alive, no
+ *      more M3s are on than Samsung allows for the rate (powered off by CPU_OFF, the PMU saying so), and the big
+ *      zone is under 83 C. This kernel cannot take an M3 offline yet (SweetCPU::haltCPU, starting an M3 again after
+ *      CPU_OFF failed on the S9+'s mainline port), so ocpg_m3s_off() is 0 and stage two never raises the ceiling: it
+ *      says why, once a change.
+ * ocp_guard_flags=1: also the S2MPS18's INT5 read once a second (bit 1 OCPB2: BUCK2, vdd_cpucl1, hit its current limit).
+ * Reading INT5 clears it, as Samsung's PMIC interrupt thread does; nothing else of this tree reads it.
+ */
+#define OCPG_INTID              (181u + 32u)    /* exynos-ocp interrupts = <0 181 0> */
+#define OCPG_GICD_PA            0x10101000ul    /* the GIC-400's distributor (interrupt-controller@10100000) */
+#define OCPG_PMU_CL1_PA         0x14062000ul    /* PMU + 0x2000: CLUSTER1_CPUn_STATUS at +0x4 + 8n */
+#define OCPG_WARN1              0xD3u           /* S2MPS18_PMIC_REG_OCP_WARN1 (CPU) */
+#define OCPG_WARN2              0xD4u           /* (GPU) */
+#define OCPG_INT5               0x04u           /* S2MPS18_PMIC_REG_INT5: OCPB1..8 */
+#define OCPG_WARN_EN            0x80u           /* S2MPS18_OCP_WARN_EN_SHIFT 7 */
+#define OCPG_WO_KHZ             1794000u        /* max-freq-wo-ocp */
+#define OCPG_DUAL_KHZ           2314000u        /* hotplug_governor single_freq, dual_freq */
+#define OCPG_DUAL_CORES         2u              /* ... for this many M3s on at most */
+#define OCPG_MIN_KHZ            650000u         /* domain@1 min-freq: the driver's min_freq */
+#define OCPG_COOL_MC            83000           /* BIG's control point */
+#define OCPG_RELEASE_MS         15u             /* release-duration */
+#define OCPG_RELEASE_SUM        200u            /* release-threshold 50% of four cores: summed busy percent */
+#define OCPG_ERRA               (1ull << 27)    /* OCPTHROTTCTL OCPTHROTTERRA */
+#define OCPG_ERRAEN             (1ull << 24)    /* GCUCTL OCPTHROTTERRAEN */
+#define OCPG_IRP_SHIFT          4
+#define OCPG_IRP_MASK           0x3full
+#define OCPG_TEST_MS            100u            /* a pended interrupt must reach the handler within this */
+#define OCPG_LATE_MS            50u             /* the flag polled set with no interrupt this recent: the path is dead */
+
+static uint32_t ocpg_mode, ocpg_flags;
+static vm_offset_t ocpg_gicd, ocpg_pmu;
+static int ocpg_event;                          /* the guard's thread waits on it */
+static uint32_t ocpg_spi_count;                 /* the handler's, interrupt context */
+static uint64_t ocpg_spi_last;
+static uint32_t ocpg_irp_want = ~0u, ocpg_irp_done = ~0u;
+static uint32_t ocpg_clip;                      /* kHz: the ceiling after a throttle (0: none) */
+static uint32_t ocpg_seen_ceiling = OCPG_WO_KHZ; /* the M3s' ceiling before the clip, as the governor last worked it out */
+static bool ocpg_kick;                          /* the governor to decide again now */
+static uint64_t ocpg_beat;                      /* the guard's thread last ran (mach time) */
+static int ocpg_cpu = -1;                       /* the M3 it runs on */
+static struct {
+	bool attached, regs_read, armed, dead, pmic_on, test_ok;
+	uint8_t warn1, warn2;
+	uint64_t thrott, gcu, intctl, cnta, bott;
+	uint32_t interrupts, tests, trips, flag_polled, releases, buck2_ocp;
+	uint32_t pmu_status[4];
+	uint32_t two_said;                      /* stage two's last reason said (0: none yet) */
+	const char *dead_why;
+} ocpg;
+
+static inline uint64_t ocpg_ms_to_abs(uint64_t ms)
+{
+	uint64_t abs;
+
+	nanoseconds_to_absolutetime(ms * NSEC_PER_MSEC, &abs);
+	return abs;
+}
+
+/* the M3's OCP registers: on an M3 only (an A55 has none), from the guard's thread bound to cpu 4 */
+static inline uint64_t ocpg_rd_thrott(void) { uint64_t v; __asm__ volatile ("mrs %0, S3_0_C15_C12_7" : "=r" (v)); return v; }
+static inline uint64_t ocpg_rd_gcu(void) { uint64_t v; __asm__ volatile ("mrs %0, S3_1_C15_C11_0" : "=r" (v)); return v; }
+static inline uint64_t ocpg_rd_intctl(void) { uint64_t v; __asm__ volatile ("mrs %0, S3_0_C15_C12_5" : "=r" (v)); return v; }
+static inline uint64_t ocpg_rd_cnta(void) { uint64_t v; __asm__ volatile ("mrs %0, S3_0_C15_C14_4" : "=r" (v)); return v; }
+static inline uint64_t ocpg_rd_bott(void) { uint64_t v; __asm__ volatile ("mrs %0, S3_0_C15_C15_1" : "=r" (v)); return v; }
+static inline void ocpg_wr_thrott(uint64_t v) { __asm__ volatile ("msr S3_0_C15_C12_7, %0\n isb" : : "r" (v) : "memory"); }
+static inline void ocpg_wr_gcu(uint64_t v) { __asm__ volatile ("msr S3_1_C15_C11_0, %0\n isb" : : "r" (v) : "memory"); }
+static inline void ocpg_wr_intctl(uint64_t v) { __asm__ volatile ("msr S3_0_C15_C12_5, %0\n isb" : : "r" (v) : "memory"); }
+
+/* exynos_ocp_irq_work()'s IRP for a rate */
+static uint32_t
+ocpg_irp(uint32_t khz)
+{
+	uint32_t irp = (uint32_t)((uint64_t)khz * 2 / OCPG_MIN_KHZ);
+
+	irp = irp >= 2 ? irp - 2 : 0;
+	return MIN(irp, (uint32_t)OCPG_IRP_MASK);
+}
+
+/* SPI 213, interrupt context on the boot processor: counted, the thread woken; the M3's registers are read on the M3 */
+static void
+ocpg_interrupt(void *context __unused, uint32_t intid __unused)
+{
+	__atomic_store_n(&ocpg_spi_last, mach_absolute_time(), __ATOMIC_RELEASE);
+	__atomic_fetch_add(&ocpg_spi_count, 1, __ATOMIC_ACQ_REL);
+	(void)thread_wakeup_prim((event_t)&ocpg_event, FALSE, THREAD_AWAKENED);
+}
+
+/* the governor told to look at the M3s' ceiling now (its wait cut short: gov_thread()) */
+static void
+ocpg_kick_now(void)
+{
+	__atomic_store_n(&ocpg_kick, true, __ATOMIC_RELEASE);
+	(void)thread_wakeup_prim((event_t)&boost_event, FALSE, THREAD_AWAKENED);
+}
+
+/* latched for the boot: stage two never again */
+static void
+ocpg_die(const char *why)
+{
+	if (!ocpg.dead) {
+		ocpg.dead = true;
+		ocpg.dead_why = why;
+		say("cpufreq_gov: ocp_guard: DEAD for this boot: %s; the M3s stay at or under %u kHz\n", why, OCPG_WO_KHZ);
+	}
+	ocpg_kick_now();
+}
+
+/* the thread's wait: woken by the interrupt, a rate change's IRP, or the deadline */
+static void
+ocpg_sleep_ms(uint64_t ms)
+{
+	uint64_t deadline;
+
+	clock_interval_to_deadline((uint32_t)ms, NSEC_PER_MSEC, &deadline);
+	(void)assert_wait_deadline((event_t)&ocpg_event, THREAD_UNINT, deadline);
+	(void)thread_block(NULL);
+}
+
+/* the GIC raises SPI 213 by software (GICD_ISPENDR): true when the handler counted it within OCPG_TEST_MS */
+static bool
+ocpg_test_interrupt(void)
+{
+	uint32_t before = __atomic_load_n(&ocpg_spi_count, __ATOMIC_ACQUIRE);
+	uint64_t until = mach_absolute_time() + ocpg_ms_to_abs(OCPG_TEST_MS);
+
+	if (ocpg_gicd == 0 || !ocpg.attached) {
+		return false;
+	}
+	*(volatile uint32_t *)(ocpg_gicd + 0x200 + 4 * (OCPG_INTID / 32)) = 1u << (OCPG_INTID % 32);
+	__builtin_arm_dsb(0xf);     /* DSB SY */
+	while (__atomic_load_n(&ocpg_spi_count, __ATOMIC_ACQUIRE) == before && mach_absolute_time() < until) {
+		ocpg_sleep_ms(2);
+	}
+	ocpg.tests++;
+	return __atomic_load_n(&ocpg_spi_count, __ATOMIC_ACQUIRE) != before;
+}
+
+/* the M3s' power, as the PMU says (CLUSTER1_CPUn_STATUS [3:0], 0xF on): read, never written */
+static void
+ocpg_read_pmu(void)
+{
+	for (uint32_t n = 0; n < 4 && ocpg_pmu != 0; n++) {
+		ocpg.pmu_status[n] = *(volatile uint32_t *)(ocpg_pmu + 0x4 + 8 * n) & 0xf;
+	}
+}
+
+/*
+ * How many M3s are off: taken offline by this kernel (PSCI CPU_OFF) and read off by the PMU. This kernel has no way to take
+ * an M3 offline (SweetCPU::haltCPU panics; a parked M3 is only kept idle in WFI, a c2 one powered down until its next
+ * interrupt, and Samsung counts both as online), so none is. When the fork can, this is where it says so.
+ */
+static uint32_t
+ocpg_m3s_off(void)
+{
+	return 0;
+}
+
+/* the PMIC's CPU over-current warning, read (never written): on when bit 7 of OCP_WARN1 is set */
+static void
+ocpg_read_pmic(bool say_it)
+{
+	uint8_t w1 = 0, w2 = 0;
+	int e1 = OCPG_PMIC_READ(OCPG_WARN1, &w1);
+	int e2 = OCPG_PMIC_READ(OCPG_WARN2, &w2);
+	bool on = e1 == 0 && (w1 & OCPG_WARN_EN) != 0;
+
+	if (say_it || on != ocpg.pmic_on || (e1 == 0 && w1 != ocpg.warn1)) {
+		say("cpufreq_gov: ocp_guard: the S2MPS18's OCP_WARN1 (CPU) %#x (%d), OCP_WARN2 (GPU) %#x (%d): the CPU warning %s "
+		    "(Samsung's kernel writes 0x80 at every boot; this one only reads)\n", w1, e1, w2, e2, on ? "on" : "NOT on");
+	}
+	ocpg.warn1 = w1;
+	ocpg.warn2 = w2;
+	if (ocpg.pmic_on && !on && ocpg_mode >= 3) {
+		ocpg_die("the PMIC's CPU over-current warning went off");
+	}
+	ocpg.pmic_on = on;
+	if ((ocpg_flags & 1) != 0) {
+		uint8_t int5 = 0;
+
+		if (OCPG_PMIC_READ(OCPG_INT5, &int5) == 0 && (int5 & 0x2) != 0) {
+			ocpg.buck2_ocp++;
+			say("cpufreq_gov: ocp_guard: the S2MPS18's INT5 %#x: BUCK2 (vdd_cpucl1) reached its current limit (%u so far)\n",
+			    int5, ocpg.buck2_ocp);
+		}
+	}
+}
+
+/* Samsung's exynos_ocp_work(), on the M3 (level 3); level 2 only reads the flag */
+static void
+ocpg_handle(const char *why)
+{
+	uint64_t gcu, thrott;
+
+	if (ocpg_mode < 3) {
+		thrott = ocpg_rd_thrott();
+		if ((thrott & OCPG_ERRA) != 0) {
+			ocpg.trips++;
+			say("cpufreq_gov: ocp_guard: %s: OCPTHROTTCTL %#llx, the throttle flag SET (%u; level 2: left as it is)\n", why,
+			    thrott, ocpg.trips);
+		}
+		return;
+	}
+	gcu = ocpg_rd_gcu();
+	ocpg_wr_gcu(gcu & ~OCPG_ERRAEN);
+	thrott = ocpg_rd_thrott();
+	if ((thrott & OCPG_ERRA) != 0) {
+		uint32_t from = __atomic_load_n(&ocpg_clip, __ATOMIC_ACQUIRE), l;
+		struct cluster *b = &clusters[1];
+
+		ocpg_wr_thrott(thrott & ~OCPG_ERRA);
+		from = from != 0 ? from : __atomic_load_n(&ocpg_seen_ceiling, __ATOMIC_ACQUIRE);
+		l = level_at_most(b, from);
+		l = l + 1 < b->n && l < b->lowest ? l + 1 : l;
+		__atomic_store_n(&ocpg_clip, b->levels[l], __ATOMIC_RELEASE);
+		ocpg_kick_now();
+		ocpg.trips++;
+		say("cpufreq_gov: ocp_guard: THROTTLE (%s, %u so far): OCPTHROTTCTL %#llx; the M3s' ceiling %u -> %u kHz (rate %u)\n",
+		    why, ocpg.trips, thrott, from, b->levels[l], b->cur);
+	}
+	ocpg_wr_gcu(gcu | OCPG_ERRAEN);
+	ocpg.gcu = ocpg_rd_gcu();
+	if ((ocpg.gcu & OCPG_ERRAEN) == 0) {
+		ocpg_die("GCUCTL's interrupt enable does not read back set");
+	}
+}
+
+/* the M3's IRP to what the governor is about to ask (level 3), read back */
+static void
+ocpg_set_irp(void)
+{
+	uint32_t want = __atomic_load_n(&ocpg_irp_want, __ATOMIC_ACQUIRE);
+	uint64_t v;
+
+	if (ocpg_mode < 3 || want == ~0u || want == __atomic_load_n(&ocpg_irp_done, __ATOMIC_ACQUIRE)) {
+		return;
+	}
+	v = ocpg_rd_intctl();
+	ocpg_wr_intctl((v & ~(OCPG_IRP_MASK << OCPG_IRP_SHIFT)) | ((uint64_t)want << OCPG_IRP_SHIFT));
+	ocpg.intctl = ocpg_rd_intctl();
+	if (((ocpg.intctl >> OCPG_IRP_SHIFT) & OCPG_IRP_MASK) == want) {
+		__atomic_store_n(&ocpg_irp_done, want, __ATOMIC_RELEASE);
+	} else {
+		ocpg_die("OCPINTCTL's IRP does not read back");
+	}
+}
+
+/* the guard's thread: bound to the first M3 for its life, as Samsung's driver does its work on data->cpu */
+__attribute__((noreturn)) static void
+ocpg_thread(void *arg __unused, wait_result_t wr __unused)
+{
+	const ml_topology_info_t *topology = ml_get_topology_info();
+	uint64_t midr, last_poll = 0, last_pmic = 0, last_test = 0, trip_at = 0;
+	uint32_t handled = 0;
+
+	/* the first M3 the scheduler has (one that has been idle: the governor's measure() says so), ten seconds at most */
+	for (int tries = 0; tries < 100 && ocpg_cpu < 0; tries++) {
+		for (unsigned int i = 0; i < topology->num_cpus && i < MAX_CPUS; i++) {
+			if (OCPG_CPU_CLUSTER(&topology->cpus[i]) == clusters[1].affinity && ever_idle_cpu(i)) {
+				ocpg_cpu = (int)topology->cpus[i].cpu_id;
+				break;
+			}
+		}
+		if (ocpg_cpu < 0) {
+			ocpg_sleep_ms(100);
+		}
+	}
+	if (ocpg_mode >= 2 && (ocpg_cpu < 0 || cpu_to_processor(ocpg_cpu) == NULL)) {
+		ocpg_die("no M3 to run on");
+		ocpg_mode = 1;
+	}
+	if (ocpg_mode >= 2) {
+		(void)thread_bind(cpu_to_processor(ocpg_cpu));
+		(void)thread_block(NULL);
+		midr = __builtin_arm_rsr64("MIDR_EL1");
+		if (((midr >> 24) & 0xff) != 0x53) {
+			say("cpufreq_gov: ocp_guard: cpu %d is no M3 (MIDR %#llx): its registers left alone\n", ocpg_cpu, midr);
+			ocpg_die("not on an M3");
+			ocpg_mode = 1;
+		}
+	}
+	if (ocpg_mode >= 2) {
+		say("cpufreq_gov: ocp_guard: reading the OCP registers on cpu %d now (no \"read\" line after this one: the read "
+		    "did not come back)\n", ocpg_cpu);
+		ocpg.thrott = ocpg_rd_thrott();
+		ocpg.gcu = ocpg_rd_gcu();
+		ocpg.intctl = ocpg_rd_intctl();
+		ocpg.cnta = ocpg_rd_cnta();
+		ocpg.bott = ocpg_rd_bott();
+		ocpg.regs_read = true;
+		say("cpufreq_gov: ocp_guard: read: OCPTHROTTCTL %#llx (flag %u), GCUCTL %#llx (interrupt %s), OCPINTCTL %#llx (IRP %llu), "
+		    "OCPTHROTTCNTA %#llx, OCPTIDEPBOTTHRESH %#llx\n", ocpg.thrott, (ocpg.thrott & OCPG_ERRA) != 0, ocpg.gcu,
+		    (ocpg.gcu & OCPG_ERRAEN) ? "on" : "OFF", ocpg.intctl, (ocpg.intctl >> OCPG_IRP_SHIFT) & OCPG_IRP_MASK, ocpg.cnta,
+		    ocpg.bott);
+	}
+	if (ocpg_mode >= 3) {
+		if ((ocpg.gcu & OCPG_ERRAEN) == 0) {
+			/* Samsung's driver never turns it on at its start: the firmware has; when it has not, nothing here does */
+			ocpg_die("GCUCTL's interrupt enable is off as the firmware left it");
+		} else if ((ocpg.thrott & OCPG_ERRA) != 0) {
+			ocpg_wr_thrott(ocpg.thrott & ~OCPG_ERRA);
+			say("cpufreq_gov: ocp_guard: the throttle flag was set before arming (from before this kernel): cleared\n");
+		}
+		__atomic_store_n(&ocpg_irp_want, ocpg_irp(clusters[1].cur), __ATOMIC_RELEASE);
+		ocpg_set_irp();
+	}
+	ocpg.test_ok = ocpg_test_interrupt();
+	say("cpufreq_gov: ocp_guard: SPI %u raised by the GIC by software: %s\n", OCPG_INTID,
+	    ocpg.test_ok ? "the handler ran" : "the handler did NOT run");
+	if (!ocpg.test_ok) {
+		ocpg_die("the interrupt path's test failed");
+	}
+	ocpg.armed = ocpg_mode >= 3 && !ocpg.dead && ocpg.regs_read && ocpg.pmic_on;
+	say("cpufreq_gov: ocp_guard: level %u: %s\n", ocpg_mode, ocpg.armed ? "ARMED as Samsung's driver runs it (the ceiling stays "
+	    "1794000 below level 4)" : ocpg_mode >= 3 ? "NOT armed" : "observing only");
+	last_test = mach_absolute_time();
+	for (;;) {
+		uint64_t now = mach_absolute_time();
+		uint32_t count = __atomic_load_n(&ocpg_spi_count, __ATOMIC_ACQUIRE);
+
+		__atomic_store_n(&ocpg_beat, now, __ATOMIC_RELEASE);
+		if (ocpg_mode >= 2) {
+			ocpg_set_irp();
+			if (count != handled) {
+				handled = count;
+				ocpg.interrupts = count;
+				ocpg_handle("interrupt");
+				if (__atomic_load_n(&ocpg_clip, __ATOMIC_ACQUIRE) != 0) {
+					trip_at = now;
+				}
+			}
+			if (now - last_poll >= ocpg_ms_to_abs(1000)) {
+				uint64_t thrott = ocpg_rd_thrott();
+
+				last_poll = now;
+				ocpg.cnta = ocpg_rd_cnta();
+				if ((thrott & OCPG_ERRA) != 0 &&
+				    now - __atomic_load_n(&ocpg_spi_last, __ATOMIC_ACQUIRE) > ocpg_ms_to_abs(OCPG_LATE_MS)) {
+					ocpg.flag_polled++;
+					if (ocpg_mode >= 3) {
+						ocpg_die("the throttle flag set with no interrupt behind it");
+					}
+					ocpg_handle("polled");
+					trip_at = now;
+				}
+				if (ocpg_mode >= 3 && (ocpg_rd_gcu() & OCPG_ERRAEN) == 0) {
+					ocpg_die("GCUCTL's interrupt enable found off");
+				}
+			}
+			if (ocpg_mode >= 3 && __atomic_load_n(&ocpg_clip, __ATOMIC_ACQUIRE) != 0 &&
+			    now - trip_at >= ocpg_ms_to_abs(OCPG_RELEASE_MS)) {
+				/* exynos_ocp_work_release(), CPU_UTIL_MODE: the M3s' summed load under half of the four */
+				if (clusters[1].sum_now < OCPG_RELEASE_SUM) {
+					__atomic_store_n(&ocpg_clip, 0, __ATOMIC_RELEASE);
+					ocpg_kick_now();
+					ocpg.releases++;
+				} else {
+					trip_at = now;
+				}
+			}
+		}
+		if (now - last_pmic >= ocpg_ms_to_abs(10000)) {
+			last_pmic = now;
+			ocpg_read_pmic(false);
+			ocpg_read_pmu();
+		}
+		if (now - last_test >= ocpg_ms_to_abs(60000)) {
+			last_test = now;
+			if (!ocpg_test_interrupt()) {
+				ocpg_die("the interrupt path's test failed");
+			}
+		}
+		ocpg_sleep_ms(__atomic_load_n(&ocpg_clip, __ATOMIC_ACQUIRE) != 0 ? OCPG_RELEASE_MS : 250);
+	}
+}
+
+/* the guard alive and armed: what stage two stands on */
+static bool
+ocpg_alive(void)
+{
+	uint64_t beat = __atomic_load_n(&ocpg_beat, __ATOMIC_ACQUIRE);
+
+	return ocpg.armed && !ocpg.dead && ocpg.pmic_on && beat != 0 && mach_absolute_time() - beat < ocpg_ms_to_abs(1000);
+}
+
+/* level 4's rule: the fastest the M3s may run now, and why (said once a change) */
+static uint32_t
+ocpg_top(struct cluster *c)
+{
+	uint32_t on = SCION_BIG_CORES - MIN(ocpg_m3s_off(), (uint32_t)SCION_BIG_CORES), why;
+	int32_t mc = hakios_exynos_tmu_zone_mc(c->tmu_zone);
+	static const char *const reasons[] = {
+		"", "level under 4", "stage one not armed or not alive", "no fresh temperature", "the big zone at its cooling point",
+		"more M3s on than Samsung allows above 1794000 (no M3 can be taken offline in this kernel)", "ALLOWED: 2314000",
+	};
+
+	if (ocpg_mode < 4) {
+		why = 1;
+	} else if (!ocpg_alive()) {
+		why = 2;
+	} else if (!temp_fresh(c) || mc == NOT_READ_MC) {
+		why = 3;
+	} else if (mc >= OCPG_COOL_MC) {
+		why = 4;
+	} else if (on > OCPG_DUAL_CORES) {
+		why = 5;
+	} else {
+		why = 6;
+	}
+	if (why != ocpg.two_said && ocpg_mode >= 4) {
+		ocpg.two_said = why;
+		say("cpufreq_gov: ocp_guard: stage two: %s (%u M3s on, big %d mC)\n", why == 6 ? reasons[6] : reasons[why], on, mc);
+	}
+	return why == 6 ? OCPG_DUAL_KHZ : OCPG_WO_KHZ;
+}
+
+/* ceiling_now()'s last step for the M3s with the guard on: at most 1794000 unless level 4's rule holds; the clip after a throttle */
+static uint32_t
+ocpg_ceiling(struct cluster *c, uint32_t max)
+{
+	uint32_t clip = __atomic_load_n(&ocpg_clip, __ATOMIC_ACQUIRE);
+
+	max = MIN(max, ocpg_top(c));
+	__atomic_store_n(&ocpg_seen_ceiling, max, __ATOMIC_RELEASE);
+	return clip != 0 ? MIN(max, clip) : max;
+}
+
+/*
+ * Before the M3s go to khz (set_rate): the IRP for it asked of the guard's thread (exynos-ocp's PRECHANGE notifier, which
+ * queues it to cpu 4 the same way). Above 1794000 the change waits for the IRP to read back, at most 5 ms; without it the
+ * M3s go no higher than 1794000.
+ */
+static uint32_t
+ocpg_prechange(struct cluster *c, uint32_t khz)
+{
+	uint32_t want;
+
+	if (ocpg_mode < 3) {
+		return khz;
+	}
+	want = ocpg_irp(khz);
+	__atomic_store_n(&ocpg_irp_want, want, __ATOMIC_RELEASE);
+	(void)thread_wakeup_prim((event_t)&ocpg_event, FALSE, THREAD_AWAKENED);
+	if (khz <= OCPG_WO_KHZ) {
+		return khz;
+	}
+	for (int i = 0; i < 50 && __atomic_load_n(&ocpg_irp_done, __ATOMIC_ACQUIRE) != want; i++) {
+		delay(100);
+	}
+	if (__atomic_load_n(&ocpg_irp_done, __ATOMIC_ACQUIRE) != want || !ocpg_alive()) {
+		return c->levels[level_at_most(c, OCPG_WO_KHZ)];
+	}
+	return khz;
+}
+
+/* a throttle, a release or a death changes the ceiling now: the governor brings the M3s under it at once (gov_thread()) */
+static bool
+ocpg_take_kick(void)
+{
+	return ocpg_mode != 0 && __atomic_exchange_n(&ocpg_kick, false, __ATOMIC_ACQ_REL);
+}
+
+/* a line every ten seconds with the guard on */
+static void
+ocpg_line(uint64_t seconds)
+{
+	static uint64_t last;
+
+	if (ocpg_mode == 0 || (seconds - last < 10 && last != 0)) {
+		return;
+	}
+	last = seconds;
+	say("cpufreq_gov: ocp_guard: %llu s: level %u %s | interrupts %u (tests %u) | throttles %u, polled %u, released %u | clip %u | "
+	    "IRP %u | PMIC warning %s | M3 power %x %x %x %x | buck2 limit %u%s%s\n", seconds, ocpg_mode,
+	    ocpg.dead ? "DEAD" : ocpg.armed ? "armed" : "not armed", __atomic_load_n(&ocpg_spi_count, __ATOMIC_ACQUIRE), ocpg.tests,
+	    ocpg.trips, ocpg.flag_polled, ocpg.releases, __atomic_load_n(&ocpg_clip, __ATOMIC_ACQUIRE),
+	    __atomic_load_n(&ocpg_irp_done, __ATOMIC_ACQUIRE), ocpg.pmic_on ? "on" : "OFF", ocpg.pmu_status[0], ocpg.pmu_status[1],
+	    ocpg.pmu_status[2], ocpg.pmu_status[3], ocpg.buck2_ocp, ocpg.dead ? ": " : "", ocpg.dead ? ocpg.dead_why : "");
+}
+
+/* from gov_setup(), once the clusters are known: the mappings, the PMIC read, the interrupt, the thread */
+static void
+ocpg_start(void)
+{
+	thread_t thread;
+	kern_return_t kr;
+
+	if (ocpg_mode == 0) {
+		return;
+	}
+	ocpg_gicd = ml_io_map(OCPG_GICD_PA, 0x1000);
+	ocpg_pmu = ml_io_map(OCPG_PMU_CL1_PA, 0x1000);
+	ocpg_read_pmic(true);
+	ocpg_read_pmu();
+	kr = OCPG_SPI_ATTACH(OCPG_INTID, true, ocpg_interrupt, NULL);
+	ocpg.attached = kr == KERN_SUCCESS;
+	say("cpufreq_gov: ocp_guard=%u: SPI %u (exynos-ocp's 181), rising edge, on the boot processor: %s (%d); the M3s' "
+	    "power %x %x %x %x (0xf on); the M3s held at or under %u kHz%s\n", ocpg_mode, OCPG_INTID,
+	    ocpg.attached ? "attached" : "NOT attached", kr, ocpg.pmu_status[0], ocpg.pmu_status[1], ocpg.pmu_status[2],
+	    ocpg.pmu_status[3], OCPG_WO_KHZ, ocpg_mode >= 4 ? " until stage two's rule holds" : "");
+	if (!ocpg.attached) {
+		ocpg_die("SPI 213 not attached");
+	}
+	if (kernel_thread_start(ocpg_thread, NULL, &thread) != KERN_SUCCESS) {
+		ocpg_die("no thread");
+		return;
+	}
+	thread_deallocate(thread);
+}
+
 static uint32_t
 ceiling_now(struct cluster *c)
 {
@@ -517,6 +1070,9 @@ ceiling_now(struct cluster *c)
 	}
 	if (c->thermal > 0) {
 		max = MIN(max, c->levels[MIN(c->thermal, c->n - 1)]);
+	}
+	if (c == &clusters[1] && ocpg_mode != 0) {
+		max = ocpg_ceiling(c, max);  /* (ocp_guard=: 1794000 unless stage two's rule holds; a throttle's clip) */
 	}
 	return c->levels[level_at_most(c, max)];
 }
@@ -717,8 +1273,14 @@ static void
 set_rate(struct cluster *c, uint32_t khz, uint32_t max)
 {
 	uint32_t answer[4];
-	uint64_t began = mach_absolute_time(), took, bounce;
-	int e = dvfs_request(c->index, khz, answer);
+	uint64_t began, took, bounce;
+	int e;
+
+	if (c == &clusters[1] && ocpg_mode != 0) {
+		khz = ocpg_prechange(c, khz);   /* (ocp_guard=3 and up: the IRP first, as exynos-ocp's PRECHANGE notifier) */
+	}
+	began = mach_absolute_time();
+	e = dvfs_request(c->index, khz, answer);
 
 	residency(c, began);
 	nanoseconds_to_absolutetime((uint64_t)BOUNCE_MS * NSEC_PER_MSEC, &bounce);
@@ -1111,6 +1673,7 @@ summary(uint64_t seconds)
 	    touched && framed ? "touch and frames on" : touched ? "touch on" : framed ? "frames on" : "off");
 	l->load_sum = l->windows = b->load_sum = b->windows = 0;
 	stat_line(seconds, now, touches != 0 || frames != 0 || raises != 0);
+	ocpg_line(seconds);
 }
 
 static bool gov_setup(void);
@@ -1154,6 +1717,10 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 			}
 			(void)thread_block(NULL);
 			now = mach_absolute_time();
+			if (ocpg_take_kick() && clusters[1].cur > ceiling_now(&clusters[1])) {
+				/* (ocp_guard=: a throttle's clip or the end of stage two: the M3s under it now, as cpufreq_update_policy) */
+				set_rate(&clusters[1], ceiling_now(&clusters[1]), ceiling_now(&clusters[1]));
+			}
 			if (boost_due(now)) {
 				/* (not woken by itself again this window: a request the APM refused waits for the next) */
 				tried = true;
@@ -1260,6 +1827,9 @@ hakios_exynos_cpufreq_gov_start(void)
 	}
 	(void)PE_parse_boot_argn("gov_stat", &gov_stat, sizeof(gov_stat));
 	(void)PE_parse_boot_argn("gov_wake", &gov_wake, sizeof(gov_wake));
+	(void)PE_parse_boot_argn("ocp_guard", &ocpg_mode, sizeof(ocpg_mode));
+	(void)PE_parse_boot_argn("ocp_guard_flags", &ocpg_flags, sizeof(ocpg_flags));
+	ocpg_mode = MIN(ocpg_mode, 4u);
 	if (boost_ms == 0) {
 		touch_big = touch_lit = 0;
 	}
@@ -1334,6 +1904,7 @@ gov_setup(void)
 	    "came in the last %u ms; %u%% busy or more: the touch-boost rate at once; all within the ceilings above\n",
 	    boost_ms ? touch_big : 0, boost_ms ? touch_lit : 0, boost_ms, frame_ms ? frame_big : 0, frame_ms, SATURATED);
 	say("cpufreq_gov: policy %u (kern.hakios.gov_policy; 3 scion, 2 scion without parking)\n", gov_policy);
+	ocpg_start();
 	return true;
 }
 #endif /* ARM64_BOARD_CONFIG_STARLTE */
