@@ -191,8 +191,16 @@ SECURITY_READ_ONLY_LATE(static mac_policy_handle_t) miniamfi_handle;
  * extension -- has had the path from containermanagerd and passes it in the environment as
  * CFFIXED_USER_HOME, which is where Foundation takes the home directory from. So that is the
  * answer: it is looked up among the strings exec left at the top of the stack of the process.
- * A process without the variable has no container, and gets what every process got before:
- * success and an untouched buffer.
+ * A process without the variable has no container, and gets success and an EMPTY string -- not an
+ * untouched buffer, which is what it used to get and which is stack garbage in most callers.
+ * syncdefaultsd showed what that costs: -[... changeTokenForStoreWithConfiguration:reply:] asks
+ * sandbox_container_path_for_audit_token() for its client's container into a 1 KB buffer on its
+ * stack, takes success with a non-empty first byte to mean "this client has a container", makes an
+ * NSString of it -- nil, the bytes not being UTF-8 -- and aborts in +[NSURL fileURLWithPath:nil
+ * isDirectory:], for every client that is a daemon (CloudKeychainProxy, amsengagementd, suggestd...)
+ * the moment Weather or one of them asks for its key-value store (com.apple.kvsd: 54 failed lookups a
+ * session while it is denied, 22 of them Weather's). An empty string sends it, and every caller written
+ * the same way, down its own "no container" branch.
  */
 #define SANDBOX_SYSCALL_CONTAINER_PATH  4
 #define SANDBOX_CONTAINER_VARIABLE      "CFFIXED_USER_HOME="
@@ -230,6 +238,14 @@ minisandbox_container_path(user_addr_t arg)
 	if (args.check_pidversion && (uint64_t)proc_pidversion(p) != args.pidversion) {
 		proc_rele(p);
 		return ESRCH;
+	}
+	/* no container until one is found below: the answer is "" (see above) */
+	if (args.size > 0) {
+		error = copyout("", args.buffer, 1);
+		if (error) {
+			proc_rele(p);
+			return error;
+		}
 	}
 	user_stack = p->user_stack;
 	argslen = p->p_argslen;

@@ -1,0 +1,10 @@
+
+# Staged by the scion-kernel build (tools/hakios-config.py kernel, tools/make-kernel.sh): copies of scion-kernel's
+# drivers/ and socs/*/include, rewritten at every build. Their sources are in scion-kernel; edit those.
+/bsd/dev/hakios.*
+/iokit/Kernel/hakios.*
+/bsd/sys/hakios.*_soc.h
+/bsd/sys/hakios.*_mem.h
+# patch leftovers
+*.orig
+*.rej

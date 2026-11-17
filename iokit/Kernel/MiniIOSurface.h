@@ -132,6 +132,12 @@ public:
 	 * ~0 while the program drawing into them has its frame still to send
 	 */
 	uint64_t                        maliSeq;
+	/*
+	 * ... and the seed (shared()->seed) as of the last time the Mali's submission cleaned the pixels' lines out of the processors'
+	 * caches (hakios.mali.cpp): while the seed is the same, no processor has written them since, as IOSurface asks a writer to
+	 * lock the surface (MiniIOSurfaceLines(); a device's writes keep it, MiniIOSurfaceWritten())
+	 */
+	uint32_t                        cleanSeed;
 	struct minisurf_result          info;           /* addresses not filled in */
 	struct minisurf_plane           planes[MINISURF_MAX_PLANES];
 	OSDictionary *                  values;
@@ -188,6 +194,18 @@ void            MiniIOSurfaceDrop(MiniIOSurface * surface);
  * scan-out pool from now on (0 x 0: no longer).
  */
 void            MiniIOSurfaceScanout(uint32_t width, uint32_t height);
+/*
+ * A device wrote a surface's pixels (the Mali, for a client that asked; the video decoder): a new seed, as a processor's lock for
+ * writing makes, so readers that keep what they made of the pixels (a converted YCbCr texture) make it again. Not a processor's
+ * write: lines the Mali's submission cleaned stay clean (`cleanSeed`). hakios_surface_written() is the same by the surface's ID.
+ */
+void            MiniIOSurfaceWritten(MiniIOSurface * surface);
+/*
+ * The Mali's submission (hakios.mali.cpp): whether a processor may have written the pixels since their lines were last cleaned
+ * (the seed changed since, by a lock for writing): then true and `seed` the seed now, for MiniIOSurfaceCleaned() once they are.
+ */
+bool            MiniIOSurfaceLines(MiniIOSurface * surface, uint32_t * seed);
+void            MiniIOSurfaceCleaned(MiniIOSurface * surface, uint32_t seed);
 /* The display holds a surface on the panel (+1) and lets go of it (-1): its use count, as IOSurfaceIsInUse() reads it. */
 void            MiniIOSurfaceUse(MiniIOSurface * surface, int delta);
 /* A Mach send right for the surface in the task (what IOSurfaceCreateMachPort gives); 0 on failure. */
