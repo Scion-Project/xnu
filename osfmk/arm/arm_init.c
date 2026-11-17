@@ -186,7 +186,19 @@ static const char starlte_default_bootargs[] =
     "vm_compression_limit=196608 cs_integrity_skip=1 sweetmemscale=4 sweetacl=1 sweetreboot=86400 usb_gadget=5 "
     "sweetinject=/usr/lib/s.dylib,backboardd,Preferences;/usr/lib/m.dylib,PosterBoard,SpringBoard;/usr/lib/b.dylib,backboardd "
     "sbprof=0 sbmtl=1 extra_ram=1 extra_ram_mask=127 cpufreq_gov=1 cpufreq_gov_big_min=1794000 "
-    "sweetm3unpin=2 sweetspeed=100351";
+    "sweetm3unpin=2 sweetspeed=100351 "
+    /*
+     * The S9's own hardware, on by default since 17 November 2026 so that one image has all of it to test together
+     * (each was merged off; a run turns one off again by naming it on the loader's line: cp=0, abox=0, ...).
+     * Appended last on purpose: when the loader's line leaves no room, these are the ones left out.
+     * Sensors and rotation; restart and power off from iOS; the battery's gauge and the PMIC's clock, both read only;
+     * Sileo's installs (persona_lax); Wi-Fi; the speakers, the codec, the microphone and Bluetooth; the modem, with its
+     * NV data read from EFS READ ONLY into RAM (cp_nv=2: nothing is written to the phone) and its data context as
+     * pdp_ip0 (cp_if=1: no data without cp_apn=, which only a run gives).
+     */
+    "shub=6 shub_hid=3 sweethalt=1 sweetfg=1 rtc_pmic=1 persona_lax=1 wifi_pcie=6 brcmfmac=8 "
+    "abox=8 max98512=3 cs47l93=6 abox_mic=1 abox_rmem=1 bt=7 "
+    "cp=7 cp_nv=2 cp_delay=40 cp_rfs=1 cp_if=1";
 
 static bool
 starlte_bootarg_sep(char c)
