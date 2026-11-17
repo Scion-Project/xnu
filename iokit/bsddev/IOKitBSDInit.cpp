@@ -834,6 +834,10 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		 * the others behind the BCM4775's hub, /dev/hakios-sensors); off: nothing mapped, nothing powered. */
 		extern void hakios_ssp_init(void);
 		hakios_ssp_init();
+		/* Boot-arg cp=N: Scion's driver of the S9's own modem, the Shannon CP (bsd/dev/hakios.shannon.c): 1 a look,
+		 * 2 its image loaded from RADIO and checked by the secure world, 3 started, 4 the link; off: nothing. */
+		extern void hakios_shannon_init(void);
+		hakios_shannon_init();
 		/* Boot-arg dpu_probe=1: Scion's DPU scan-out service, its read-only probe (bsd/dev/hakios.exynos_dpu.c). */
 		extern void hakios_exynos_dpu_boot_probe(void);
 		hakios_exynos_dpu_boot_probe();

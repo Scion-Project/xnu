@@ -29,7 +29,7 @@ SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
 else ifneq ($(findstring _host,$(RC_ProjectName)),)
 SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
 else
-SUPPORTED_ARM64_MACHINE_CONFIGS = T6000 T6020 T6030 T6031 T6041 T6050 T8101 T8103 T8112 T8122 T8132 T8142 VMAPPLE SWEET A5XELTE HEROLTE STARLTE
+SUPPORTED_ARM64_MACHINE_CONFIGS = T6000 T6020 T6030 T6031 T6041 T6050 T8101 T8103 T8112 T8122 T8132 T8142 VMAPPLE SWEET A5XELTE HEROLTE STARLTE FRANKEL
 
 SPTM_ENABLED_SOCS_MacOSX = t6000 t8112 t6020 t8122 t6030 t6031 t6041 t6050 t8132 t8142
 EXCLAVES_ENABLED_SOCS_MacOSX = t8142 t6050
@@ -100,6 +100,10 @@ MACHINE_FLAGS_ARM64_HEROLTE = -DARM64_BOARD_CONFIG_A5XELTE -DARM64_BOARD_CONFIG_
 # Galaxy S9 (Exynos 9810) boots on a Cortex-A55 and reuses the HEROLTE port;
 # ARMv8.0 code generation also runs on the Mongoose M3 cores.
 MACHINE_FLAGS_ARM64_STARLTE = -DARM64_BOARD_CONFIG_A5XELTE -DARM64_BOARD_CONFIG_HEROLTE -DARM64_BOARD_CONFIG_STARLTE -mcpu=cortex-a53 -march=armv8-a+crypto
+# Google Pixel 10 (frankel, Tensor G5 "lga": Cortex-A520/A725/X4, GICv3/v4, PSCI): the generic SWEET board of the S9's layer,
+# with the lga facts behind ARM64_BOARD_CONFIG_FRANKEL (pexpert/pexpert/arm64/SWEET.h). The kernel stays plain arm64 like the S9's;
+# user space is arm64e and the cores run its pointer authentication themselves (docs/ios27/PIXEL10.md in scion-kernel).
+MACHINE_FLAGS_ARM64_FRANKEL = -DARM64_BOARD_CONFIG_SWEET -DARM64_BOARD_CONFIG_FRANKEL -march=armv8.2-a+crypto
 
 
 #
@@ -378,7 +382,7 @@ ifeq ($(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG),)
 export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := $(shell echo $(CURRENT_ARCH_CONFIG) | tr A-Z a-z)
 ifneq ($(filter arm64,$(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG)),)
 # These generic ARMv8 targets do not use Apple's arm64e pointer authentication.
-ifeq ($(filter $(CURRENT_MACHINE_CONFIG),SWEET A5XELTE HEROLTE STARLTE),)
+ifeq ($(filter $(CURRENT_MACHINE_CONFIG),SWEET A5XELTE HEROLTE STARLTE FRANKEL),)
 export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := arm64e
 endif
 endif
@@ -930,8 +934,8 @@ LDFLAGS_KERNEL_GEN = \
 	-Wl,-headerpad,152
 
 # LDFLAGS_KERNEL_SDK	= -L$(SDKROOT)/usr/local/lib/kernel -lfirehose_kernel
-# The generic ARMv8 boards (SWEET A5XELTE HEROLTE STARLTE) are built from a fakeroot (darwin-xnu-build's), not an SDK.
-ifneq ($(filter SWEET A5XELTE HEROLTE STARLTE,$(CURRENT_MACHINE_CONFIG)),)
+# The generic ARMv8 boards (SWEET A5XELTE HEROLTE STARLTE FRANKEL) are built from a fakeroot (darwin-xnu-build's), not an SDK.
+ifneq ($(filter SWEET A5XELTE HEROLTE STARLTE FRANKEL,$(CURRENT_MACHINE_CONFIG)),)
 LDFLAGS_KERNEL_SDK	= -L$(FAKEROOT_DIR)/usr/local/lib/kernel -lfirehose_kernel
 else
 LDFLAGS_KERNEL_SDK	= -L$(SDKROOT)/usr/local/lib/kernel -L$(SDKROOT)/usr/local/lib/kernel/platform
@@ -1178,10 +1182,10 @@ LD_KERNEL_ARCHIVES += $(HAKIOS_OBJECTS)
 # Link binary support library
 # Scion: Apple's binary support library comes with a KDK, which this build does not use: the parts of the
 # machine layer it holds are compiled from this tree instead (nos_arm_asm, nos_arm_pmap in the machine's MASTER).
-# It is linked only when it is there, and never for the generic ARMv8 boards (SWEET A5XELTE HEROLTE STARLTE: the
+# It is linked only when it is there, and never for the generic ARMv8 boards (SWEET A5XELTE HEROLTE STARLTE FRANKEL: the
 # KDK has no lib<board>.os.<config>.a for them).
 ifneq ($(CURRENT_MACHINE_CONFIG),NONE)
-ifneq ($(if $(filter SWEET A5XELTE HEROLTE STARLTE,$(CURRENT_MACHINE_CONFIG)),,$(wildcard $(KDKROOT)/System/Library/KernelSupport/lib$(CURRENT_MACHINE_CONFIG).os.$(CURRENT_KERNEL_CONFIG).a)),)
+ifneq ($(if $(filter SWEET A5XELTE HEROLTE STARLTE FRANKEL,$(CURRENT_MACHINE_CONFIG)),,$(wildcard $(KDKROOT)/System/Library/KernelSupport/lib$(CURRENT_MACHINE_CONFIG).os.$(CURRENT_KERNEL_CONFIG).a)),)
         LDFLAGS_KERNEL_ONLY += -rdynamic -Wl,-force_load,$(KDKROOT)/System/Library/KernelSupport/lib$(CURRENT_MACHINE_CONFIG).os.$(CURRENT_KERNEL_CONFIG).a
 endif
 endif
@@ -1258,12 +1262,12 @@ INCFLAGS_IMPORT	= $(patsubst %, -I$(OBJROOT)/EXPORT_HDRS/%, $(COMPONENT_IMPORT_L
 INCFLAGS_EXTERN	= -I$(SRCROOT)/EXTERNAL_HEADERS
 # VMAPPLE's stand-ins for the TrustCache, CodeSignature and CoreEntitlements V2 types (the open source does not ship them);
 # the generic ARMv8 boards take Apple's from the KDK, which these would shadow, so only the other boards see them
-ifeq ($(filter SWEET A5XELTE HEROLTE STARLTE,$(CURRENT_MACHINE_CONFIG)),)
+ifeq ($(filter SWEET A5XELTE HEROLTE STARLTE FRANKEL,$(CURRENT_MACHINE_CONFIG)),)
 INCFLAGS_EXTERN += -I$(SRCROOT)/EXTERNAL_HEADERS/scion-vmapple
 endif
 INCFLAGS_GEN	= -I$(SRCROOT)/$(COMPONENT) -I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)
 INCFLAGS_LOCAL	= -I.
-ifneq ($(filter SWEET A5XELTE HEROLTE STARLTE,$(CURRENT_MACHINE_CONFIG)),)
+ifneq ($(filter SWEET A5XELTE HEROLTE STARLTE FRANKEL,$(CURRENT_MACHINE_CONFIG)),)
 INCFLAGS_SDK    = -I$(FAKEROOT_DIR)/usr/local/include/kernel -I$(SDKROOT)/usr/local/include/iBoot -I$(SDKROOT)/$(KPINCDIR)/AppleFeatures
 else
 INCFLAGS_SDK    = -I$(SDKROOT)/usr/local/include/kernel -I$(SDKROOT)/usr/local/include/iBoot -I$(SDKROOT)/$(KPINCDIR)/AppleFeatures

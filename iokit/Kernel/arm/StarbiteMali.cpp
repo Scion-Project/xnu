@@ -48,6 +48,7 @@ void starlte_gpu_user_unmap(uint64_t va, unsigned n);
 int starlte_gpu_user_submit(uint64_t jc, uint32_t requirements);
 int starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_t *seq);
 int starlte_gpu_user_wait_seq(uint64_t seq, bool block);
+int starlte_gpu_user_wait_seq_for(uint64_t seq, uint64_t timeout_ns, uint64_t *done);
 uint64_t starlte_gpu_user_seq(void);
 void starbite_mali_publish(void);
 }
@@ -58,6 +59,11 @@ struct sbm_submit {
 	uint32_t in_sync_count, out_sync;
 	uint64_t bo_handles;
 	uint32_t bo_handle_count, requirements, jm_ctx_handle, pad;
+};
+struct sbm_wait_seq {
+	uint64_t seq;
+	int64_t timeout_ns;
+	uint64_t done;
 };
 struct sbm_wait_bo {
 	uint32_t handle, pad;
@@ -107,6 +113,13 @@ enum {
 	SBM_SUBMIT = 0, SBM_WAIT_BO = 1, SBM_CREATE_BO = 2, SBM_MMAP_BO = 3, SBM_GET_PARAM = 4,
 	SBM_GET_BO_OFFSET = 5, SBM_MADVISE = 8, SBM_GEM_CLOSE = 0x100, SBM_VERSION = 0x101,
 	SBM_LOG = 0x102, SBM_SURFACE = 0x103, SBM_IMPORT_HOST = 0x104, SBM_ASYNC = 0x105, SBM_WAIT_IDLE = 0x106,
+	/*
+	 * A chain's own number. SUBMIT_SEQ is SUBMIT that answers, in the request's jc field, the number the queue gave the
+	 * chain (0: it ran to its end inside the call); WAIT_SEQ { number, nanoseconds, done } waits for that one chain, at
+	 * most so long (0: only looks), and answers the number of the last chain the GPU has finished. With them a client's
+	 * fence is a number and a wait on it ends when its own chain has: WAIT_IDLE ends only when every client's have.
+	 */
+	SBM_SUBMIT_SEQ = 0x107, SBM_WAIT_SEQ = 0x108,
 };
 
 #define SBM_MAX_BOS     8192u
@@ -687,6 +700,7 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 		char text[256];
 		int64_t timeout;
 		uint32_t flag;
+		sbm_wait_seq waitseq;
 	} u;
 	size_t want;
 	switch (selector) {
@@ -704,6 +718,8 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 	case SBM_IMPORT_HOST: want = sizeof(u.host); break;
 	case SBM_ASYNC: want = sizeof(u.flag); break;
 	case SBM_WAIT_IDLE: want = sizeof(u.timeout); break;
+	case SBM_SUBMIT_SEQ: want = sizeof(u.submit); break;
+	case SBM_WAIT_SEQ: want = sizeof(u.waitseq); break;
 	default:
 		return kIOReturnUnsupported;
 	}
@@ -712,7 +728,7 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 		if (want == 0 || want >= sizeof(u.text)) {
 			return kIOReturnBadArgument;
 		}
-	} else if (selector == SBM_SUBMIT && args->structureInputSize == SBM_SUBMIT_V1_SIZE) {
+	} else if ((selector == SBM_SUBMIT || selector == SBM_SUBMIT_SEQ) && args->structureInputSize == SBM_SUBMIT_V1_SIZE) {
 		want = SBM_SUBMIT_V1_SIZE;              /* Mesa 25.0's uapi: no jm_ctx_handle */
 	} else if (args->structureInputSize != want) {
 		return kIOReturnBadArgument;
@@ -728,6 +744,15 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 	 */
 	if (selector == SBM_WAIT_IDLE) {
 		return starlte_gpu_user_wait_seq(0, u.timeout != 0) == 0 ? kIOReturnSuccess : kIOReturnTimeout;
+	}
+	if (selector == SBM_WAIT_SEQ) {
+		int waited = starlte_gpu_user_wait_seq_for(u.waitseq.seq, u.waitseq.timeout_ns > 0 ? (uint64_t)u.waitseq.timeout_ns : 0,
+		    &u.waitseq.done);
+		if (args->structureOutput != NULL && args->structureOutputSize >= want) {
+			bcopy(&u, args->structureOutput, want);
+			args->structureOutputSize = (uint32_t)want;
+		}
+		return waited == 0 ? kIOReturnSuccess : kIOReturnTimeout;
 	}
 	if (selector == SBM_WAIT_BO || selector == SBM_GEM_CLOSE) {
 		IOLockLock(fLock);
@@ -760,16 +785,20 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
 		reap();
 	}
 	switch (selector) {
-	case SBM_SUBMIT: {
+	case SBM_SUBMIT:
+	case SBM_SUBMIT_SEQ: {
 		int err;
+		uint64_t seq = 0;
 		if (fAsync) {
-			uint64_t seq = 0;
 			err = starlte_gpu_user_submit2(u.submit.jc, u.submit.requirements, true, &seq);
 			if (seq != 0) {
 				markBOs(u.submit.bo_handles, u.submit.bo_handle_count, seq);
 			}
 		} else {
 			err = starlte_gpu_user_submit(u.submit.jc, u.submit.requirements);
+		}
+		if (selector == SBM_SUBMIT_SEQ) {
+			u.submit.jc = seq;              /* (answered through the request, as every call's answer is) */
 		}
 		ret = err == 0 ? kIOReturnSuccess : err == ETIMEDOUT ? kIOReturnTimeout : kIOReturnIOError;
 		break;
@@ -857,16 +886,27 @@ StarbiteMaliUserClient::dispatchMethod(uint32_t selector, IOExternalMethodArgume
  * every 10 s while calls come: "STARLTE GPU CALLS: submit N x avg us (max), create ..., close ...".
  */
 static uint64_t sbm_calls[6], sbm_call_ns[6], sbm_call_max[6], sbm_calls_since;
+/*
+ * boot-arg sbm_prof=1 (off by default): who waits. With the ten-second line, "STARLTE GPU WAITS: ...": the waits for one
+ * buffer and the waits for the whole queue, and the four threads that waited longest, by thread id and name.
+ */
+static uint32_t sbm_prof;
+static int sbm_prof_checked;
+static struct { uint64_t tid, n, ns; char name[24]; } sbm_waiter[8];
+static uint64_t sbm_wait_kind_n[3], sbm_wait_kind_ns[3];
+extern "C" uint64_t thread_tid(thread_t thread);
+extern "C" void bsd_getthreadname(void *uth, char *buffer);
+extern "C" void *current_uthread(void);
 
 static unsigned
 sbm_call_kind(uint32_t selector)
 {
 	switch (selector) {
-	case SBM_SUBMIT: return 0;
+	case SBM_SUBMIT: case SBM_SUBMIT_SEQ: return 0;
 	case SBM_CREATE_BO: return 1;
 	case SBM_GEM_CLOSE: return 2;
 	case SBM_SURFACE: case SBM_IMPORT_HOST: return 3;
-	case SBM_WAIT_BO: case SBM_WAIT_IDLE: return 5;
+	case SBM_WAIT_BO: case SBM_WAIT_IDLE: case SBM_WAIT_SEQ: return 5;
 	default: return 4;
 	}
 }
@@ -880,7 +920,34 @@ StarbiteMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArgume
 	uint64_t t1 = mach_absolute_time(), ns = 0;
 	absolutetime_to_nanoseconds(t1 - t0, &ns);
 	unsigned k = sbm_call_kind(selector);
+	if (!sbm_prof_checked) {
+		sbm_prof_checked = 1;
+		PE_parse_boot_argn("sbm_prof", &sbm_prof, sizeof(sbm_prof));
+	}
 	IOLockLock(sbm_va_lock);
+	if (sbm_prof && k == 5) {
+		uint64_t tid = thread_tid(current_thread());
+		unsigned w = selector == SBM_WAIT_IDLE ? 1 : selector == SBM_WAIT_SEQ ? 2 : 0, slot = 8;
+		sbm_wait_kind_n[w]++;
+		sbm_wait_kind_ns[w] += ns;
+		for (unsigned i = 0; i < 8; i++) {
+			if (sbm_waiter[i].tid == tid || sbm_waiter[i].n == 0) {
+				slot = i;
+				break;
+			}
+		}
+		if (slot < 8) {
+			if (sbm_waiter[slot].n == 0) {
+				sbm_waiter[slot].tid = tid;
+				sbm_waiter[slot].name[0] = 0;
+				char tn[64] = "";
+				bsd_getthreadname(current_uthread(), tn);
+				strlcpy(sbm_waiter[slot].name, tn, sizeof(sbm_waiter[slot].name));
+			}
+			sbm_waiter[slot].n++;
+			sbm_waiter[slot].ns += ns;
+		}
+	}
 	sbm_calls[k]++;
 	sbm_call_ns[k] += ns;
 	if (ns > sbm_call_max[k]) {
@@ -904,8 +971,27 @@ StarbiteMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArgume
 		snprintf(line + n, sizeof(line) - (size_t)n, " wired: buffers %lld MiB, surfaces %lld MiB, host %lld MiB",
 		    sbm_live_pages[0] / 256, sbm_live_pages[1] / 256, sbm_live_pages[2] / 256);
 		sbm_calls_since = t1;
+		char wline[400];
+		wline[0] = 0;
+		if (sbm_prof) {
+			int wn = snprintf(wline, sizeof(wline), "STARLTE GPU WAITS: one buffer %llu x %llu us, whole queue %llu x %llu us, "
+			    "one chain %llu x %llu us; by thread:",
+			    sbm_wait_kind_n[0], sbm_wait_kind_n[0] ? sbm_wait_kind_ns[0] / sbm_wait_kind_n[0] / 1000 : 0,
+			    sbm_wait_kind_n[1], sbm_wait_kind_n[1] ? sbm_wait_kind_ns[1] / sbm_wait_kind_n[1] / 1000 : 0,
+			    sbm_wait_kind_n[2], sbm_wait_kind_n[2] ? sbm_wait_kind_ns[2] / sbm_wait_kind_n[2] / 1000 : 0);
+			for (unsigned i = 0; i < 8 && sbm_waiter[i].n != 0 && wn < (int)sizeof(wline) - 60; i++) {
+				wn += snprintf(wline + wn, sizeof(wline) - (size_t)wn, " %llu(%s) %llu x %llu us", sbm_waiter[i].tid,
+				    sbm_waiter[i].name, sbm_waiter[i].n, sbm_waiter[i].ns / sbm_waiter[i].n / 1000);
+			}
+			bzero(sbm_waiter, sizeof(sbm_waiter));
+			bzero(sbm_wait_kind_n, sizeof(sbm_wait_kind_n));
+			bzero(sbm_wait_kind_ns, sizeof(sbm_wait_kind_ns));
+		}
 		IOLockUnlock(sbm_va_lock);
 		IOLog("%s\n", line);
+		if (wline[0]) {
+			IOLog("%s\n", wline);
+		}
 		return ret;
 	}
 	IOLockUnlock(sbm_va_lock);

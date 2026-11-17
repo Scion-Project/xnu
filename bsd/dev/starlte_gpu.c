@@ -727,17 +727,69 @@ starlte_gpu_present_map(uint32_t id, const uint64_t *pages, unsigned n)
  * coherency. False: the caller falls back to the CPU copy; after a GPU
  * fault the present path switches itself off.
  */
+/* The bits of a float that holds a whole number below 2^24 (no floating point in here). */
+static uint32_t
+sgp_float_bits(uint32_t v)
+{
+	if (v == 0) {
+		return 0;
+	}
+	unsigned top = 31 - (unsigned)__builtin_clz(v);
+	return ((127u + top) << 23) | ((v << (23 - top)) & 0x7fffffu);
+}
+
+/*
+ * The blob (tools/ios27/gpu/starlte-g72-tri.c) was generated for one canvas, SG_PRES_CANVAS_W x _H (828 x 1792). Three of
+ * its parts say so and nothing else does: the quad's four corners on the panel (0x500: x y 0 1 each, panel pixels), the
+ * texel coordinates at those corners (0x540: 0 or the canvas' width, 0 or its height), and the texture descriptor's second
+ * word (0x644: width - 1, height - 1 << 16). For another canvas (boot-args sweetfb_lw, sweetfb_lh: a display in the
+ * panel's own shape, 828 x 1702, fills it) they are written here, laid out as the generator does it: the canvas keeps its
+ * shape, at the panel's full height between bars at the sides, or at its full width between bars above and below.
+ */
+#define SGP_BLOB_POS    0x500u
+#define SGP_BLOB_TC     0x540u
+#define SGP_BLOB_TEX_WH 0x644u
+#define SGP_PANEL_W     1440u
+#define SGP_PANEL_H     2960u
+
+static void
+sgp_canvas_locked(uint32_t base, uint32_t w, uint32_t h)
+{
+	uint32_t x0 = 0, x1 = SGP_PANEL_W, y0 = 0, y1 = SGP_PANEL_H;
+	if ((uint64_t)w * SGP_PANEL_H <= (uint64_t)SGP_PANEL_W * h) {
+		uint32_t out_w = (uint32_t)((uint64_t)w * SGP_PANEL_H / h);
+		x0 = (SGP_PANEL_W - out_w) / 2;
+		x1 = x0 + out_w;
+	} else {
+		uint32_t out_h = (uint32_t)((uint64_t)h * SGP_PANEL_W / w);
+		y0 = (SGP_PANEL_H - out_h) / 2;
+		y1 = y0 + out_h;
+	}
+	const uint32_t px[4] = { x0, x1, x0, x1 }, py[4] = { y0, y0, y1, y1 };
+	const uint32_t tx[4] = { 0, w, 0, w }, ty[4] = { 0, 0, h, h };
+	for (unsigned i = 0; i < 4; i++) {
+		sg_put32(base + SGP_BLOB_POS + i * 16 + 0, sgp_float_bits(px[i]));
+		sg_put32(base + SGP_BLOB_POS + i * 16 + 4, sgp_float_bits(py[i]));
+		sg_put32(base + SGP_BLOB_TC + i * 16 + 0, sgp_float_bits(tx[i]));
+		sg_put32(base + SGP_BLOB_TC + i * 16 + 4, sgp_float_bits(ty[i]));
+	}
+	sg_put32(base + SGP_BLOB_TEX_WH, ((h - 1) << 16) | (w - 1));
+}
+
 bool
 starlte_gpu_present_draw(int s, uint32_t off, uint32_t stride, uint32_t w, uint32_t h)
 {
-	if (!sgp_ready || s < 0 || s >= (int)SGP_SLOTS || w != SG_PRES_CANVAS_W ||
-	    h != SG_PRES_CANVAS_H || stride < w * 4) {
+	if (!sgp_ready || s < 0 || s >= (int)SGP_SLOTS || w == 0 || h == 0 || w > 4096 || h > 4096 || stride < w * 4 ||
+	    (uint64_t)stride * h > (uint64_t)SGP_SLOT_PAGES * 4096) {
 		return false;
 	}
 	lck_mtx_lock(&sg_lock);
 	uint32_t base = (uint32_t)(SG_PRES_BLOB_VA - SG_VA);
 	for (unsigned i = 0; i < SG_PRES_BLOB_WORDS; i++) {
 		sg_put32(base + i * 4, sg_pres_blob[i]);
+	}
+	if (w != SG_PRES_CANVAS_W || h != SG_PRES_CANVAS_H) {
+		sgp_canvas_locked(base, w, h);
 	}
 	sg_put64(base + SG_PRES_SURFACE + 0, sgp_slots[s].va + off);
 	sg_put32(base + SG_PRES_SURFACE + 8, stride);
@@ -1088,6 +1140,30 @@ starlte_gpu_user_submit(uint64_t jc, uint32_t requirements)
 static unsigned sgu_busy_js;
 static uint64_t sgu_busy_t0, sgu_busy_jc;
 static uint32_t sgu_busy_req;
+/*
+ * boot-arg sgu_pipe=1 (off by default): the two job slots at once. A render pass is two chains, vertex/tiler (slot 1) then
+ * fragment (slot 0), and every pass of a client writes its polygon lists from the base of the client's one tiler heap, so
+ * the next pass's vertex/tiler chain may not start before this pass's fragment chain has read its lists: one chain at a
+ * time, the queue's rule. A client that puts its passes' lists into two halves of the heap in turn says so in the chain's
+ * requirements (SGU_REQ_HALF_NAMED, SGU_REQ_HALF_SECOND: Mesa's PanVK with STARBITE_PANVK_PIPE=1). Then, while a
+ * fragment chain that names a half runs, the queue's worker starts the chain behind it beside it on slot 1 if that one is a
+ * vertex/tiler chain naming the other half. Nothing else changes order: the fragment chain behind that still waits for both
+ * (its own lists, and slot 0), and by then the chain two passes back, which shares its half, is long done. `sgu_side` is
+ * that second chain; when the first is done it becomes the one chain on the GPU (sgu_busy) and everything that waits for
+ * "the busy chain" (the present, a client without the queue, the worker itself) waits for it as before.
+ */
+#define SGU_REQ_HALF_NAMED      0x100u
+#define SGU_REQ_HALF_SECOND     0x200u
+static uint32_t sgu_pipe;
+/* diagnostics while sgu_pipe draws wrong tiles: the flushes of a chain started beside another (sgu_pipe_side) and of a
+ * fragment chain that names its half (sgu_pipe_main), 0x1SE: S at the start, E at the end, each 0 none, 1 clean, 3 clean
+ * and invalidate; 0 (default): as every chain. */
+static uint32_t sgu_pipe_side, sgu_pipe_main;
+static bool sgu_side;
+static unsigned sgu_side_js;
+static uint64_t sgu_side_t0, sgu_side_jc;
+static uint32_t sgu_side_req;
+static uint64_t sgu_pipe_n;                             /* chains started beside another, for the sgu_prof line */
 static uint64_t sgu_seq_sub, sgu_seq_done;
 static uint64_t sgu_as_n, sgu_as_prev_waits, sgu_as_prev_ns, sgu_as_gpu_ns, sgu_as_gpu_max, sgu_as_t0;
 
@@ -1107,7 +1183,28 @@ static uint64_t sgu_as_n, sgu_as_prev_waits, sgu_as_prev_ns, sgu_as_gpu_ns, sgu_
 static struct {
 	uint64_t jc, seq, queued;
 	uint32_t req, flush;
+	int pid;
 } sgu_q[SGU_QUEUE];
+/*
+ * boot-arg sgu_prof=1 (off by default): a second ten-second line, "STARLTE GPU QUEUE prof: ...": the chains by kind
+ * (fragment chains run on job slot 0, vertex/tiler/compute chains on slot 1) with how long each took as the worker saw it
+ * (counts under 100, 200, 400, 800, 1600 us and above), how long the GPU stood still between one chain's end being seen
+ * and the next chain's start while chains were waiting, and the two processes that submitted most.
+ */
+static uint32_t sgu_prof;
+/*
+ * boot-arg sgu_dump=S (off by default): the chains run from S seconds after the scripted input began (sweetspeed&4096), 208 of
+ * them in the order they ran: "f" a fragment chain, "v" a vertex/tiler (or compute) chain, the microseconds it ran, and a "."
+ * in front when nothing was queued before it came (the GPU stood idle). Printed once, 16 a line, as "STARLTE GPU DUMP".
+ */
+static uint32_t sgu_dump;
+#define SGU_DUMP_ROWS 208
+static struct { uint32_t us; uint8_t fragment, idle; } sgu_dump_row[SGU_DUMP_ROWS];
+static unsigned sgu_dump_n;
+extern unsigned long long starlte_touch_script_t0;      /* bsd/dev/starlte_touch.c */
+extern int proc_selfpid(void);
+extern void sweet_fb_trace_event(char what, uint32_t arg);     /* iokit/Kernel/arm/SweetFramebuffer.cpp (sweetfb_trace) */
+static uint32_t sgu_trace_run;                                  /* chains run since the queue was last empty */
 static unsigned sgu_q_head, sgu_q_count, sgu_q_deepest;
 static uint64_t sgu_q_seq, sgu_q_done;                  /* last number given, last number done */
 static bool sgu_q_on, sgu_q_started;
@@ -1170,10 +1267,15 @@ sgu_retire_locked(bool block)
 		    "js_status=%#x as_fault=%#x@%#x\n", sgu_busy_jc, sgu_busy_req, ns / 1000, jirq, mirq, girq,
 		    sg_rd(sg_gpu, JS_BASE(js) + 0x24), sg_rd(sg_gpu, ASN(1) + 0x1c), sg_rd(sg_gpu, ASN(1) + 0x20));
 	}
-	sg_wr(sg_gpu, JOB_IRQ_CLEAR, 0xffffffffu);
-	sg_wr(sg_gpu, MMU_IRQ_CLEAR, 0xffffffffu);
+	if (sgu_side && ok) {
+		/* (the chain beside it is still running: its bits and any fault of its stay for its own look) */
+		sg_wr(sg_gpu, JOB_IRQ_CLEAR, (1u << js) | (1u << (js + 16)));
+	} else {
+		sg_wr(sg_gpu, JOB_IRQ_CLEAR, 0xffffffffu);
+		sg_wr(sg_gpu, MMU_IRQ_CLEAR, 0xffffffffu);
+	}
 	sgu_busy = false;
-	sgu_seq_done = sgu_seq_sub;
+	sgu_seq_done = sgu_seq_sub - (sgu_side ? 1 : 0);
 	sgu_jobs++;
 	sgu_as_gpu_ns += ns;
 	if (ns > sgu_as_gpu_max) {
@@ -1181,13 +1283,52 @@ sgu_retire_locked(bool block)
 	}
 	if (!ok) {
 		sgu_faults++;
+		if (sgu_side) {
+			/* (a fault names no slot, and the reset ends both) */
+			printf("STARLTE GPU USER: the chain beside it, %#llx req %#x, is lost with it\n", sgu_side_jc, sgu_side_req);
+			sgu_side = false;
+			sgu_seq_done = sgu_seq_sub;
+			sgu_jobs++;
+		}
 		sgu_recover();
+	}
+	if (sgu_side) {
+		sgu_busy_js = sgu_side_js;
+		sgu_busy_jc = sgu_side_jc;
+		sgu_busy_req = sgu_side_req;
+		sgu_busy_t0 = sgu_side_t0;
+		sgu_side = false;
+		sgu_busy = true;
+		if (block) {
+			int beside = sgu_retire_locked(true);
+			return ok ? beside : EIO;
+		}
 	}
 	return ok ? 0 : EIO;
 }
 
 int starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_t *seq);
 int starlte_gpu_user_wait_seq(uint64_t seq, bool block);
+
+/* A slot's next chain: where it starts, every shader core, AS1 with its cache flushes. */
+static void
+sgu_slot_next(uint32_t slot, uint64_t jc, uint32_t flush, uint32_t flushes)
+{
+	sg_wr(sg_gpu, slot + 0x40, (uint32_t)jc);                       /* HEAD_NEXT */
+	sg_wr(sg_gpu, slot + 0x44, (uint32_t)(jc >> 32));
+	sg_wr(sg_gpu, slot + 0x50, sgp_shaders);                        /* AFFINITY_NEXT */
+	sg_wr(sg_gpu, slot + 0x54, 0);
+	/* AS1, flushes at start and end, priority 8; with sgu_flushred the start's is left out when one happened since `flush` */
+	uint32_t at_start = 3, at_end = 3;
+	if (flushes & 0x100) {
+		at_start = (flushes >> 4) & 3;
+		at_end = flushes & 3;
+	}
+	sg_wr(sg_gpu, slot + 0x58, (8u << 16) | (at_start << 8) | (at_end << 12) | (sgu_flushred ? (1u << 14) : 0) | 1u);
+	if (sgu_flushred) {
+		sg_wr(sg_gpu, slot + 0x70, flush);                      /* FLUSH_ID_NEXT */
+	}
+}
 
 /* sg_lock held, nothing on the GPU: start the chain (`flush`: the GPU's flush count when it was submitted). */
 static void
@@ -1197,15 +1338,7 @@ sgu_start_locked(uint64_t jc, uint32_t requirements, uint32_t flush)
 	uint32_t slot = JS_BASE(js);
 	sg_wr(sg_gpu, MMU_IRQ_CLEAR, 0xffffffffu);
 	sg_wr(sg_gpu, JOB_IRQ_CLEAR, 0xffffffffu);
-	sg_wr(sg_gpu, slot + 0x40, (uint32_t)jc);                       /* HEAD_NEXT */
-	sg_wr(sg_gpu, slot + 0x44, (uint32_t)(jc >> 32));
-	sg_wr(sg_gpu, slot + 0x50, sgp_shaders);                        /* AFFINITY_NEXT */
-	sg_wr(sg_gpu, slot + 0x54, 0);
-	/* AS1, flushes at start and end, priority 8; with sgu_flushred the start's is left out when one happened since `flush` */
-	sg_wr(sg_gpu, slot + 0x58, (8u << 16) | (3u << 8) | (3u << 12) | (sgu_flushred ? (1u << 14) : 0) | 1u);
-	if (sgu_flushred) {
-		sg_wr(sg_gpu, slot + 0x70, flush);                      /* FLUSH_ID_NEXT */
-	}
+	sgu_slot_next(slot, jc, flush, (sgu_pipe && (requirements & 1) && (requirements & SGU_REQ_HALF_NAMED)) ? sgu_pipe_main : 0);
 	sgu_busy_js = js;
 	sgu_busy_jc = jc;
 	sgu_busy_req = requirements;
@@ -1214,11 +1347,33 @@ sgu_start_locked(uint64_t jc, uint32_t requirements, uint32_t flush)
 	sgu_busy = true;
 }
 
+/* sg_lock held, a chain busy on the other slot and none beside it yet: start this one beside it (sgu_pipe). */
+static void
+sgu_start_side_locked(uint64_t jc, uint32_t requirements, uint32_t flush)
+{
+	unsigned js = (requirements & 1) ? 0 : 1;
+	uint32_t slot = JS_BASE(js);
+	sg_wr(sg_gpu, JOB_IRQ_CLEAR, (1u << js) | (1u << (js + 16)));   /* (this slot's only: the busy chain's stay) */
+	sgu_slot_next(slot, jc, flush, sgu_pipe_side);
+	sgu_side_js = js;
+	sgu_side_jc = jc;
+	sgu_side_req = requirements;
+	sgu_side_t0 = mach_absolute_time();
+	sg_wr(sg_gpu, slot + 0x60, 1);                                  /* COMMAND_NEXT START */
+	sgu_side = true;
+	sgu_pipe_n++;
+}
+
 /* The queue's thread: one chain at a time, in order; naps (not a spin) while the GPU works. */
 static void
 sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 {
 	uint64_t win_t0 = 0, win_gpu = 0, win_gpu_max = 0, win_wait = 0, win_n = 0, win_naps = 0;
+	uint64_t pk_n[2] = { 0, 0 }, pk_gpu[2] = { 0, 0 }, pk_hist[2][6], pk_gap = 0, pk_gaps = 0, pk_prev_end = 0;
+	struct { int pid; uint64_t n; } pk_pid[4];
+	bzero(pk_hist, sizeof(pk_hist));
+	bzero(pk_pid, sizeof(pk_pid));
+	uint64_t side_seq = 0, side_began = 0;          /* sgu_pipe: the queued chain started beside the one before it, and when */
 	for (;;) {
 		lck_mtx_lock(&sgu_q_lock);
 		while (sgu_q_count == 0) {
@@ -1226,20 +1381,50 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 		}
 		uint64_t jc = sgu_q[sgu_q_head].jc, seq = sgu_q[sgu_q_head].seq, queued = sgu_q[sgu_q_head].queued;
 		uint32_t req = sgu_q[sgu_q_head].req, flush = sgu_q[sgu_q_head].flush;
+		int pk_owner = sgu_q[sgu_q_head].pid;
 		lck_mtx_unlock(&sgu_q_lock);
 
 		lck_mtx_lock(&sg_lock);
-		if (sgu_busy) {
-			(void)sgu_retire_locked(true);          /* (a chain of a client without the queue) */
+		uint64_t began;
+		if (side_seq == seq) {
+			began = side_began;                     /* (it has been running beside the chain before it) */
+		} else {
+			if (sgu_busy) {
+				(void)sgu_retire_locked(true);  /* (a chain of a client without the queue) */
+			}
+			began = mach_absolute_time();
+			sgu_start_locked(jc, req, flush);
+			sgu_seq_sub++;
 		}
-		uint64_t began = mach_absolute_time();
-		sgu_start_locked(jc, req, flush);
-		sgu_seq_sub++;
 		lck_mtx_unlock(&sg_lock);
+		/* sgu_pipe: a fragment chain that names its half of the tiler heap may have the next chain beside it */
+		bool pipe = sgu_pipe && (req & 1) && (req & SGU_REQ_HALF_NAMED) && side_seq < seq;
 		for (unsigned looks = 0;; looks++) {
+			uint64_t njc = 0, nseq = 0;
+			uint32_t nreq = 0, nflush = 0;
+			if (pipe) {
+				lck_mtx_lock(&sgu_q_lock);
+				if (sgu_q_count >= 2) {
+					unsigned at = (sgu_q_head + 1) % SGU_QUEUE;
+					nreq = sgu_q[at].req;
+					if (!(nreq & 1) && (nreq & SGU_REQ_HALF_NAMED) && ((nreq ^ req) & SGU_REQ_HALF_SECOND)) {
+						njc = sgu_q[at].jc;
+						nseq = sgu_q[at].seq;
+						nflush = sgu_q[at].flush;
+					}
+					pipe = false;           /* (the chain behind this one is what it is: looked at once) */
+				}
+				lck_mtx_unlock(&sgu_q_lock);
+			}
 			lck_mtx_lock(&sg_lock);
-			/* (the present or a client without the queue may have retired it for us: then it is not busy) */
-			int state = sgu_busy ? sgu_retire_locked(false) : 0;
+			/* (the present or a client without the queue may have retired it for us: then it is not the busy chain) */
+			int state = (sgu_busy && sgu_busy_jc == jc) ? sgu_retire_locked(false) : 0;
+			if (state == EBUSY && nseq != 0 && !sgu_side) {
+				sgu_start_side_locked(njc, nreq, nflush);
+				sgu_seq_sub++;
+				side_seq = nseq;
+				side_began = sgu_side_t0;
+			}
 			lck_mtx_unlock(&sg_lock);
 			if (state != EBUSY) {
 				break;
@@ -1261,11 +1446,63 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 		sgu_q_head = (sgu_q_head + 1) % SGU_QUEUE;
 		sgu_q_count--;
 		sgu_q_done = seq;
+		sgu_trace_run++;
+		if (sgu_q_count == 0) {
+			sweet_fb_trace_event('E', sgu_trace_run);
+			sgu_trace_run = 0;
+		}
 		unsigned deepest = sgu_q_deepest;
 		lck_mtx_unlock(&sgu_q_lock);
 		wakeup((caddr_t)&sgu_q_done);
 		wakeup((caddr_t)&sgu_q_head);                   /* (room in the queue) */
 
+		if (sgu_dump != 0 && sgu_dump_n < SGU_DUMP_ROWS && starlte_touch_script_t0 != 0 && began > starlte_touch_script_t0) {
+			static uint64_t dump_prev_end;
+			uint64_t since = 0, ran = 0;
+			absolutetime_to_nanoseconds(began - starlte_touch_script_t0, &since);
+			absolutetime_to_nanoseconds(ended - began, &ran);
+			if (since >= (uint64_t)sgu_dump * NSEC_PER_SEC + 200 * NSEC_PER_MSEC) {
+				sgu_dump_row[sgu_dump_n].us = (uint32_t)(ran / 1000);
+				sgu_dump_row[sgu_dump_n].fragment = (req & 1) != 0;
+				sgu_dump_row[sgu_dump_n].idle = queued > dump_prev_end;
+				if (++sgu_dump_n == SGU_DUMP_ROWS) {
+					for (unsigned i = 0; i < SGU_DUMP_ROWS; i += 16) {
+						char line[200];
+						unsigned at = 0;
+						for (unsigned k = i; k < i + 16 && k < SGU_DUMP_ROWS; k++) {
+							at += scnprintf(line + at, sizeof(line) - at, " %s%c%u", sgu_dump_row[k].idle ? "." : "",
+							    sgu_dump_row[k].fragment ? 'f' : 'v', sgu_dump_row[k].us);
+						}
+						printf("STARLTE GPU DUMP %3u:%s\n", i, line);
+					}
+				}
+			}
+			dump_prev_end = ended;
+		}
+		if (sgu_prof) {
+			unsigned kind = (req & 1) ? 0 : 1;
+			uint64_t ns = 0;
+			absolutetime_to_nanoseconds(ended - began, &ns);
+			pk_n[kind]++;
+			pk_gpu[kind] += ended - began;
+			pk_hist[kind][ns < 100000 ? 0 : ns < 200000 ? 1 : ns < 400000 ? 2 : ns < 800000 ? 3 : ns < 1600000 ? 4 : 5]++;
+			if (pk_prev_end != 0 && queued < pk_prev_end && began > pk_prev_end) {
+				pk_gap += began - pk_prev_end;          /* it was waiting when the chain before it ended */
+				pk_gaps++;
+			}
+			pk_prev_end = ended;
+			unsigned slot = 4;
+			for (unsigned i = 0; i < 4; i++) {
+				if (pk_pid[i].pid == pk_owner || pk_pid[i].n == 0) {
+					slot = i;
+					break;
+				}
+			}
+			if (slot < 4) {
+				pk_pid[slot].pid = pk_owner;
+				pk_pid[slot].n++;
+			}
+		}
 		/* every 10 s: how many chains, how long the GPU ran them, how long they waited for their turn */
 		win_n++;
 		win_gpu += ended - began;
@@ -1286,6 +1523,23 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 			printf("STARLTE GPU QUEUE (%llu s): %llu chains, gpu busy %llu%% avg %llu us (max %llu), queued avg %llu us, "
 			    "deepest %u, %llu naps\n", window / NSEC_PER_SEC, win_n, gpu * 100 / window, gpu / win_n / 1000,
 			    gmax / 1000, wait / win_n / 1000, deepest, win_naps);
+			if (sgu_prof) {
+				uint64_t g[2] = { 0, 0 }, gap = 0;
+				absolutetime_to_nanoseconds(pk_gpu[0], &g[0]);
+				absolutetime_to_nanoseconds(pk_gpu[1], &g[1]);
+				absolutetime_to_nanoseconds(pk_gap, &gap);
+				printf("STARLTE GPU QUEUE prof: fragment %llu avg %llu us [%llu %llu %llu %llu %llu %llu], vertex/tiler %llu avg %llu us "
+				    "[%llu %llu %llu %llu %llu %llu], idle between waiting chains avg %llu us (%llu), by pid %d:%llu %d:%llu %d:%llu, "
+				    "beside another %llu\n",
+				    pk_n[0], pk_n[0] ? g[0] / pk_n[0] / 1000 : 0, pk_hist[0][0], pk_hist[0][1], pk_hist[0][2], pk_hist[0][3],
+				    pk_hist[0][4], pk_hist[0][5], pk_n[1], pk_n[1] ? g[1] / pk_n[1] / 1000 : 0, pk_hist[1][0], pk_hist[1][1],
+				    pk_hist[1][2], pk_hist[1][3], pk_hist[1][4], pk_hist[1][5], pk_gaps ? gap / pk_gaps / 1000 : 0, pk_gaps,
+				    pk_pid[0].pid, pk_pid[0].n, pk_pid[1].pid, pk_pid[1].n, pk_pid[2].pid, pk_pid[2].n, sgu_pipe_n);
+				sgu_pipe_n = 0;
+				pk_n[0] = pk_n[1] = pk_gpu[0] = pk_gpu[1] = pk_gap = pk_gaps = 0;
+				bzero(pk_hist, sizeof(pk_hist));
+				bzero(pk_pid, sizeof(pk_pid));
+			}
 			win_t0 = ended;
 			win_gpu = win_gpu_max = win_wait = win_n = win_naps = 0;
 			lck_mtx_lock(&sgu_q_lock);
@@ -1318,10 +1572,16 @@ sgu_q_enabled(void)
 			if (PE_parse_boot_argn("sgu_flushred", &flushred, sizeof(flushred))) {
 				sgu_flushred = flushred != 0;
 			}
+			(void)PE_parse_boot_argn("sgu_prof", &sgu_prof, sizeof(sgu_prof));
+			(void)PE_parse_boot_argn("sgu_pipe", &sgu_pipe, sizeof(sgu_pipe));
+			(void)PE_parse_boot_argn("sgu_dump", &sgu_dump, sizeof(sgu_dump));
+			(void)PE_parse_boot_argn("sgu_pipe_side", &sgu_pipe_side, sizeof(sgu_pipe_side));
+			(void)PE_parse_boot_argn("sgu_pipe_main", &sgu_pipe_main, sizeof(sgu_pipe_main));
 			sgu_q_on = (sweet_speed_flags() & 262144) != 0;
 			sgu_q_checked = 1;
-			printf("STARLTE GPU QUEUE: %s (sweetspeed&262144), spin %u us, nap %u us, depth %u, flush reduction %s\n",
-			    sgu_q_on ? "on" : "off", sgu_q_spin_us, sgu_q_nap_us, sgu_q_depth, sgu_flushred ? "on" : "off");
+			printf("STARLTE GPU QUEUE: %s (sweetspeed&262144), spin %u us, nap %u us, depth %u, flush reduction %s, "
+			    "two slots at once %s (flushes: side %#x main %#x)\n", sgu_q_on ? "on" : "off", sgu_q_spin_us, sgu_q_nap_us,
+			    sgu_q_depth, sgu_flushred ? "on" : "off", sgu_pipe ? "on" : "off", sgu_pipe_side, sgu_pipe_main);
 		}
 		lck_mtx_unlock(&sgu_q_lock);
 	}
@@ -1353,13 +1613,25 @@ sgu_q_enqueue(uint64_t jc, uint32_t requirements)
 	sgu_q[at].req = requirements;
 	sgu_q[at].flush = sgu_flushred ? sg_rd(sg_gpu, 0x38) : 0;       /* LATEST_FLUSH, as of this submit */
 	sgu_q[at].seq = seq;
+	sgu_q[at].pid = sgu_prof ? proc_selfpid() : 0;
 	sgu_q[at].queued = mach_absolute_time();
 	if (++sgu_q_count > sgu_q_deepest) {
 		sgu_q_deepest = sgu_q_count;
 	}
+	if (sgu_q_count == 1) {
+		sweet_fb_trace_event('B', 0);
+	}
 	lck_mtx_unlock(&sgu_q_lock);
 	wakeup((caddr_t)&sgu_q_count);
 	return seq;
+}
+
+/* How many app chains are queued or running (the framebuffer's sweetfb_prof asks at a tick that has no new frame). */
+unsigned starlte_gpu_user_pending(void);
+unsigned
+starlte_gpu_user_pending(void)
+{
+	return sgu_q_count;
 }
 
 /* The number of the last chain an app has submitted (0: none, or no queue): what a frame shown now must wait for. */
@@ -1447,6 +1719,47 @@ starlte_gpu_user_wait_seq(uint64_t seq, bool block)
 	if (seq > sgu_seq_done) {
 		(void)sgu_retire_locked(block);
 	}
+	int ret = seq <= sgu_seq_done ? 0 : ETIMEDOUT;
+	lck_mtx_unlock(&sg_lock);
+	return ret;
+}
+
+/*
+ * Wait for one chain by its number, for at most timeout_ns (0: only look), and say how far the GPU has come (*done: the
+ * number of the last chain finished). 0: that chain is done. For a client whose fences each stand for a chain of its own
+ * (StarbiteMali's WAIT_SEQ): a wait for the whole queue holds a thread for work that is not its own.
+ */
+int starlte_gpu_user_wait_seq_for(uint64_t seq, uint64_t timeout_ns, uint64_t *done);
+int
+starlte_gpu_user_wait_seq_for(uint64_t seq, uint64_t timeout_ns, uint64_t *done)
+{
+	*done = seq;
+	if (!sgu_ready) {
+		return 0;
+	}
+	if (timeout_ns > 3000ull * NSEC_PER_MSEC) {
+		timeout_ns = 3000ull * NSEC_PER_MSEC;   /* (as the other waits: a hung chain is ended by the worker after 2 s) */
+	}
+	if (sgu_q_enabled()) {
+		uint64_t deadline;
+		clock_interval_to_deadline((uint32_t)(timeout_ns / NSEC_PER_USEC), NSEC_PER_USEC, &deadline);
+		lck_mtx_lock(&sgu_q_lock);
+		if (seq > sgu_q_seq) {
+			seq = sgu_q_seq;                /* (a number never given: nothing to wait for beyond what is queued) */
+		}
+		while (timeout_ns != 0 && sgu_q_done < seq && mach_absolute_time() < deadline) {
+			(void)lck_mtx_sleep_deadline(&sgu_q_lock, LCK_SLEEP_DEFAULT, (event_t)&sgu_q_done, THREAD_UNINT, deadline);
+		}
+		*done = sgu_q_done;
+		int ret = sgu_q_done >= seq ? 0 : ETIMEDOUT;
+		lck_mtx_unlock(&sgu_q_lock);
+		return ret;
+	}
+	lck_mtx_lock(&sg_lock);
+	if (seq > sgu_seq_done) {
+		(void)sgu_retire_locked(timeout_ns != 0);
+	}
+	*done = sgu_seq_done;
 	int ret = seq <= sgu_seq_done ? 0 : ETIMEDOUT;
 	lck_mtx_unlock(&sg_lock);
 	return ret;

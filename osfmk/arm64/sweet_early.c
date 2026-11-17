@@ -115,7 +115,7 @@ sweet_early_panic(const char *fmt, va_list *args)
 
 void sweet_early_relocate(uint64_t base) { (void)base; }
 void sweet_early_disable(void) { a5_active = 0; }
-#elif defined(SWEET)
+#elif defined(SWEET) && !defined(FRANKEL)
 #include <stdint.h>
 #include <kern/misc_protos.h>
 
@@ -249,3 +249,15 @@ sweet_early_disable(void)
 	__asm__ volatile("dsb sy" ::: "memory");
 }
 #endif /* SWEET */
+#if defined(FRANKEL)
+/*
+ * FRANKEL (Pixel 10): the boot loader's framebuffer has no fixed address (SWEET's early screen is the Redmi's 0x9c000000),
+ * so there is no screen before the console: the early marks and the first panic copy go nowhere. The serial console
+ * (pe_serial.c) and the framebuffer console ("sweet-fbcon") start where they do on every board.
+ */
+void sweet_early_mark(unsigned int stage, const char *label) { (void)stage; (void)label; }
+void sweet_early_putc(char c) { (void)c; }
+void sweet_early_panic(const char *fmt, va_list *args) { (void)fmt; (void)args; }
+void sweet_early_relocate(uint64_t base) { (void)base; }
+void sweet_early_disable(void) { }
+#endif
