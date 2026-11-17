@@ -1157,6 +1157,22 @@ static uint32_t sgu_busy_req;
 #define SGU_REQ_HALF_NAMED      0x100u
 #define SGU_REQ_HALF_SECOND     0x200u
 static uint32_t sgu_pipe;
+/*
+ * boot-arg sgu_slots=2 (default 1: one chain at a time; NOT run on a phone). sgu_pipe=1 above, run on a phone on 12 November
+ * 2026, drew wrong 16-pixel tiles with no GPU fault (and clean pictures with the heap halves alone, one chain at a time): two
+ * halves of the tiler heap are not all a vertex/tiler chain and the fragment chain before it can share, and the kernel cannot
+ * see what else they share. A submit names only its chain's first job, whether it is a fragment chain, and buffers without
+ * saying which are read or written (a chain also reaches buffers its submit does not list); the shim's fences carry nothing.
+ * So with sgu_slots=2 a vertex/tiler chain starts beside the fragment chain before it only when its client says, chain by
+ * chain, that it may: SGU_REQ_BESIDE_OK, beside the two halves, and from the same process as that fragment chain. The
+ * promise is the client's (docs/ios27/LIQUID-GLASS.md of scion-kernel, "Both job slots", says what it must check before
+ * it sets the bit); no client sets it yet, so today sgu_slots=2 runs everything one chain at a time, as before, and says so
+ * in the ten-second line. sgu_pipe=1 stays as it was (the halves alone) to find the 12 November fault with its flush knobs.
+ */
+#define SGU_REQ_BESIDE_OK       0x400u
+static uint32_t sgu_slots = 1;
+static uint64_t sgu_both_abs;                           /* mach time both slots had a chain, as the worker saw it */
+static uint64_t sgu_beside_refused;                     /* sgu_slots=2: vertex/tiler chains with the halves but without the bit */
 /* diagnostics while sgu_pipe draws wrong tiles: the flushes of a chain started beside another (sgu_pipe_side) and of a
  * fragment chain that names its half (sgu_pipe_main), 0x1SE: S at the start, E at the end, each 0 none, 1 clean, 3 clean
  * and invalidate; 0 (default): as every chain. */
@@ -1229,6 +1245,136 @@ static uint32_t sgu_q_depth = SGU_QUEUE;
  * second each pay that flush today.
  */
 static uint32_t sgu_flushred;
+/*
+ * boot-arg sgu_irq=1 (off by default; NOT run on a phone): the queue's worker sleeps until the GPU's job interrupt says a
+ * chain has ended instead of napping sgu_nap_us at a time and looking. The Mali's three lines, from Samsung's device tree
+ * for this phone (mali@17500000, interrupts <0 282 0  0 281 0  0 283 0>, names JOB MMU GPU): SPI 282 (INTID 314) for the
+ * job slots, 281 (313) for the MMU, 283 (315) for the GPU, all level-triggered; taken through the GIC-400 by
+ * starlte_gic_spi_attach() (pexpert/arm/pe_fiq.c). Nothing about deciding that a chain is done changes: the worker still
+ * reads the raw status registers and clears them in sgu_retire_locked(), the same code, the same faults, the same reset.
+ * The interrupt only wakes it: the masks are set for the busy chain's slot (its done and failed bits), any MMU fault of AS0
+ * or AS1 and the GPU's fault bits only while the worker sleeps, and the handler clears the masks (which lowers the line)
+ * and wakes it. A sleep lasts sgu_irq_us at most (default 1000, 100 to 20000): then the worker looks as before. When the
+ * chain is found done after such a timeout 16 times running, the interrupt is taken for lost and the worker naps and looks
+ * as without sgu_irq for the rest of the boot, with a line on the console: a lost interrupt is today's behaviour, and the
+ * queue cannot hang on one. With the queue only (sweetspeed&262144).
+ */
+#define GPU_IRQ_MASK            0x028
+#define JOB_IRQ_MASK            0x1008
+#define JOB_IRQ_STATUS          0x100c
+#define MMU_IRQ_MASK            0x2008
+#define SGU_INTID_JOB           314             /* SPI 282 */
+#define SGU_INTID_MMU           313             /* SPI 281 */
+#define SGU_INTID_GPU           315             /* SPI 283 */
+#define SGU_MMU_BITS            0x00030003u     /* AS0 and AS1: page fault (n) and bus error (n + 16) */
+#define SGU_GPU_BITS            0x81u           /* GPU_FAULT and MULTIPLE_GPU_FAULTS, what the polled path looks at */
+extern kern_return_t starlte_gic_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid), void *context);
+static uint32_t sgu_irq_want;
+static uint32_t sgu_irq_us = 1000;
+static volatile bool sgu_irq_live;
+static int sgu_irq_event;
+static uint64_t sgu_irq_at, sgu_irq_n;                  /* the last interrupt's mach time; how many */
+static unsigned sgu_irq_missed_run;
+/* How the worker saw a chain end (the ten-second "irq" line): by a look while it spun, after a nap, woken by the interrupt,
+ * already when it set the masks, after a timed-out sleep (the interrupt late or lost). */
+enum { SGU_SEEN_LOOK, SGU_SEEN_NAP, SGU_SEEN_IRQ, SGU_SEEN_ARMED, SGU_SEEN_LATE, SGU_SEEN_KINDS };
+static uint64_t sgu_seen[SGU_SEEN_KINDS];
+static uint64_t sgu_iw_lat, sgu_iw_lat_max, sgu_iw_wakes, sgu_iw_running;
+
+/* Interrupt context, interrupts off: the GPU's lines down (their masks cleared), the worker woken. Nothing is cleared. */
+static void
+sgu_irq_handler(__unused void *context, __unused uint32_t intid)
+{
+	sg_wr(sg_gpu, JOB_IRQ_MASK, 0);
+	sg_wr(sg_gpu, MMU_IRQ_MASK, 0);
+	sg_wr(sg_gpu, GPU_IRQ_MASK, 0);
+	(void)sg_rd(sg_gpu, JOB_IRQ_STATUS);            /* (the writes have landed before the interrupt is ended) */
+	__atomic_store_n(&sgu_irq_at, mach_absolute_time(), __ATOMIC_RELAXED);
+	__atomic_fetch_add(&sgu_irq_n, 1, __ATOMIC_RELAXED);
+	thread_wakeup((event_t)&sgu_irq_event);
+}
+
+/* The masks: job bits `job` (0: all three lines quiet). */
+static void
+sgu_irq_arm(uint32_t job)
+{
+	if (job == 0) {
+		sg_wr(sg_gpu, JOB_IRQ_MASK, 0);
+		sg_wr(sg_gpu, MMU_IRQ_MASK, 0);
+		sg_wr(sg_gpu, GPU_IRQ_MASK, 0);
+		return;
+	}
+	sg_wr(sg_gpu, GPU_IRQ_MASK, SGU_GPU_BITS);
+	sg_wr(sg_gpu, MMU_IRQ_MASK, SGU_MMU_BITS);
+	sg_wr(sg_gpu, JOB_IRQ_MASK, job);
+}
+
+/* What sgu_retire_locked() stops looking at: the slot's done or failed bit, any MMU fault, a GPU fault. */
+static bool
+sgu_irq_pending(uint32_t job)
+{
+	return (sg_rd(sg_gpu, JOB_IRQ_RAWSTAT) & job) || sg_rd(sg_gpu, MMU_IRQ_RAWSTAT) || (sg_rd(sg_gpu, GPU_IRQ_RAWSTAT) & SGU_GPU_BITS);
+}
+
+/* The worker, its chain on slot js still running: asleep until the interrupt or sgu_irq_us. How it ended (SGU_SEEN_*). */
+static unsigned
+sgu_irq_wait(unsigned js)
+{
+	uint32_t job = (1u << js) | (1u << (js + 16));
+	uint64_t armed = mach_absolute_time(), deadline;
+	clock_interval_to_deadline(sgu_irq_us, NSEC_PER_USEC, &deadline);
+	/* (the wait is in place before the masks are set: an interrupt at once still wakes it) */
+	assert_wait_deadline((event_t)&sgu_irq_event, THREAD_UNINT, deadline);
+	sgu_irq_arm(job);
+	if (sgu_irq_pending(job)) {
+		sgu_irq_arm(0);
+		clear_wait(current_thread(), THREAD_AWAKENED);
+		return SGU_SEEN_ARMED;
+	}
+	wait_result_t woke = thread_block(THREAD_CONTINUE_NULL);
+	sgu_irq_arm(0);
+	if (woke == THREAD_AWAKENED) {
+		uint64_t at = __atomic_load_n(&sgu_irq_at, __ATOMIC_RELAXED), now = mach_absolute_time();
+		if (at >= armed && now >= at) {
+			sgu_iw_lat += now - at;
+			if (now - at > sgu_iw_lat_max) {
+				sgu_iw_lat_max = now - at;
+			}
+			sgu_iw_wakes++;
+		}
+		sgu_irq_missed_run = 0;
+		return SGU_SEEN_IRQ;
+	}
+	if (!sgu_irq_pending(job)) {
+		sgu_iw_running++;                       /* (a long chain: asleep again after a look) */
+		return SGU_SEEN_NAP;
+	}
+	if (++sgu_irq_missed_run >= 16) {
+		sgu_irq_live = false;
+		printf("STARLTE GPU QUEUE: the job interrupt did not come for 16 chains running (%llu taken in all): naps and looks "
+		    "from now on, as without sgu_irq\n", __atomic_load_n(&sgu_irq_n, __ATOMIC_RELAXED));
+	}
+	return SGU_SEEN_LATE;
+}
+
+/* sgu_q_enabled(), once, with the queue on and sgu_irq=1: the masks cleared, the three lines taken. */
+static void
+sgu_irq_attach(void)
+{
+	sgu_irq_arm(0);                                 /* (no sleeper yet; and the handler takes no lock either) */
+	kern_return_t job = starlte_gic_spi_attach(SGU_INTID_JOB, false, sgu_irq_handler, NULL);
+	kern_return_t mmu = KERN_FAILURE, gpu = KERN_FAILURE;
+	if (job == KERN_SUCCESS) {
+		/* (without these an MMU or GPU fault is seen at the end of the sleep instead, by the same look as now) */
+		mmu = starlte_gic_spi_attach(SGU_INTID_MMU, false, sgu_irq_handler, NULL);
+		gpu = starlte_gic_spi_attach(SGU_INTID_GPU, false, sgu_irq_handler, NULL);
+		sgu_irq_live = true;
+	}
+	printf("STARLTE GPU QUEUE: the job interrupt (INTID %u) %s (%d), MMU's (%u) %d, GPU's (%u) %d; a sleep lasts %u us at most\n",
+	    SGU_INTID_JOB, job == KERN_SUCCESS ? "attached" : "NOT attached: naps and looks as before", job, SGU_INTID_MMU, mmu,
+	    SGU_INTID_GPU, gpu, sgu_irq_us);
+}
+
 static LCK_MTX_DECLARE(sgu_q_lock, &sg_lck_grp);
 static LCK_MTX_DECLARE(sgu_q_nap_lock, &sg_lck_grp);
 extern uint32_t sweet_speed_flags(void);                /* boot-arg sweetspeed (osfmk/arm64/sweet_a64e.c) */
@@ -1272,6 +1418,7 @@ sgu_retire_locked(bool block)
 	if (sgu_side && ok) {
 		/* (the chain beside it is still running: its bits and any fault of its stay for its own look) */
 		sg_wr(sg_gpu, JOB_IRQ_CLEAR, (1u << js) | (1u << (js + 16)));
+		sgu_both_abs += mach_absolute_time() - sgu_side_t0;
 	} else {
 		sg_wr(sg_gpu, JOB_IRQ_CLEAR, 0xffffffffu);
 		sg_wr(sg_gpu, MMU_IRQ_CLEAR, 0xffffffffu);
@@ -1384,6 +1531,7 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 		uint64_t jc = sgu_q[sgu_q_head].jc, seq = sgu_q[sgu_q_head].seq, queued = sgu_q[sgu_q_head].queued;
 		uint32_t req = sgu_q[sgu_q_head].req, flush = sgu_q[sgu_q_head].flush;
 		int pk_owner = sgu_q[sgu_q_head].pid;
+		unsigned seen = SGU_SEEN_LOOK;
 		lck_mtx_unlock(&sgu_q_lock);
 
 		lck_mtx_lock(&sg_lock);
@@ -1399,8 +1547,8 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 			sgu_seq_sub++;
 		}
 		lck_mtx_unlock(&sg_lock);
-		/* sgu_pipe: a fragment chain that names its half of the tiler heap may have the next chain beside it */
-		bool pipe = sgu_pipe && (req & 1) && (req & SGU_REQ_HALF_NAMED) && side_seq < seq;
+		/* sgu_pipe, sgu_slots=2: a fragment chain that names its half of the tiler heap may have the next chain beside it */
+		bool pipe = (sgu_pipe || sgu_slots == 2) && (req & 1) && (req & SGU_REQ_HALF_NAMED) && side_seq < seq;
 		for (unsigned looks = 0;; looks++) {
 			uint64_t njc = 0, nseq = 0;
 			uint32_t nreq = 0, nflush = 0;
@@ -1409,7 +1557,13 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 				if (sgu_q_count >= 2) {
 					unsigned at = (sgu_q_head + 1) % SGU_QUEUE;
 					nreq = sgu_q[at].req;
-					if (!(nreq & 1) && (nreq & SGU_REQ_HALF_NAMED) && ((nreq ^ req) & SGU_REQ_HALF_SECOND)) {
+					bool halves = !(nreq & 1) && (nreq & SGU_REQ_HALF_NAMED) && ((nreq ^ req) & SGU_REQ_HALF_SECOND);
+					/* (sgu_slots=2: and its client's word that it may, given for this chain, by the same process) */
+					bool may = sgu_pipe || ((nreq & SGU_REQ_BESIDE_OK) && sgu_q[at].pid == pk_owner);
+					if (halves && !may) {
+						sgu_beside_refused++;
+					}
+					if (halves && may) {
 						njc = sgu_q[at].jc;
 						nseq = sgu_q[at].seq;
 						nflush = sgu_q[at].flush;
@@ -1421,6 +1575,7 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 			lck_mtx_lock(&sg_lock);
 			/* (the present or a client without the queue may have retired it for us: then it is not the busy chain) */
 			int state = (sgu_busy && sgu_busy_jc == jc) ? sgu_retire_locked(false) : 0;
+			unsigned busy_js = sgu_busy_js;
 			if (state == EBUSY && nseq != 0 && !sgu_side) {
 				sgu_start_side_locked(njc, nreq, nflush);
 				sgu_seq_sub++;
@@ -1429,12 +1584,18 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 			}
 			lck_mtx_unlock(&sg_lock);
 			if (state != EBUSY) {
+				sgu_seen[seen]++;
 				break;
 			}
 			if (looks < sgu_q_spin_us / 10) {
 				delay(10);
 				continue;
 			}
+			if (sgu_irq_live) {
+				seen = sgu_irq_wait(busy_js);
+				continue;
+			}
+			seen = SGU_SEEN_NAP;
 			uint64_t nap;
 			clock_interval_to_deadline(sgu_q_nap_us, NSEC_PER_USEC, &nap);
 			lck_mtx_lock(&sgu_q_nap_lock);
@@ -1537,11 +1698,28 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 				    pk_hist[0][4], pk_hist[0][5], pk_n[1], pk_n[1] ? g[1] / pk_n[1] / 1000 : 0, pk_hist[1][0], pk_hist[1][1],
 				    pk_hist[1][2], pk_hist[1][3], pk_hist[1][4], pk_hist[1][5], pk_gaps ? gap / pk_gaps / 1000 : 0, pk_gaps,
 				    pk_pid[0].pid, pk_pid[0].n, pk_pid[1].pid, pk_pid[1].n, pk_pid[2].pid, pk_pid[2].n, sgu_pipe_n);
-				sgu_pipe_n = 0;
 				pk_n[0] = pk_n[1] = pk_gpu[0] = pk_gpu[1] = pk_gap = pk_gaps = 0;
 				bzero(pk_hist, sizeof(pk_hist));
 				bzero(pk_pid, sizeof(pk_pid));
 			}
+			if (sgu_irq_want || sgu_slots == 2 || sgu_pipe) {
+				uint64_t lat = 0, lat_max = 0, both = 0;
+				absolutetime_to_nanoseconds(sgu_iw_lat, &lat);
+				absolutetime_to_nanoseconds(sgu_iw_lat_max, &lat_max);
+				absolutetime_to_nanoseconds(sgu_both_abs, &both);
+				printf("STARLTE GPU QUEUE irq: %s; chains seen done by a look %llu, after a nap %llu, by the interrupt %llu, "
+				    "on arming %llu, after a timed-out sleep %llu; interrupt to wake avg %llu us max %llu (%llu), sleeps timed "
+				    "out with the chain running %llu, interrupts %llu; slots: %u, beside another %llu, both busy %llu us "
+				    "(%llu%%), refused without the client's word %llu\n",
+				    !sgu_irq_want ? "off" : sgu_irq_live ? "on" : "LOST, polling", sgu_seen[SGU_SEEN_LOOK],
+				    sgu_seen[SGU_SEEN_NAP], sgu_seen[SGU_SEEN_IRQ], sgu_seen[SGU_SEEN_ARMED], sgu_seen[SGU_SEEN_LATE],
+				    sgu_iw_wakes ? lat / sgu_iw_wakes / 1000 : 0, lat_max / 1000, sgu_iw_wakes, sgu_iw_running,
+				    __atomic_load_n(&sgu_irq_n, __ATOMIC_RELAXED), sgu_slots == 2 || sgu_pipe ? 2u : 1u, sgu_pipe_n,
+				    both / 1000, window ? both * 100 / window : 0, sgu_beside_refused);
+			}
+			bzero(sgu_seen, sizeof(sgu_seen));
+			sgu_iw_lat = sgu_iw_lat_max = sgu_iw_wakes = sgu_iw_running = 0;
+			sgu_pipe_n = sgu_both_abs = sgu_beside_refused = 0;
 			win_t0 = ended;
 			win_gpu = win_gpu_max = win_wait = win_n = win_naps = 0;
 			lck_mtx_lock(&sgu_q_lock);
@@ -1579,11 +1757,28 @@ sgu_q_enabled(void)
 			(void)PE_parse_boot_argn("sgu_dump", &sgu_dump, sizeof(sgu_dump));
 			(void)PE_parse_boot_argn("sgu_pipe_side", &sgu_pipe_side, sizeof(sgu_pipe_side));
 			(void)PE_parse_boot_argn("sgu_pipe_main", &sgu_pipe_main, sizeof(sgu_pipe_main));
+			uint32_t slots = 1;
+			if (PE_parse_boot_argn("sgu_slots", &slots, sizeof(slots)) && slots == 2) {
+				sgu_slots = 2;
+			}
+			(void)PE_parse_boot_argn("sgu_irq", &sgu_irq_want, sizeof(sgu_irq_want));
+			uint32_t irq_us = 0;
+			if (PE_parse_boot_argn("sgu_irq_us", &irq_us, sizeof(irq_us)) && irq_us >= 100 && irq_us <= 20000) {
+				sgu_irq_us = irq_us;
+			}
 			sgu_q_on = (sweet_speed_flags() & 262144) != 0;
 			sgu_q_checked = 1;
 			printf("STARLTE GPU QUEUE: %s (sweetspeed&262144), spin %u us, nap %u us, depth %u, flush reduction %s, "
 			    "two slots at once %s (flushes: side %#x main %#x)\n", sgu_q_on ? "on" : "off", sgu_q_spin_us, sgu_q_nap_us,
 			    sgu_q_depth, sgu_flushred ? "on" : "off", sgu_pipe ? "on" : "off", sgu_pipe_side, sgu_pipe_main);
+			if (sgu_q_on && sgu_irq_want) {
+				sgu_irq_attach();
+			}
+			if (sgu_slots == 2) {
+				printf("STARLTE GPU QUEUE: two slots (sgu_slots=2) for chains whose client says they may go beside "
+				    "(requirement %#x, with the heap halves %#x/%#x)%s\n", SGU_REQ_BESIDE_OK, SGU_REQ_HALF_NAMED,
+				    SGU_REQ_HALF_SECOND, sgu_q_on ? "" : ": NOT used, the queue is off");
+			}
 		}
 		lck_mtx_unlock(&sgu_q_lock);
 	}
@@ -1615,7 +1810,7 @@ sgu_q_enqueue(uint64_t jc, uint32_t requirements)
 	sgu_q[at].req = requirements;
 	sgu_q[at].flush = sgu_flushred ? sg_rd(sg_gpu, 0x38) : 0;       /* LATEST_FLUSH, as of this submit */
 	sgu_q[at].seq = seq;
-	sgu_q[at].pid = sgu_prof ? proc_selfpid() : 0;
+	sgu_q[at].pid = (sgu_prof || sgu_slots == 2) ? proc_selfpid() : 0;
 	sgu_q[at].queued = mach_absolute_time();
 	if (++sgu_q_count > sgu_q_deepest) {
 		sgu_q_deepest = sgu_q_count;

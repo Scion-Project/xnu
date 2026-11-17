@@ -3206,6 +3206,13 @@ sleh_irq(arm_saved_state_t *state)
 		cpu_signal_handler();
 	} else {
 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
+#if defined(STARLTE)
+		/* a device interrupt an S9 driver has attached (pexpert/arm/pe_fiq.c, starlte_gic_spi_attach) */
+		extern bool starlte_gic_spi_handle(uint32_t intid);
+		if (intid >= 32 && starlte_gic_spi_handle(intid)) {
+			/* handled */
+		} else
+#endif
 		if (cdp->interrupt_handler) {
 			cdp->interrupt_handler(cdp->interrupt_target,
 			    cdp->interrupt_refCon,

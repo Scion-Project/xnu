@@ -278,6 +278,132 @@ a5xelte_send_ipi(unsigned int logical)
 }
 #endif
 
+#if defined(STARLTE)
+/*
+ * A device interrupt (an SPI, INTID 32 to 1019) for a driver of the Galaxy S9, on the GIC-400. Until 17 November 2026 no
+ * driver of this tree took one: the timer and the two signals between processors were the only interrupts enabled, and
+ * every S9 driver polled. This is the GICv2 half of what Scion's iOS 16.5 kernel does in osfmk/arm64/gic_v3_irq.c
+ * (gic_v3_spi_attach): the interrupt is configured (priority as the timer's, level or edge), sent to the boot processor's
+ * CPU interface (GICD_ITARGETSR; the boot processor is never switched off), enabled, and its handler called from
+ * sleh_irq() in interrupt context, before the interrupt is ended. A handler must quiet its device (a level-triggered
+ * line stays up until it does) and wake a thread, no more. The interrupt's group is the secure world's to set (the
+ * normal world reads GICD_IGROUPR as zero): S-Boot's monitor is expected to have left the SPIs in Group 1, as Samsung's
+ * Linux needs them; starlte_gic_spi_attach() reads the enable bit back and says so if it did not stick.
+ * First user: the GPU's job interrupt (bsd/dev/starlte_gpu.c, sgu_irq=1). NOT run on a phone yet.
+ */
+#define STARLTE_SPI_MOST        8
+static struct {
+	uint32_t intid;                         /* 0: free */
+	uint32_t busy;
+	void (*handler)(void *context, uint32_t intid);
+	void *context;
+	uint64_t count;
+} starlte_spi[STARLTE_SPI_MOST];
+
+kern_return_t starlte_gic_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid), void *context);
+void starlte_gic_spi_detach(uint32_t intid);
+uint64_t starlte_gic_spi_count(uint32_t intid);
+bool starlte_gic_spi_handle(uint32_t intid);
+
+/* Thread context. KERN_SUCCESS; KERN_FAILURE when the enable bit does not read back (a Group 0 line, the secure world's). */
+kern_return_t
+starlte_gic_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid), void *context)
+{
+	if (!a5_gicd_base || intid < 32 || intid >= 1020 || handler == NULL || a5_gic_cpu_masks[0] == 0) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	unsigned slot = STARLTE_SPI_MOST;
+	for (unsigned i = 0; i < STARLTE_SPI_MOST; i++) {
+		if (__atomic_load_n(&starlte_spi[i].intid, __ATOMIC_ACQUIRE) == intid) {
+			return KERN_NAME_EXISTS;
+		}
+	}
+	for (unsigned i = 0; i < STARLTE_SPI_MOST && slot == STARLTE_SPI_MOST; i++) {
+		uint32_t free_id = 0;
+		if (__atomic_load_n(&starlte_spi[i].busy, __ATOMIC_ACQUIRE) == 0 &&
+		    __atomic_compare_exchange_n(&starlte_spi[i].intid, &free_id, 0xffffffffu, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+			slot = i;
+		}
+	}
+	if (slot == STARLTE_SPI_MOST) {
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	starlte_spi[slot].handler = handler;
+	starlte_spi[slot].context = context;
+	starlte_spi[slot].count = 0;
+
+	uint32_t bit = 1U << (intid % 32);
+	a5_gic_write32(a5_gicd_base, 0x180 + 4 * (intid / 32), bit);           /* GICD_ICENABLER */
+	a5_gic_write32(a5_gicd_base, 0x280 + 4 * (intid / 32), bit);           /* GICD_ICPENDR */
+	a5_gic_write32(a5_gicd_base, 0x380 + 4 * (intid / 32), bit);           /* GICD_ICACTIVER */
+	*(volatile uint8_t *)(a5_gicd_base + 0x400 + intid) = 0xa0;             /* GICD_IPRIORITYR: as the timer's */
+	uint32_t shift = (intid % 16) * 2;
+	uint32_t config = a5_gic_read32(a5_gicd_base, 0xc00 + 4 * (intid / 16)) & ~(3U << shift);
+	a5_gic_write32(a5_gicd_base, 0xc00 + 4 * (intid / 16), config | ((edge ? 2U : 0U) << shift));  /* GICD_ICFGR */
+	*(volatile uint8_t *)(a5_gicd_base + 0x800 + intid) = a5_gic_cpu_masks[0];   /* GICD_ITARGETSR: the boot processor */
+	__builtin_arm_dsb(DSB_SY);
+	__atomic_store_n(&starlte_spi[slot].intid, intid, __ATOMIC_RELEASE);
+	a5_gic_write32(a5_gicd_base, 0x100 + 4 * (intid / 32), bit);           /* GICD_ISENABLER */
+	__builtin_arm_dsb(DSB_SY);
+	if (!(a5_gic_read32(a5_gicd_base, 0x100 + 4 * (intid / 32)) & bit)) {
+		starlte_gic_spi_detach(intid);
+		return KERN_FAILURE;
+	}
+	return KERN_SUCCESS;
+}
+
+/* Disabled, nothing pending, and no handler of it running when this returns. */
+void
+starlte_gic_spi_detach(uint32_t intid)
+{
+	if (!a5_gicd_base || intid < 32 || intid >= 1020) {
+		return;
+	}
+	uint32_t bit = 1U << (intid % 32);
+	a5_gic_write32(a5_gicd_base, 0x180 + 4 * (intid / 32), bit);
+	a5_gic_write32(a5_gicd_base, 0x280 + 4 * (intid / 32), bit);
+	__builtin_arm_dsb(DSB_SY);
+	for (unsigned i = 0; i < STARLTE_SPI_MOST; i++) {
+		if (__atomic_load_n(&starlte_spi[i].intid, __ATOMIC_ACQUIRE) == intid) {
+			__atomic_store_n(&starlte_spi[i].intid, 0, __ATOMIC_RELEASE);
+			while (__atomic_load_n(&starlte_spi[i].busy, __ATOMIC_ACQUIRE) != 0) {
+				/* a handler of it on another processor is finishing */
+			}
+		}
+	}
+}
+
+/* How many have arrived since it was attached. */
+uint64_t
+starlte_gic_spi_count(uint32_t intid)
+{
+	for (unsigned i = 0; i < STARLTE_SPI_MOST; i++) {
+		if (__atomic_load_n(&starlte_spi[i].intid, __ATOMIC_ACQUIRE) == intid) {
+			return starlte_spi[i].count;
+		}
+	}
+	return 0;
+}
+
+/* From sleh_irq(), interrupts off, between the acknowledge and the end: true when a driver has it. */
+bool
+starlte_gic_spi_handle(uint32_t intid)
+{
+	for (unsigned i = 0; i < STARLTE_SPI_MOST; i++) {
+		if (__atomic_load_n(&starlte_spi[i].intid, __ATOMIC_ACQUIRE) == intid) {
+			__atomic_fetch_add(&starlte_spi[i].busy, 1, __ATOMIC_ACQUIRE);
+			if (__atomic_load_n(&starlte_spi[i].intid, __ATOMIC_RELAXED) == intid) {
+				starlte_spi[i].count++;
+				starlte_spi[i].handler(starlte_spi[i].context, intid);
+			}
+			__atomic_fetch_sub(&starlte_spi[i].busy, 1, __ATOMIC_RELEASE);
+			return true;
+		}
+	}
+	return false;
+}
+#endif /* STARLTE */
+
 void
 pe_init_fiq(void)
 {
