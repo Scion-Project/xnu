@@ -122,6 +122,12 @@ bsd/dev/hakios.exynos_camera.c	optional scion_generic_arm64
 bsd/dev/hakios.ak737x.c	optional scion_generic_arm64
 bsd/dev/hakios.exynos_camera_rear.c	optional scion_generic_arm64
 bsd/dev/hakios.exynos_spi.c	optional scion_generic_arm64
+bsd/dev/hakios.bcm4361_bt.c	optional scion_generic_arm64
+bsd/dev/hakios.audio.c	optional scion_generic_arm64
+bsd/dev/hakios.guard.c	optional scion_generic_arm64
+bsd/dev/hakios.exynos_abox.c	optional scion_generic_arm64
+bsd/dev/hakios.max98512.c	optional scion_generic_arm64
+bsd/dev/hakios.cs47l93.c	optional scion_generic_arm64
 bsd/dev/hakios.ssp.c	optional scion_generic_arm64
 bsd/dev/hakios.shannon.c	optional scion_generic_arm64
 bsd/dev/starlte_fw.c	optional scion_generic_arm64

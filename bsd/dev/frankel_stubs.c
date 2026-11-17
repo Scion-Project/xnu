@@ -145,3 +145,16 @@ frankel_refuse_s9_args(void)
 	}
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, frankel_refuse_s9_args);
+
+/*
+ * The S9's audio (bsd/dev/hakios.exynos_abox.c, compiled for every generic board, nothing without abox=N): its clock
+ * domain's rate through the Exynos APM and its memory under 4 GB are the S9's own (hakios.exynos_acpm_dvfs.c, the S9's
+ * DMA pool). On this board: no APM is asked, no memory is given, and the driver's steps stop there.
+ */
+#include <mach/vm_types.h>
+int hakios_acpm_dvfs_get(uint32_t index, uint32_t *khz);
+int hakios_acpm_dvfs_get(uint32_t index, uint32_t *khz) { (void)index; (void)khz; return ENODEV; }
+int hakios_acpm_dvfs_set(uint32_t index, uint32_t khz);
+int hakios_acpm_dvfs_set(uint32_t index, uint32_t khz) { (void)index; (void)khz; return ENODEV; }
+vm_offset_t hakios_dma32_alloc(vm_size_t size, uint64_t *pa);
+vm_offset_t hakios_dma32_alloc(vm_size_t size, uint64_t *pa) { (void)size; (void)pa; return 0; }

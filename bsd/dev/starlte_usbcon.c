@@ -89,7 +89,18 @@ loader_log_line(const char *line)
 
 void loader_return(void);
 extern void starlte_return_to_recovery(void);
-void loader_return(void) { starlte_return_to_recovery(); }
+extern void hakios_max98512_quiesce(void);      /* bsd/dev/hakios.max98512.c: nothing unless max98512=3 left them on */
+extern void hakios_cs47l93_quiesce(void);       /* bsd/dev/hakios.cs47l93.c: holds the codec in reset on return */
+extern void hakios_exynos_abox_quiesce(void);   /* bsd/dev/hakios.exynos_abox.c: nothing unless abox=7/8 runs RDMA0 */
+void
+loader_return(void)
+{
+	/* (Scion's order) the speaker amplifiers off while UAIF1's clocks still run, then the codec held in reset, then ABOX's UAIFs */
+	hakios_max98512_quiesce();
+	hakios_cs47l93_quiesce();
+	hakios_exynos_abox_quiesce();
+	starlte_return_to_recovery();
+}
 /* (the front camera is powered down on the way: starlte_reboot_recovery(), bsd/dev/herolte_ufs.c) */
 /* hakios_wifi_stop/_report, hakios_sta_console_scan, hakios_net_console_*: the Wi-Fi drivers' own (bsd/dev/starlte_wifi.c) */
 void hakios_var_save_on_return(void);
@@ -99,10 +110,11 @@ void hakios_ufs_summary(__unused const char *when, __unused int how) {}
 void hakios_adreno_stop(void);
 void hakios_adreno_stop(void) {}
 #define STUB_ARG(fn) void fn(const char *arg); void fn(__unused const char *arg) { printf("usb: " #fn ": not on this kernel\n"); }
-STUB_ARG(hakios_bt_console)
+/* hakios_bt_console(): bsd/dev/hakios.bcm4361_bt.c (the S9 Bluetooth, bt=7) */
+/* hakios_net_console_*: the Wi-Fi drivers' own (bsd/dev/starlte_wifi.c) */
 /* hakios_input_console_touch(), hakios_input_console_button(): bsd/dev/starlte_touch.c */
-STUB_ARG(hakios_abox_console)
-STUB_ARG(hakios_cs47l93_console)
+/* hakios_abox_console(): bsd/dev/hakios.exynos_abox.c (the S9 ABOX speaker path, abox=N) */
+/* hakios_cs47l93_console(): bsd/dev/hakios.cs47l93.c (the S9 CS47L93 codec, cs47l93=N) */
 /* hakios_ssp_console(): the sensor hub's driver, bsd/dev/hakios.ssp.c (the console's "sensors", boot-arg shub=N) */
 STUB_ARG(hakios_max77705_usb_console)
 void hakios_adsp_stop(void);
@@ -116,9 +128,10 @@ int hakios_panel_brightness(int level);
 bool hakios_acpm_init(int (*say)(const char *, ...));
 bool hakios_acpm_init(__unused int (*say)(const char *, ...)) { return false; }
 /*
- * The S2MPS18's registers for the shared drivers that ask by these names (the sensor hub's supply, bsd/dev/hakios.ssp.c):
- * through this tree's own ACPM path, starlte_pmic_read/write of bsd/dev/starlte_touch.c (the same block numbers).
- * hakios_acpm_init() above still says "no ACPM", so the USB glue leaves its supplies as the boot left them, as before.
+ * The PMIC calls of sys/hakios.exynos_acpm.h go to this tree's one ACPM client, bsd/dev/starlte_touch.c (channel 2, its
+ * lock and sequence numbers; starlte_pmic_read/write, the same block numbers): the S9's audio codec (hakios.cs47l93.c,
+ * cs47l93=N) powers its LDO34 through them, and the sensor hub's driver (bsd/dev/hakios.ssp.c) its supply.
+ * hakios_acpm_init() stays false above, so callers that ask it first (hakios.exynos_usb.c's LDO9-14) behave as before.
  */
 extern bool starlte_pmic_read(uint32_t type, uint32_t reg, uint8_t *val);
 extern bool starlte_pmic_write(uint32_t type, uint32_t reg, uint8_t val);
