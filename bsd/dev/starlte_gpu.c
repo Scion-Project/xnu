@@ -1028,6 +1028,67 @@ starlte_gpu_user_map(uint64_t va, const uint64_t *pages, unsigned n)
 	return starlte_gpu_user_map_prot(va, pages, n, true);
 }
 
+/*
+ * The ranges mapped read-only (gpu_writes false), with who mapped them, so that a chain that faults writing one is named
+ * in the log (sgu_ro_fault()): a client's rendering that fails because a buffer of its own is read-only for the GPU is
+ * then seen at once. A range past the table's 64 is mapped as well, only not named. sg_lock held.
+ */
+#define SGU_RO_RANGES   64
+static struct {
+	uint64_t va;
+	unsigned n;
+	int pid;
+	bool said;
+	char name[20];
+} sgu_ro[SGU_RO_RANGES];
+static uint32_t sgu_ro_faults;
+extern void proc_selfname(char *buf, int size);
+extern int proc_selfpid(void);
+
+static void
+sgu_ro_note(uint64_t va, unsigned n, bool add)
+{
+	for (unsigned i = 0; i < SGU_RO_RANGES; i++) {
+		if (add && sgu_ro[i].n == 0) {
+			sgu_ro[i].va = va;
+			sgu_ro[i].n = n;
+			sgu_ro[i].pid = proc_selfpid();
+			sgu_ro[i].said = false;
+			proc_selfname(sgu_ro[i].name, sizeof(sgu_ro[i].name));
+			return;
+		}
+		if (!add && sgu_ro[i].n != 0 && sgu_ro[i].va == va) {
+			sgu_ro[i].n = 0;
+			return;
+		}
+	}
+}
+
+/* After a chain failed, before the reset: was it a write to a range mapped read-only? Said once a range, and counted. */
+static void
+sgu_ro_fault(void)
+{
+	uint32_t status = sg_rd(sg_gpu, ASN(1) + 0x1c);
+	uint64_t at = sg_rd(sg_gpu, ASN(1) + 0x20) | (uint64_t)sg_rd(sg_gpu, ASN(1) + 0x24) << 32;
+
+	/* AS_FAULTSTATUS: exception type 0xC8-0xCF a permission fault, access type (bits 9:8) 3 a write */
+	if ((status & 0xf8) != 0xc8 || ((status >> 8) & 3) != 3) {
+		return;
+	}
+	for (unsigned i = 0; i < SGU_RO_RANGES; i++) {
+		if (sgu_ro[i].n != 0 && at >= sgu_ro[i].va && at - sgu_ro[i].va < (uint64_t)sgu_ro[i].n * 0x1000) {
+			sgu_ro_faults++;
+			if (!sgu_ro[i].said) {
+				sgu_ro[i].said = true;
+				printf("STARLTE GPU USER: a chain wrote GPU address %#llx, in %u pages %s[%d] imported that it may only "
+				    "read (a file's, a library's: mapped read-only for the GPU): the write faulted (%u such faults)\n",
+				    at, sgu_ro[i].n, sgu_ro[i].name, sgu_ro[i].pid, sgu_ro_faults);
+			}
+			return;
+		}
+	}
+}
+
 bool
 starlte_gpu_user_map_prot(uint64_t va, const uint64_t *pages, unsigned n, bool gpu_writes)
 {
@@ -1068,6 +1129,8 @@ starlte_gpu_user_map_prot(uint64_t va, const uint64_t *pages, unsigned n, bool g
 	bool ok = i == n;
 	if (!ok) {
 		sgu_unmap_locked(va, i);
+	} else if (!gpu_writes) {
+		sgu_ro_note(va, n, true);
 	}
 	/* how full the pool gets: a line at each quarter, on the way up */
 	unsigned quarter = sgu_l3_live * 4 / SGU_L3_TABLES;
@@ -1091,15 +1154,19 @@ starlte_gpu_user_unmap(uint64_t va, unsigned n)
 	}
 	lck_mtx_lock(&sg_lock);
 	sgu_unmap_locked(va, n);
+	sgu_ro_note(va, n, false);
 	__asm__ volatile ("dsb sy" ::: "memory");
 	(void)sgu_flush(1);
 	lck_mtx_unlock(&sg_lock);
 }
 
 /* After a fault or a hung job: reset, power, AS0 and AS1 as they were. */
+static void sgu_ro_fault(void);
+
 static void
 sgu_recover(void)
 {
+	sgu_ro_fault();
 	(void)sg_soft_reset();
 	(void)sg_power(L2_PWRON_LO, L2_READY_LO, sg_rd(sg_gpu, L2_PRESENT_LO), "L2");
 	(void)sg_power(SHADER_PWRON_LO, SHADER_READY_LO, sgp_shaders, "shader cores");
