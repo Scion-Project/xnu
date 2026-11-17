@@ -214,6 +214,7 @@ bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
 bsd/miscfs/routefs/routefs_ops.c	optional routefs
 
 bsd/kern/decmpfs.c			standard
+bsd/kern/decmpfs_lz4.c			standard
 
 bsd/net/net_stubs.c			standard bound-checks
 bsd/net/bpf.c				optional bpfilter bound-checks

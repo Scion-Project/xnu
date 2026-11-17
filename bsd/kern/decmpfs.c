@@ -2395,6 +2395,9 @@ decmpfs_init(void)
 	decmpfs_ctx = vfs_context_create(vfs_context_kernel());
 
 	register_decmpfs_decompressor(CMP_Type1, &Type1Reg);
+	/* Scion: type 16 (LZ4 in chunks in the resource fork), with the boot argument decmpfs_lz4=1 (decmpfs_lz4.c) */
+	extern void decmpfs_lz4_init(void);
+	decmpfs_lz4_init();
 
 	ktriage_register_subsystem_strings(KDBG_TRIAGE_SUBSYS_DECMPFS, &ktriage_decmpfs_subsystem_strings);
 
