@@ -1,9 +1,15 @@
 /*
  * Ported to the Starbite iOS 27 (xnu-12377) STARLTE tree from HakiOS/Scion (Scion-Project/scion-kernel,
  * drivers/power/exynos/hakios.exynos_tmu.c, APSL), keeping Scion's notes below. What differs here:
- *   - Steps 1 and 2 only (reads; kern.hakios.temp.* and the functions the CPU governor calls). Step 3 (ending a hot run
- *     through the loader, or PS_HOLD with tmu_off=1) is not here: this tree has no loader_return and none of the drivers
- *     it stops first. tmu=3 is taken as tmu=2: NOTHING STOPS A HOT RUN in this tree.
+ *   - Steps 1 and 2 as there (reads; kern.hakios.temp.* and the functions the CPU governor calls). Step 3 is this tree's
+ *     own since 17 November 2026 (until then nothing stopped a hot run here): a zone at tmu_stop degrees (110, as there)
+ *     three reads in a row ends the run through the system's own way down, reboot_kernel(RB_HALT): the file systems
+ *     synced and unmounted, then power off by PS_HOLD (herolte_ufs.c's starlte_halt_restart, which sweethalt=1 arms).
+ *     Without sweethalt=1 there is no power off in this tree, so the run ends as the USB console's "return" does
+ *     (loader_return(): the amplifiers, the camera and the modem quiesced, then a reset into recovery). No battery
+ *     temperature takes part (none is read in this tree).
+ *   - Each reading of the G3D's sensor is passed to the GPU's clock (starlte_gpu_thermal(), bsd/dev/starlte_gpu.c):
+ *     455 MHz at most from 85 C, 260 MHz from 95 C.
  *   - No writes at all: tmu_enable= and tmu_ungate= are not here. A block the boot left stopped reads nothing; a closed
  *     PCLK gate means the TMU's registers are never touched.
  *   - No battery temperature (no battery driver in this tree): kern.hakios.temp.battery_c is not published.
@@ -64,11 +70,14 @@
 #include <stdint.h>
 #include <kern/clock.h>
 #include <kern/thread_call.h>
+#include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_time.h>
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
+#include <IOKit/IOPlatformExpert.h>        /* PE_halt_restart (step 3) */
 #include <sys/param.h>
+#include <sys/reboot.h>
 #include <sys/sysctl.h>
 #include <sys/systm.h>
 #include <sys/hakios.exynos_soc.h>
@@ -76,6 +85,8 @@
 #include <sys/hakios.log.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+extern void starlte_gpu_thermal(int32_t g3d_mc);        /* bsd/dev/starlte_gpu.c: the GPU's clock down when its sensor is hot */
+extern void loader_return(void);                        /* bsd/dev/starlte_usbcon.c: the drivers quiesced, a reset into recovery */
 
 SYSCTL_DECL(_kern_hakios);
 
@@ -91,6 +102,10 @@ static const uint32_t block_pa[2] = { TMU_TOP_PA, TMU_SUB_PA };
 static const char *const block_name[2] = { "TMU_TOP", "TMU_SUB" };
 static struct tmu_cal cal[2][8];
 static uint32_t steps, poll_ms = 1000, log_seconds = 60;
+#define STRIKES                 3               /* reads in a row at or above tmu_stop before the run ends */
+static uint32_t stop_celsius = 110;
+static int strikes;
+static bool stopping;
 static uint64_t last_log;
 static volatile uint64_t reads;
 static int last_step;
@@ -240,6 +255,20 @@ hakios_exynos_tmu_zone_now_mc(unsigned zone)
 	return hottest;
 }
 
+/*
+ * Step 3's end of a run, on a thread of its own (the reading's thread call must not sleep in a shutdown): the system's
+ * own way down when this boot can power off (PE_halt_restart is starlte_halt_restart with sweethalt=1), which syncs and
+ * unmounts first; the console's "return" otherwise, and if the shutdown comes back.
+ */
+static void
+too_hot_thread(__unused void *arg, __unused wait_result_t wr)
+{
+	if (PE_halt_restart != NULL) {
+		(void)reboot_kernel(RB_HALT, NULL);
+	}
+	loader_return();
+}
+
 static void
 look(void)
 {
@@ -282,6 +311,7 @@ look(void)
 		last_zone_mc[z] = zone_mc[z] == INT32_MIN ? NOT_READ_MC : zone_mc[z];
 	}
 	last_zone_at = mach_absolute_time();
+	starlte_gpu_thermal(zone_mc[2] == INT32_MIN ? NOT_READ_MC : zone_mc[2]);       /* zone 2: the G3D */
 	if (steps >= 2) {
 		for (unsigned z = 0; z < TMU_NZONES; z++) {
 			temp_zone_mc[z] = zone_mc[z] == INT32_MIN ? NOT_READ_MC : zone_mc[z];
@@ -314,10 +344,34 @@ look(void)
 		if (zone_mc[z] != INT32_MIN && zone_mc[z] >= tmu_zones[z].android_cools_mc && !warned_cools[z]) {
 			warned_cools[z] = true;
 			text_of(one, sizeof(one), zone_mc[z]);
-			say("tmu: WARNING: %s at %s C: Android would be cooling it from %d C; only the CPU governor (cpufreq_gov=1) "
-			    "does anything here, and nothing stops the run\n", tmu_zones[z].name, one, tmu_zones[z].android_cools_mc / 1000);
+			say("tmu: WARNING: %s at %s C: Android would be cooling it from %d C; here the CPU governor (cpufreq_gov=1) slows "
+			    "the cores and the GPU's clock comes down from 85 C%s\n", tmu_zones[z].name, one,
+			    tmu_zones[z].android_cools_mc / 1000, steps >= 3 ? "" : " (and without tmu=3 nothing stops the run)");
 		} else if (zone_mc[z] != INT32_MIN && zone_mc[z] < tmu_zones[z].android_cools_mc - 5000) {
 			warned_cools[z] = false;
+		}
+	}
+
+	if (steps < 3 || stopping) {
+		return;
+	}
+	strikes = hottest >= (int32_t)stop_celsius * 1000 ? strikes + 1 : 0;
+	text_of(one, sizeof(one), hottest);
+	if (strikes > 0 && strikes < STRIKES) {
+		say("tmu: 3: %s %s C (limit %u): %d of %d reads in a row\n", tmu_zones[hot].name, one, stop_celsius, strikes, STRIKES);
+	}
+	if (strikes >= STRIKES) {
+		thread_t thread;
+
+		stopping = true;
+		say("\n--- tmu: TOO HOT: %s reads %s C (tmu_stop=%u, Android's hot trip %d), %d reads in a row ---\n--- tmu: %s ---\n"
+		    "--- tmu: sensors: %s ---\n", tmu_zones[hot].name, one, stop_celsius, TMU_ANDROID_HOT_MC / 1000, STRIKES,
+		    PE_halt_restart != NULL ? "shutting the system down and powering the phone off" :
+		    "no power off in this boot (sweethalt=0): ending the run as the console's return does, into recovery", list);
+		if (kernel_thread_start(too_hot_thread, NULL, &thread) == KERN_SUCCESS) {
+			thread_deallocate(thread);
+		} else {
+			loader_return();        /* (no thread to shut down from: the reset at least takes the heat away) */
 		}
 	}
 }
@@ -344,15 +398,19 @@ hakios_exynos_tmu_start(void)
 		steps = 0;
 		return;
 	}
-	steps = steps > 2 ? 2 : steps;
+	steps = steps > 3 ? 3 : steps;
+	if (PE_parse_boot_argn("tmu_stop", &value, sizeof(value)) && value >= 90 && value <= 125) {
+		stop_celsius = value;
+	}
+	value = 0;
 	if (PE_parse_boot_argn("tmu_poll", &value, sizeof(value)) && value >= 200 && value <= 60000) {
 		poll_ms = value;
 	}
 	if (PE_parse_boot_argn("tmu_log", &value, sizeof(value)) && value <= 86400) {
 		log_seconds = value;
 	}
-	say("tmu: steps 1-%u (1 reads, 2 publishes kern.hakios.temp); every %u ms; NOTHING STOPS A HOT RUN (no step 3 in this tree)\n",
-	    steps, poll_ms);
+	say("tmu: steps 1-%u (1 reads, 2 publishes kern.hakios.temp, 3 ends a run at %u C three reads in a row); every %u ms%s\n",
+	    steps, stop_celsius, poll_ms, steps >= 3 ? "" : "; NOTHING STOPS A HOT RUN without tmu=3");
 
 	say("tmu: 1: reading CMU_PERIS's TMU gate (%#x +%#x) and Q-channel (+%#x)\n", CMU_PERIS_PA, CMU_PERIS_TMU_GATE, CMU_PERIS_TMU_QCH);
 	cmu_va = ml_io_map(CMU_PERIS_PA, 0x4000);
