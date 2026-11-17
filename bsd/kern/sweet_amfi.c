@@ -499,12 +499,36 @@ static struct {
 } sweet_priv_logged[SWEET_PRIV_LOG_MAX];
 static int sweet_priv_logged_count;
 
+/*
+ * Privileges iOS grants by an entitlement of the process, with sweet_priv_ent=1 (off by default): cameracaptured has both
+ * (iOS 27.0.1's launchd job binary). PRIV_SYSTEM_OVERRIDE is asked by CMCapture's capture-session prewarm,
+ * system_override(..., SYS_OVERRIDE_FAST_JETSAM), whose result it does not look at; PRIV_PROC_CPUMON_OVERRIDE by the
+ * process's own CPU monitor setting ("denied attempt to escape CPU monitor"). Neither stopped the camera in the phone test of
+ * 17 November; granting them makes cameracaptured run as on an iPhone. NOT RUN ON A PHONE.
+ */
+static TUNABLE(uint32_t, sweet_priv_ent, "sweet_priv_ent", 0);
+static const struct {
+	int             priv;
+	const char      *entitlement;
+} sweet_priv_entitlements[] = {
+	{ PRIV_SYSTEM_OVERRIDE, "com.apple.private.kernel.system-override" },
+	{ PRIV_PROC_CPUMON_OVERRIDE, "com.apple.private.kernel.override-cpumon" },
+};
+
 static int
 sweet_sandbox_priv_grant(kauth_cred_t cred __unused, int priv)
 {
 	/* iOS 27 on STARLTE: SpringBoard sets kern.darkboot (PRIV_DARKBOOT) at start */
 	if (priv == PRIV_WORK_INTERVAL || priv == PRIV_DARKBOOT) {
 		return 0;
+	}
+	if (sweet_priv_ent) {
+		for (size_t i = 0; i < sizeof(sweet_priv_entitlements) / sizeof(sweet_priv_entitlements[0]); i++) {
+			if (sweet_priv_entitlements[i].priv == priv &&
+			    sweet_amfi_query_boolean_with_proc(current_proc(), sweet_priv_entitlements[i].entitlement) == KERN_SUCCESS) {
+				return 0;
+			}
+		}
 	}
 	char name[20];
 	proc_selfname(name, sizeof(name));
