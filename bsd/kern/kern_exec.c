@@ -3964,14 +3964,21 @@ spawn_coalitions_release_all(coalition_t coal[COALITION_NUM_TYPES])
 
 #if CONFIG_PERSONAS
 /*
- * STARLTE (Scion): boot-arg persona_lax=1 (off by default). This port makes no personas, so persona_lookup() fails for every
- * id and a posix_spawn into a persona ends in ESRCH before the program starts. A rootless package manager becomes root that
- * way: Sileo (iOS 13 and later) spawns apt-get and dpkg into persona 99 with POSIX_SPAWN_PERSONA_UID/GID 0, and on failure it
- * returns without a word, so its Confirm button does nothing. With persona_lax=1 a caller that carries
- * com.apple.private.persona-mgmt (the check stays) and names a persona that does not exist gets what it asked for without
- * the persona: the child is given the uid, gid and groups of the request; the per-uid process count moves as
- * persona_proc_adopt() moves it. The 16.5 tree does the same (scion-kernel drivers/core/hakios.exec.c). A persona that does
- * exist is handled as before.
+ * STARLTE (Scion): boot-arg persona_lax=1 (off by default). A rootless package manager becomes root by a posix_spawn into a
+ * persona: Sileo (iOS 13 and later) and Zebra spawn apt-get, dpkg, mv and the rest into persona 99 with
+ * POSIX_SPAWN_PERSONA_UID/GID 0, as the mobile user. Stock XNU refuses that in two places, and Sileo, on failure, returns
+ * without a word (its queue stays at "Queued" for ever). With persona_lax=1 a caller that carries
+ * com.apple.private.persona-mgmt (that check stays) gets what it asked for in both:
+ * - a persona that does not exist (until usermanagerd's boot task worked on this port it made none, and persona_lookup()
+ *   failed for every id: ESRCH): the child is given the uid, gid and groups of the request without the persona; the
+ *   per-uid process count moves as persona_proc_adopt() moves it. The 16.5 tree does the same (scion-kernel
+ *   drivers/core/hakios.exec.c);
+ * - a persona that exists (usermanagerd now makes 99 "System", 100, 199, 200 and 1000 at every boot, from
+ *   /private/var/keybags/persona.kb; seen on phone 1, 17 Nov 2026): the stock rule that a caller that is not root may not
+ *   ask for uid or gid 0 is waived, and the child adopts the persona with the uid and gid of the request. This was the
+ *   EPERM every root spawn of Sileo got, with no line from persona_lax, once the personas were there.
+ * Both say so on the console (the second for its first 32 spawns only: a package manager makes many). Without the
+ * boot-arg nothing here changes.
  */
 static int spawn_persona_lax_state = -1;
 
@@ -4023,7 +4030,21 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
 	// non-root process should not be allowed to set persona with uid/gid 0
 	if (!kauth_cred_issuser(mycred) &&
 	    (px_persona->pspi_uid == 0 || px_persona->pspi_gid == 0)) {
-		error = EPERM;
+		if (spawn_persona_lax()) {
+			/* persona_lax=1 (see above): an entitled caller may ask for uid/gid 0 of an existing persona */
+			static int lax_said = 32;
+
+			if (lax_said > 0) {
+				lax_said--;
+				printf("persona_lax: %s[%d] (uid %d) spawns into persona %u as uid %d gid %d: allowed\n",
+				    proc_best_name(current_proc()), proc_getpid(current_proc()), kauth_cred_getuid(mycred),
+				    px_persona->pspi_id,
+				    (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_UID) ? (int)px_persona->pspi_uid : -1,
+				    (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_GID) ? (int)px_persona->pspi_gid : -1);
+			}
+		} else {
+			error = EPERM;
+		}
 	}
 
 	persona_put(persona);
