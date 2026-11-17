@@ -1288,6 +1288,110 @@ sweet_sample_task(const char *name, int pid, task_t task)
 	task_unlock(task);
 }
 
+
+uint64_t sweet_sample_slide(task_t task, uint64_t *mh);
+
+uint64_t
+sweet_sample_slide(task_t task, uint64_t *mh)
+{
+	uint64_t slide = 0;
+	vm_shared_region_t sr = vm_shared_region_get(task);
+	if (sr != NULL) {
+		slide = sr->sr_slide;
+		vm_shared_region_deallocate(sr);
+	}
+	*mh = task->mach_header_vm_address;
+	return slide;
+}
+
+/*
+ * The burst sampler (bsd/dev/sweet_sample.c, boot-arg smpburst=NAME): one pass over a task's threads into a table that
+ * counts each (thread, running or not, user stack) seen. A thread that is not runnable sits in the kernel, so its saved
+ * user registers are exact: where it waits, and for whom. A runnable thread's are stale and are not recorded: it is
+ * counted as running (on a CPU or waiting for one); where its CPU time goes is the profiler's question (SWEET PROF).
+ */
+struct sweet_burst_rec {
+	uint64_t tid, key, pc, lr, bt[10];
+	uint32_t count, running, nbt, pad;
+};
+unsigned sweet_sample_burst(task_t task, struct sweet_burst_rec *tab, unsigned slots, uint64_t *tids, char (*names)[24],
+    unsigned max_threads);
+
+unsigned
+sweet_sample_burst(task_t task, struct sweet_burst_rec *tab, unsigned slots, uint64_t *tids, char (*names)[24],
+    unsigned max_threads)
+{
+	extern void bsd_getthreadname(void *uth, char *buffer);
+	vm_map_t map = get_task_map(task);
+	thread_t thread;
+	unsigned lost = 0;
+
+	task_lock(task);
+	queue_iterate(&task->threads, thread, thread_t, task_threads) {
+		struct sweet_burst_rec r;
+		bzero(&r, sizeof(r));
+		r.tid = thread->thread_id;
+		r.running = (thread->state & TH_RUN) != 0;
+		if (!r.running) {
+			arm_saved_state_t *ss = find_user_regs(thread);
+			if (ss == NULL || !is_saved_state64(ss)) {
+				continue;
+			}
+			uint64_t fp = get_saved_state_fp(ss);
+			r.pc = get_saved_state_pc(ss);
+			r.lr = get_saved_state_lr(ss);
+			for (int i = 0; i < 10 && fp != 0 && (fp & 7) == 0; i++) {
+				uint64_t frame[2];
+				if (vm_map_read_user(map, fp, frame, sizeof(frame)) != KERN_SUCCESS) {
+					break;
+				}
+				r.bt[r.nbt++] = frame[1];
+				if (frame[0] <= fp) {
+					break;
+				}
+				fp = frame[0];
+			}
+		}
+		uint64_t key = r.tid * 0x9e3779b97f4a7c15ull + r.running + r.pc * 31 + r.lr * 131;
+		for (unsigned i = 0; i < r.nbt; i++) {
+			key = key * 0x100000001b3ull + r.bt[i];
+		}
+		if (key == 0) {
+			key = 1;
+		}
+		r.key = key;
+		unsigned at = (unsigned)(key % slots), tries = 0;
+		for (; tries < 16; tries++, at = (at + 1) % slots) {
+			if (tab[at].key == key) {
+				tab[at].count++;
+				break;
+			}
+			if (tab[at].key == 0) {
+				tab[at] = r;
+				tab[at].count = 1;
+				break;
+			}
+		}
+		if (tries == 16) {
+			lost++;
+		}
+		for (unsigned i = 0; i < max_threads; i++) {
+			if (tids[i] == r.tid) {
+				break;
+			}
+			if (tids[i] == 0) {
+				char tn[64] = "";
+				tids[i] = r.tid;
+				bsd_getthreadname(get_bsdthread_info(thread), tn);
+				strlcpy(names[i], tn, 24);
+				break;
+			}
+		}
+	}
+	task_unlock(task);
+	return lost;
+}
+
 #endif /* ARM64_BOARD_CONFIG_SWEET || ARM64_BOARD_CONFIG_A5XELTE */
 
 kern_return_t

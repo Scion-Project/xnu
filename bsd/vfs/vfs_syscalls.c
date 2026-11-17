@@ -1228,6 +1228,18 @@ mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
 			goto out1;
 		}
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		/*
+		 * The built-in HFS sets MNT_CPROTECT itself (bsd/sweet_hfs/sweet_hfs_pclass.c, boot-arg
+		 * sweetspeed&0x200000) and nothing in user space was told: an update mount keeps it.
+		 */
+		if (mp->mnt_flag & MNT_CPROTECT) {
+			extern int sweet_hfs_pclass_mntflag(void);
+			if (sweet_hfs_pclass_mntflag()) {
+				flags |= MNT_CPROTECT;
+			}
+		}
+#endif
 		/*
 		 * If content protection is enabled, update mounts are not
 		 * allowed to turn it off.
