@@ -236,6 +236,81 @@ extern "C" int herolte_gpu_present_map(uint32_t id, const uint64_t *pages, unsig
 extern "C" bool herolte_gpu_present_draw(int s, uint32_t off, uint32_t stride, uint32_t w, uint32_t h);
 #define SWEET_FB_GPU_MAX_PAGES 3072     /* one 12 MiB GPU slot (starlte_gpu.c): 1242x2208 x 5120 B */
 #endif
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/*
+ * boot-arg sweetfb_dpp=1 (off by default; kern.hakios.sweetfb_dpp=0/1 while the system runs, the USB console's "sysctl"):
+ * the present by the DPU's scaler. NOT run on a phone. docs/ios27/PRESENT.md (scion-kernel) has the design.
+ *
+ * Today (sweetfb_scale=1 sweetfb_gpu=1) a frame ends with a GPU job that scales the 828 x 1702 swap surface to the
+ * panel's 1440 x 2960 in the boot framebuffer at 0xCC000000, which the DECON reads at every refresh (and which the job
+ * draws while it is read: it can tear). With sweetfb_dpp=1 the job copies the frame one pixel for one into one of three
+ * buffers of the frame's own size in the display's carve-out (bsd/dev/hakios.exynos_dpu.c, hakios_scanout_memory():
+ * physically contiguous, below 4 GB, outside the VM), and the DECON's window reads it through VGF0, whose DPP scales
+ * it to the panel (hakios_scanout_attach(2, ...), as the 16.5 kernel's fb_dpp=1 does). The job writes 5.7 MB a frame
+ * instead of 17.0 and shades 1.41 million pixels instead of 4.26; the DECON reads 5.7 MB a refresh instead of 17.0.
+ *
+ * A buffer is drawn only when it is neither the one the DECON shows nor the one a flip waits to show; a flip (the
+ * IDMA's base address and a shadow update) is asked for only once the one before it has been taken at a refresh
+ * (hakios_scanout_latched()), so nothing is drawn into what is read, and frames reach the panel at most once a refresh.
+ *
+ * Every way out goes back to today's present (the scaled copy into the boot framebuffer, which the DECON reads again on
+ * the boot loader's channel: hakios_scanout_detach()), and says why in the framebuffer's ten-second line:
+ *   - the DECON not as expected, the carve-out the VM's, the buffers not mapped for the GPU, the scaler refused or
+ *     reporting an error (the DPU driver's own lines say which): given up for the boot (until the sysctl asks again);
+ *   - the copy job failed, or a flip not taken in 100 ms: given up likewise;
+ *   - a frame the DPP path cannot take (more than one layer, a part of the display, another size or format): left at
+ *     that frame, the shown buffer first drawn scaled into the boot framebuffer so that the frame drawn over it is
+ *     whole; asked for again after SWEET_FB_DPP_QUIET frames it can take, SWEET_FB_DPP_RETRIES times in a boot;
+ *   - the display off (RequestPowerChange 0): left the same way before the fade, asked for again at the next frame;
+ *   - kern.hakios.sweetfb_dpp=0: left the same way at the next tick.
+ * While the DPP shows the frames, what is written into the boot framebuffer is not seen: the kernel's text console
+ * (sweetfb_noconsole=1 is how it is anyway with the GUI) and a panic's screen. The USB console's "shot" reads the
+ * buffer VGF0 shows (hakios_fb_scanned(), 828 x 1702, unscaled).
+ */
+extern "C" int starlte_gpu_present_scan_map(uint64_t pa, uint64_t bytes);
+extern "C" bool starlte_gpu_present_copy(int s, uint32_t off, uint32_t stride, uint32_t w, uint32_t h, uint64_t dst_off,
+    uint32_t dst_stride);
+extern "C" bool starlte_gpu_present_from_scan(uint64_t src_off, uint32_t stride, uint32_t w, uint32_t h);
+extern "C" uint32_t sweet_fb_dpp_want, sweet_fb_dpp_rearm;     /* bsd/dev/starlte_gpu.c (the sysctl) */
+extern "C" int hakios_scanout_probe(uint64_t fb_phys, uint32_t width, uint32_t height, uint32_t rowbytes);
+extern "C" int hakios_scanout_memory(uint64_t bytes, unsigned count, uint64_t *phys);
+extern "C" int hakios_scanout_attach(int mode, const uint64_t *phys, unsigned count, uint32_t width, uint32_t height,
+    uint32_t rowbytes, unsigned shown);
+extern "C" int hakios_scanout_flip(unsigned index);
+extern "C" int hakios_scanout_latched(void);
+extern "C" void hakios_scanout_detach(const char *why);
+extern "C" uint32_t hakios_scanout_refreshes(void);
+extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+#define SWEET_FB_DPP_BUFFERS    3
+#define SWEET_FB_DPP_STUCK_MS   100     /* a flip not taken by then: given up */
+#define SWEET_FB_DPP_QUIET      120     /* frames it can take before it is asked for again after one it could not */
+#define SWEET_FB_DPP_RETRIES    16
+/* how dppLeave() leaves: after a frame it could not take (asked for again after SWEET_FB_DPP_QUIET frames it can, at
+ * most SWEET_FB_DPP_RETRIES times a boot), for the display off (again at the next frame), switched off by the sysctl
+ * (nothing counted), or given up (until kern.hakios.sweetfb_dpp=1 is written) */
+enum { SWEET_FB_DPP_LEAVE_FRAME, SWEET_FB_DPP_LEAVE_AGAIN, SWEET_FB_DPP_LEAVE_OFF, SWEET_FB_DPP_LEAVE_GIVE_UP };
+static struct {
+	bool tried, ready;              /* set up once: the DECON probed, the buffers had and mapped for the GPU */
+	bool attached;                  /* VGF0 scales the buffers to the panel */
+	bool given_up;                  /* until kern.hakios.sweetfb_dpp=1 is written */
+	bool again_now;                 /* left for the display off: asked for again at the next frame */
+	const char *why;                /* why it was last left or given up */
+	uint32_t rearm_seen;
+	uint32_t quiet, retries;        /* after a frame it could not take: frames it can take since, re-attaches left */
+	uint64_t phys[SWEET_FB_DPP_BUFFERS], step;
+	uint32_t w, h, rowbytes;
+	vm_offset_t kva;                /* the buffers for the CPU (write-combined): the console's shot, the fallback */
+	int front, pending;             /* the buffer the DECON shows, the one a flip waits to show (-1: none) */
+	int path;                       /* the frame just presented: 0 the CPU, 1 the GPU's scaled copy, 2 the DPP */
+	uint32_t last_swap;             /* the swap id of the last SwapEnd */
+	/* the ten-second line's counters */
+	uint32_t by_dpp, by_gpu, by_cpu, flips, waited, left, attaches, refreshes_at;
+	uint64_t wait_abs, wait_max;
+	uint32_t sw_calls, sw_last, sw_before, sw_other, sw_logged;
+	/* the swap surfaces (layer 0): which ids came in the window, and how often a swap named the one before's again */
+	uint32_t sf_ids[4], sf_count, sf_more, sf_same, sf_prev;
+} sweet_fb_dp;                                  /* (front, pending -1 and quiet SWEET_FB_DPP_QUIET from start()) */
+#endif
 
 enum {
 	kSweetFBGetLayerDefaultSurface  = 3,
@@ -359,6 +434,12 @@ public:
 	    int32_t w, int32_t h);
 #if defined(ARM64_BOARD_CONFIG_HEROLTE)
 	bool gpuPresent(SweetSurface *s, int32_t sx, int32_t sy, int32_t w, int32_t h);
+#endif
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	bool dppWanted(void);
+	bool dppSetup(void);
+	bool dppPresent(int slot, uint32_t off, uint32_t stride, uint32_t w, uint32_t h);
+	void dppLeave(const char *why, bool restore, int how);
 #endif
 };
 
@@ -567,6 +648,19 @@ AppleCLCD::start(IOService *provider)
 	PE_parse_boot_argn("sweetfb_relbuf", &sweet_fb_relbuf, sizeof(sweet_fb_relbuf));
 	PE_parse_boot_argn("sweetfb_prof", &sweet_fb_prof, sizeof(sweet_fb_prof));
 	PE_parse_boot_argn("sweetfb_trace", &sweet_fb_trace, sizeof(sweet_fb_trace));
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	{
+		uint32_t dpp = 0;
+		if (PE_parse_boot_argn("sweetfb_dpp", &dpp, sizeof(dpp)) && dpp == 1) {
+			sweet_fb_dpp_want = 1;
+			IOLog("A5XELTE FB dpp: sweetfb_dpp=1: frames of %ux%u to be scaled by the DPU's VGF0 (set up at the first "
+			    "frame the GPU presents; kern.hakios.sweetfb_dpp=0 goes back)\n", fLogicalW, fLogicalH);
+		}
+		sweet_fb_dp.rearm_seen = sweet_fb_dpp_rearm;
+		sweet_fb_dp.front = sweet_fb_dp.pending = -1;
+		sweet_fb_dp.quiet = SWEET_FB_DPP_QUIET;
+	}
+#endif
 	if (sweet_fb_relbuf) {
 		setProperty("SupportRelbufInfoCb", 1ULL, 32);
 		IOLog("SWEET FB: sweetfb_relbuf=1: SupportRelbufInfoCb published, relbuf info sent per swap\n");
@@ -596,6 +690,21 @@ hakios_fb_scanned(uintptr_t *base, uint32_t *width, uint32_t *height, uint32_t *
 	if (sweet_fb_scan_base == 0) {
 		return 0;
 	}
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* sweetfb_dpp: the buffer VGF0 reads (the one a flip waited for, once the DECON has taken it); read unlocked */
+	if (sweet_fb_dp.attached && sweet_fb_dp.kva != 0) {
+		int pending = sweet_fb_dp.pending, front = sweet_fb_dp.front;
+		int shown = pending >= 0 && hakios_scanout_latched() ? pending : front;
+		if (shown >= 0 && shown < SWEET_FB_DPP_BUFFERS) {
+			*base = sweet_fb_dp.kva + (uintptr_t)(sweet_fb_dp.step * (uint64_t)shown);
+			*width = sweet_fb_dp.w;
+			*height = sweet_fb_dp.h;
+			*rowbytes = sweet_fb_dp.rowbytes;
+			*index = (unsigned)shown;
+			return 2;
+		}
+	}
+#endif
 	*base = sweet_fb_scan_base;
 	*width = sweet_fb_scan_width;
 	*height = sweet_fb_scan_height;
@@ -634,6 +743,12 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 			fb->fFadeStep = step + 1;
 		}
 		IOLockUnlock(fb->fLock);
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		if (step == 0 && sweet_fb_dp.attached) {
+			/* the fade is drawn into the boot framebuffer: the DECON back on it first, with the picture shown */
+			fb->dppLeave("the display off", true, SWEET_FB_DPP_LEAVE_AGAIN);
+		}
+#endif
 		if (step <= 6) {
 			for (uint32_t y = 0; y < fb->fHeight; y++) {
 				volatile uint32_t *row = (volatile uint32_t *)(fb->fPixels + (uint64_t)y * fb->fRowBytes);
@@ -702,6 +817,19 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 	}
 	IOLockUnlock(fb->fLock);
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
+	{
+		/* kern.hakios.sweetfb_dpp: off at the next tick; a write of 1 lets a DPP that gave itself up try again */
+		uint32_t rearm = __atomic_load_n(&sweet_fb_dpp_rearm, __ATOMIC_ACQUIRE);
+		if (rearm != sweet_fb_dp.rearm_seen) {
+			sweet_fb_dp.rearm_seen = rearm;
+			sweet_fb_dp.given_up = false;
+			sweet_fb_dp.quiet = SWEET_FB_DPP_QUIET;
+			sweet_fb_dp.retries = 0;
+		}
+		if (sweet_fb_dp.attached && __atomic_load_n(&sweet_fb_dpp_want, __ATOMIC_ACQUIRE) == 0) {
+			fb->dppLeave("switched off (kern.hakios.sweetfb_dpp=0)", true, SWEET_FB_DPP_LEAVE_OFF);
+		}
+	}
 	if (rec != NULL) {
 		sweet_fb_trace_event('F', sweet_fb_swap_id(rec));
 	}
@@ -720,8 +848,22 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
 		uint64_t before = fb->fPerfLog ? mach_absolute_time() : 0;
 #endif
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		sweet_fb_dp.path = 0;
+#endif
 		uint64_t bytes = fb->present(rec);
 		sweet_fb_frames_shown++;
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		if (bytes != 0) {
+			if (sweet_fb_dp.path == 2) {
+				sweet_fb_dp.by_dpp++;
+			} else if (sweet_fb_dp.path == 1) {
+				sweet_fb_dp.by_gpu++;
+			} else {
+				sweet_fb_dp.by_cpu++;
+			}
+		}
+#endif
 		sweet_fb_trace_event('P', 0);
 		if (sweet_fb_relbuf) {
 			fb->relbuf(sweet_fb_swap_id(rec));
@@ -784,6 +926,35 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 				IOLog("A5XELTE FB gaps: 1:%u 2:%u 3:%u 4-6:%u 7+:%u\n", sweet_fb_gaps[0], sweet_fb_gaps[1], sweet_fb_gaps[2],
 				    sweet_fb_gaps[3], sweet_fb_gaps[4]);
 			}
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+			if (sweet_fb_dpp_want || sweet_fb_dp.tried) {
+				/* sweetfb_dpp: which way the frames went, the flips, the waits for the flip before, and SwapWait */
+				uint32_t refreshes = hakios_scanout_refreshes();
+				uint64_t wait_ns = 0, wait_max_ns = 0;
+				absolutetime_to_nanoseconds(sweet_fb_dp.wait_abs, &wait_ns);
+				absolutetime_to_nanoseconds(sweet_fb_dp.wait_max, &wait_max_ns);
+				IOLog("A5XELTE FB dpp: %s%s%s; frames by the DPP %u, by the GPU's scaled copy %u, by the CPU %u; flips %u, "
+				    "%u found the flip before not yet taken (waited avg %llu us, max %llu us); DECON refreshes %u; left %u, "
+				    "attached %u; SwapWait %u (for the last swap %u, the one before %u, other %u); swap surfaces %u (%u %u %u %u, "
+				    "%u more), the same as the swap before's %u\n",
+				    sweet_fb_dp.attached ? "on, VGF0 scales" : sweet_fb_dp.given_up ? "given up: " : "off",
+				    !sweet_fb_dp.attached && sweet_fb_dp.why != NULL && !sweet_fb_dp.given_up ? ", last left: " : "",
+				    !sweet_fb_dp.attached && sweet_fb_dp.why != NULL ? sweet_fb_dp.why : "",
+				    sweet_fb_dp.by_dpp, sweet_fb_dp.by_gpu, sweet_fb_dp.by_cpu, sweet_fb_dp.flips, sweet_fb_dp.waited,
+				    sweet_fb_dp.waited ? wait_ns / sweet_fb_dp.waited / 1000 : 0, wait_max_ns / 1000,
+				    refreshes - sweet_fb_dp.refreshes_at, sweet_fb_dp.left, sweet_fb_dp.attaches, sweet_fb_dp.sw_calls,
+				    sweet_fb_dp.sw_last, sweet_fb_dp.sw_before, sweet_fb_dp.sw_other, sweet_fb_dp.sf_count,
+				    sweet_fb_dp.sf_ids[0], sweet_fb_dp.sf_ids[1], sweet_fb_dp.sf_ids[2], sweet_fb_dp.sf_ids[3], sweet_fb_dp.sf_more,
+				    sweet_fb_dp.sf_same);
+				sweet_fb_dp.refreshes_at = refreshes;
+				bzero(sweet_fb_dp.sf_ids, sizeof(sweet_fb_dp.sf_ids));
+				sweet_fb_dp.sf_count = sweet_fb_dp.sf_more = sweet_fb_dp.sf_same = 0;
+				sweet_fb_dp.by_dpp = sweet_fb_dp.by_gpu = sweet_fb_dp.by_cpu = sweet_fb_dp.flips = sweet_fb_dp.waited = 0;
+				sweet_fb_dp.left = sweet_fb_dp.attaches = 0;
+				sweet_fb_dp.wait_abs = sweet_fb_dp.wait_max = 0;
+				sweet_fb_dp.sw_calls = sweet_fb_dp.sw_last = sweet_fb_dp.sw_before = sweet_fb_dp.sw_other = 0;
+			}
+#endif
 			if (sweet_fb_prof) {
 				uint64_t v[9] = { sweet_fb_pf.held_ns, sweet_fb_pf.held_max, sweet_fb_pf.slept_ns, sweet_fb_pf.slept_max,
 					          sweet_fb_pf.present_ns, sweet_fb_pf.shown_ns, sweet_fb_pf.shown_max, sweet_fb_pf.period_ns,
@@ -1050,6 +1221,30 @@ AppleCLCD::swap(const uint8_t *rec, uint32_t size)
 	uint64_t seq = 0;
 #endif
 	sweet_fb_trace_event('R', sweet_fb_swap_id(rec));
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	__atomic_store_n(&sweet_fb_dp.last_swap, sweet_fb_swap_id(rec), __ATOMIC_RELAXED);
+	if (sweet_fb_dpp_want || sweet_fb_dp.tried) {
+		/* (one window server: its swaps do not race each other) */
+		const uint32_t sh = get32(rec, 0x98) != 0 && get32(rec, 0x50) == 0 ? 0x48 : 0;
+		uint32_t id0 = (get32(rec, 0x104 + sh) & 1u) ? get32(rec, 0x54 + sh) : 0;
+		if (id0 != 0) {
+			unsigned k;
+			for (k = 0; k < sweet_fb_dp.sf_count && sweet_fb_dp.sf_ids[k] != id0; k++) {
+			}
+			if (k == sweet_fb_dp.sf_count) {
+				if (k < 4) {
+					sweet_fb_dp.sf_ids[sweet_fb_dp.sf_count++] = id0;
+				} else {
+					sweet_fb_dp.sf_more++;
+				}
+			}
+			if (id0 == sweet_fb_dp.sf_prev) {
+				sweet_fb_dp.sf_same++;
+			}
+			sweet_fb_dp.sf_prev = id0;
+		}
+	}
+#endif
 	IOLockLock(fLock);
 	uint32_t replaced = fDirty ? sweet_fb_swap_id(fPending) : 0;
 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_MAX);
@@ -1294,6 +1489,17 @@ AppleCLCD::present(const uint8_t *rec)
 	const uint32_t sh = get32(rec, 0x98) != 0 && get32(rec, 0x50) == 0 ? 0x48 : 0;
 	uint32_t mask = get32(rec, 0x104 + sh);
 	uint64_t copied = 0;
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (sweet_fb_dp.attached) {
+		/* sweetfb_dpp takes a frame of one layer, layer 0: any other is drawn into the boot framebuffer as before */
+		for (uint32_t layer = 1; layer < SWEET_FB_LAYERS; layer++) {
+			if ((mask & (1u << layer)) && get32(rec, 0x54 + sh + 4 * layer) != 0) {
+				dppLeave("a frame of more than one layer", true, SWEET_FB_DPP_LEAVE_FRAME);
+				break;
+			}
+		}
+	}
+#endif
 
 
 	if (!fConsolePaused) {
@@ -1490,6 +1696,12 @@ AppleCLCD::present(const uint8_t *rec)
 		    s->memory == NULL || last > s->memory->getLength()) {
 			src = 0;
 		}
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		if (sweet_fb_dp.attached && !(src != 0 && bpe == 4 && fGpu && dx == 0 && dy == 0 &&
+		    w == (int32_t)fLogicalW && h == (int32_t)fLogicalH)) {
+			dppLeave("a frame of a part of the display, or of another size or format", true, SWEET_FB_DPP_LEAVE_FRAME);
+		}
+#endif
 #if defined(ARM64_BOARD_CONFIG_HEROLTE)
 		if (src != 0 && bpe == 4 && fGpu && dx == 0 && dy == 0 &&
 		    w == (int32_t)fLogicalW && h == (int32_t)fLogicalH && gpuPresent(s, sx, sy, w, h)) {
@@ -1602,6 +1814,10 @@ AppleCLCD::gpuPresent(SweetSurface *s, int32_t sx, int32_t sy, int32_t w, int32_
 	if (failures >= 8 || s->memory == NULL) {
 		return false;
 	}
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* (before the surface's slot is looked up: the DPP's buffers take the last two slots' tables when first set up) */
+	bool dpp = dppWanted() && dppSetup();
+#endif
 	IOByteCount len = 0;
 	addr64_t pa0 = s->memory->getPhysicalSegment(0, &len, kIOMemoryMapperNone);
 	int slot = pa0 ? herolte_gpu_present_slot(s->id, pa0 & ~0xfffULL) : -1;
@@ -1663,12 +1879,220 @@ AppleCLCD::gpuPresent(SweetSurface *s, int32_t sx, int32_t sy, int32_t w, int32_
 		}
 		__asm__ volatile ("dsb sy" ::: "memory");
 	}
-	if (!herolte_gpu_present_draw(slot, (uint32_t)off, s->bytesPerRow, (uint32_t)w, (uint32_t)h)) {
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (dpp && dppPresent(slot, (uint32_t)off, s->bytesPerRow, (uint32_t)w, (uint32_t)h)) {
+		sweet_fb_dp.path = 2;
+		return true;
+	}
+#endif
+	bool drawn = herolte_gpu_present_draw(slot, (uint32_t)off, s->bytesPerRow, (uint32_t)w, (uint32_t)h);
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (sweet_fb_dp.attached) {
+		/* the DPP could not take this frame (dppPresent() says why): it is in the boot framebuffer now, shown from the
+		 * next refresh on; if it is not, the shown buffer is drawn there first and the CPU copies the frame over it */
+		dppLeave(sweet_fb_dp.why != NULL ? sweet_fb_dp.why : "the frame could not be taken", !drawn,
+		    sweet_fb_dp.given_up ? SWEET_FB_DPP_LEAVE_GIVE_UP : SWEET_FB_DPP_LEAVE_FRAME);
+	}
+	if (drawn) {
+		sweet_fb_dp.path = 1;
+	}
+#endif
+	if (!drawn) {
 		IOLog("SWEET FB: GPU present: %dx%d stride %u not drawn (%u of 8)\n", w, h, s->bytesPerRow, ++failures);
 		return false;
 	}
 	return true;
 }
+
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/* sweetfb_dpp asked for, not given up, and (after a frame it could not take) enough frames it can take since */
+bool
+AppleCLCD::dppWanted(void)
+{
+	if (__atomic_load_n(&sweet_fb_dpp_want, __ATOMIC_ACQUIRE) == 0 || sweet_fb_dp.given_up) {
+		return false;
+	}
+	if (sweet_fb_dp.attached || sweet_fb_dp.again_now) {
+		return true;
+	}
+	if (sweet_fb_dp.quiet < SWEET_FB_DPP_QUIET) {
+		sweet_fb_dp.quiet++;
+		return false;
+	}
+	return true;
+}
+
+/*
+ * Once: the DECON probed (as expected: one window on, reading the boot framebuffer at 1440 x 2960 in command mode),
+ * three buffers of the frame's size from the display's carve-out, mapped for the GPU (AS0) and for the CPU. False and
+ * given up if any of it is not had; the DPU driver's lines say why.
+ */
+bool
+AppleCLCD::dppSetup(void)
+{
+	if (sweet_fb_dp.ready) {
+		return true;
+	}
+	if (sweet_fb_dp.tried) {
+		return false;
+	}
+	sweet_fb_dp.tried = true;
+	sweet_fb_dp.quiet = SWEET_FB_DPP_QUIET;
+	sweet_fb_dp.w = fLogicalW;
+	sweet_fb_dp.h = fLogicalH;
+	sweet_fb_dp.rowbytes = (fLogicalW * 4 + 63) & ~63u;
+	uint64_t bytes = (uint64_t)sweet_fb_dp.rowbytes * fLogicalH;
+	sweet_fb_dp.step = (bytes + 0xFFFFULL) & ~0xFFFFULL;   /* as hakios_scanout_memory() lays them out */
+	const char *why = NULL;
+	if (hakios_scanout_probe(fPhys, fWidth, fHeight, fRowBytes) != 0) {
+		why = "the DECON is not as expected (exynos_dpu's lines)";
+	} else if (hakios_scanout_memory(bytes, SWEET_FB_DPP_BUFFERS, sweet_fb_dp.phys) != 0) {
+		why = "no buffers in the display's carve-out (exynos_dpu's lines)";
+	} else if (sweet_fb_dp.phys[1] - sweet_fb_dp.phys[0] != sweet_fb_dp.step ||
+	    sweet_fb_dp.phys[2] - sweet_fb_dp.phys[1] != sweet_fb_dp.step) {
+		why = "the buffers are not laid out one step apart";
+	} else if (starlte_gpu_present_scan_map(sweet_fb_dp.phys[0], 2 * sweet_fb_dp.step + bytes) != 0) {
+		why = "the buffers not mapped for the GPU";
+	} else if ((sweet_fb_dp.kva = ml_io_map_wcomb((vm_offset_t)sweet_fb_dp.phys[0],
+	    (vm_size_t)(2 * sweet_fb_dp.step + bytes))) == 0) {
+		why = "the buffers not mapped for the CPU";
+	}
+	if (why != NULL) {
+		sweet_fb_dp.given_up = true;
+		sweet_fb_dp.why = why;
+		IOLog("A5XELTE FB dpp: not set up: %s; frames go as before\n", why);
+		return false;
+	}
+	sweet_fb_dp.ready = true;
+	sweet_fb_dp.refreshes_at = hakios_scanout_refreshes();
+	IOLog("A5XELTE FB dpp: 3 buffers of %ux%u, %u bytes a row, at %#llx %#llx %#llx; the first frame copied into one is "
+	    "handed to VGF0\n", sweet_fb_dp.w, sweet_fb_dp.h, sweet_fb_dp.rowbytes, sweet_fb_dp.phys[0], sweet_fb_dp.phys[1],
+	    sweet_fb_dp.phys[2]);
+	return true;
+}
+
+/*
+ * The frame (slot, offset, stride, w x h: the whole swap surface) copied into the buffer that is neither shown nor
+ * waiting to be, and flipped to once the flip before has been taken. The first time, the window is handed to VGF0.
+ * False: not taken (sweet_fb_dp.why says why; given up when it is the copy, the scaler or a stuck flip), and the
+ * caller draws the frame as before.
+ */
+bool
+AppleCLCD::dppPresent(int slot, uint32_t off, uint32_t stride, uint32_t w, uint32_t h)
+{
+	if (w != sweet_fb_dp.w || h != sweet_fb_dp.h) {
+		sweet_fb_dp.why = "a frame of another size";
+		return false;
+	}
+	if (sweet_fb_dp.attached && sweet_fb_dp.pending >= 0 && hakios_scanout_latched()) {
+		sweet_fb_dp.front = sweet_fb_dp.pending;
+		sweet_fb_dp.pending = -1;
+	}
+	int t = 0;
+	while (t == sweet_fb_dp.front || t == sweet_fb_dp.pending) {
+		t++;
+	}
+	if (!starlte_gpu_present_copy(slot, off, stride, w, h, sweet_fb_dp.step * (uint64_t)t, sweet_fb_dp.rowbytes)) {
+		sweet_fb_dp.given_up = true;
+		sweet_fb_dp.why = "the copy job failed (STARLTE GPU PRESENT's line)";
+		return false;
+	}
+	if (!sweet_fb_dp.attached) {
+		if (hakios_scanout_attach(2, sweet_fb_dp.phys, SWEET_FB_DPP_BUFFERS, w, h, sweet_fb_dp.rowbytes, (unsigned)t) != 0) {
+			sweet_fb_dp.given_up = true;
+			sweet_fb_dp.why = "VGF0's scaler not taken (exynos_dpu's lines)";
+			return false;
+		}
+		sweet_fb_dp.attached = true;
+		sweet_fb_dp.again_now = false;
+		sweet_fb_dp.front = t;
+		sweet_fb_dp.pending = -1;
+		sweet_fb_dp.attaches++;
+		IOLog("A5XELTE FB dpp: VGF0 scales %ux%u to the panel from buffer %d on\n", w, h, t);
+		return true;
+	}
+	if (sweet_fb_dp.pending >= 0) {
+		/* the frame before is not on the panel yet: this one waits for its refresh (it never replaces it unseen) */
+		uint64_t began = mach_absolute_time();
+		for (unsigned ms = 0; !hakios_scanout_latched(); ms++) {
+			if (ms >= SWEET_FB_DPP_STUCK_MS) {
+				sweet_fb_dp.given_up = true;
+				sweet_fb_dp.why = "a flip not taken in 100 ms";
+				return false;
+			}
+			IOSleep(1);
+		}
+		uint64_t waited = mach_absolute_time() - began;
+		sweet_fb_dp.waited++;
+		sweet_fb_dp.wait_abs += waited;
+		if (waited > sweet_fb_dp.wait_max) {
+			sweet_fb_dp.wait_max = waited;
+		}
+		sweet_fb_dp.front = sweet_fb_dp.pending;
+		sweet_fb_dp.pending = -1;
+	}
+	if (hakios_scanout_flip((unsigned)t) != 0) {
+		sweet_fb_dp.given_up = true;
+		sweet_fb_dp.why = "the flip refused";
+		return false;
+	}
+	sweet_fb_dp.pending = t;
+	sweet_fb_dp.flips++;
+	return true;
+}
+
+/*
+ * Back to today's present: the DECON reads the boot framebuffer again on the boot loader's channel from the next
+ * refresh on. `restore`: the picture VGF0 shows drawn scaled into the boot framebuffer first (the GPU's present of
+ * that buffer, or the CPU's scaled copy if the GPU cannot), so that what the DECON reads there is the frame on the
+ * panel, not an old one. `how`: SWEET_FB_DPP_LEAVE_*, when it is asked for again.
+ */
+void
+AppleCLCD::dppLeave(const char *why, bool restore, int how)
+{
+	if (!sweet_fb_dp.attached) {
+		return;
+	}
+	int shown = sweet_fb_dp.front;
+	if (sweet_fb_dp.pending >= 0) {
+		for (unsigned ms = 0; ms < SWEET_FB_DPP_STUCK_MS && !hakios_scanout_latched(); ms++) {
+			IOSleep(1);
+		}
+		if (hakios_scanout_latched()) {
+			shown = sweet_fb_dp.pending;
+		}
+	}
+	if (restore && shown >= 0) {
+		uint64_t at = sweet_fb_dp.step * (uint64_t)shown;
+		if (!starlte_gpu_present_from_scan(at, sweet_fb_dp.rowbytes, sweet_fb_dp.w, sweet_fb_dp.h)) {
+			bool blend = sweet_fb_blend;
+			sweet_fb_blend = false;
+			(void)scaledCopy(sweet_fb_dp.kva + (uintptr_t)at, sweet_fb_dp.rowbytes, 0, 0, (int32_t)sweet_fb_dp.w,
+			    (int32_t)sweet_fb_dp.h);
+			sweet_fb_blend = blend;
+		}
+	}
+	hakios_scanout_detach(why);
+	sweet_fb_dp.attached = false;
+	sweet_fb_dp.front = sweet_fb_dp.pending = -1;
+	sweet_fb_dp.why = why;
+	sweet_fb_dp.left++;
+	if (how == SWEET_FB_DPP_LEAVE_GIVE_UP || sweet_fb_dp.given_up) {
+		sweet_fb_dp.given_up = true;
+	} else if (how == SWEET_FB_DPP_LEAVE_AGAIN) {
+		sweet_fb_dp.again_now = true;
+	} else if (how == SWEET_FB_DPP_LEAVE_FRAME) {
+		/* asked for again after SWEET_FB_DPP_QUIET frames it can take, SWEET_FB_DPP_RETRIES times a boot */
+		sweet_fb_dp.quiet = 0;
+		if (++sweet_fb_dp.retries > SWEET_FB_DPP_RETRIES) {
+			sweet_fb_dp.given_up = true;
+			sweet_fb_dp.why = "left too often for frames it could not take";
+		}
+	}
+	IOLog("A5XELTE FB dpp: back to the boot framebuffer (%s)%s\n", why,
+	    sweet_fb_dp.given_up ? "; given up until kern.hakios.sweetfb_dpp=1" : "");
+}
+#endif
 
 /*
  * For the GPU copy test (bsd/dev/herolte_gpu.c): the 4 KiB physical pages
@@ -1896,7 +2320,35 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 			IOLog("SWEET FB: display %s\n", off ? "off" : "on");
 		}
 		break;
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
 	case kSweetFBSwapWait:
+		if (sweet_fb_dpp_want || sweet_fb_dp.tried) {
+			/*
+			 * sweetfb_dpp's evidence for a scan-out of the swap surfaces themselves (docs/ios27/PRESENT.md, stage B):
+			 * what iOS 27's CoreAnimation asks SwapWait for. Answered at once, as before; the first 12 calls' scalars
+			 * logged, the first compared with the swap ids of the SwapEnds.
+			 */
+			uint32_t last = __atomic_load_n(&sweet_fb_dp.last_swap, __ATOMIC_RELAXED);
+			uint64_t a0 = args->scalarInputCount > 0 ? args->scalarInput[0] : 0;
+			sweet_fb_dp.sw_calls++;
+			if (a0 == last) {
+				sweet_fb_dp.sw_last++;
+			} else if (a0 + 1 == last) {
+				sweet_fb_dp.sw_before++;
+			} else {
+				sweet_fb_dp.sw_other++;
+			}
+			if (sweet_fb_dp.sw_logged < 12) {
+				sweet_fb_dp.sw_logged++;
+				IOLog("A5XELTE FB dpp: SwapWait %u scalars %#llx %#llx %#llx, the last SwapEnd's swap %u\n",
+				    args->scalarInputCount, a0, args->scalarInputCount > 1 ? args->scalarInput[1] : 0ULL,
+				    args->scalarInputCount > 2 ? args->scalarInput[2] : 0ULL, last);
+			}
+		}
+		break;
+#else
+	case kSweetFBSwapWait:
+#endif
 	default:
 		break;
 	}

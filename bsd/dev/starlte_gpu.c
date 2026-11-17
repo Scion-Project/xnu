@@ -620,6 +620,8 @@ struct sgp_slot {
 };
 static struct sgp_slot sgp_slots[SGP_SLOTS];
 static unsigned sgp_victim;
+/* the slots surfaces may take: SGP_SLOTS, or 2 once the DPP's buffers have the last two slots' tables (sweetfb_dpp) */
+static unsigned sgp_usable = SGP_SLOTS;
 static uint64_t sgp_next_va = SGP_VA_BASE;
 static uint32_t sgp_shaders;
 static volatile bool sgp_ready;
@@ -675,7 +677,7 @@ starlte_gpu_present_slot(uint32_t id, uint64_t first_pa)
 	if (!sgp_ready) {
 		return -1;
 	}
-	for (unsigned i = 0; i < SGP_SLOTS; i++) {
+	for (unsigned i = 0; i < sgp_usable; i++) {
 		if (sgp_slots[i].id == id && sgp_slots[i].first_pa == first_pa && id != 0) {
 			return (int)i;
 		}
@@ -690,8 +692,11 @@ starlte_gpu_present_map(uint32_t id, const uint64_t *pages, unsigned n)
 	if (!sgp_ready || n == 0 || n > SGP_SLOT_PAGES) {
 		return -1;
 	}
+	if (sgp_victim >= sgp_usable) {
+		sgp_victim = 0;
+	}
 	unsigned s = sgp_victim;
-	sgp_victim = (sgp_victim + 1) % SGP_SLOTS;
+	sgp_victim = (sgp_victim + 1) % sgp_usable;
 	if (sgp_next_va + SGP_SLOT_PAGES * 0x1000ull > SGP_VA_END) {
 		sgp_next_va = SGP_VA_BASE;
 	}
@@ -782,7 +787,7 @@ sgp_canvas_locked(uint32_t base, uint32_t w, uint32_t h)
 bool
 starlte_gpu_present_draw(int s, uint32_t off, uint32_t stride, uint32_t w, uint32_t h)
 {
-	if (!sgp_ready || s < 0 || s >= (int)SGP_SLOTS || w == 0 || h == 0 || w > 4096 || h > 4096 || stride < w * 4 ||
+	if (!sgp_ready || s < 0 || s >= (int)sgp_usable || w == 0 || h == 0 || w > 4096 || h > 4096 || stride < w * 4 ||
 	    (uint64_t)stride * h > (uint64_t)SGP_SLOT_PAGES * 4096) {
 		return false;
 	}
@@ -825,6 +830,243 @@ starlte_gpu_present_draw(int s, uint32_t off, uint32_t stride, uint32_t w, uint3
 	}
 	return ok;
 }
+
+/*
+ * sweetfb_dpp (iokit/Kernel/arm/SweetFramebuffer.cpp; off by default, NOT run on a phone): the present without the
+ * scaling. The frame is copied one pixel for one into a buffer of the display's carve-out (bsd/dev/hakios.exynos_dpu.c,
+ * hakios_scanout_memory()) and the DPU's VGF0 scales that buffer to the panel. The copy is the present blob of
+ * starlte_gpu_tri.h retargeted: the same tiler and fragment jobs, the same shader (one bilinear texel fetch at the
+ * pixel's centre, which at one texel a pixel is that texel), with nine words of it rewritten for a render target of
+ * the frame's own size. The words, read from the blob as built (tools/ios27/gpu/starlte-g72-tri.c, Mesa's v6 genxml
+ * packs; offsets from the blob's start):
+ *   0x124  the fragment job's bounds, in 16-pixel tiles: (h - 1) >> 4 << 16 | (w - 1) >> 4    (the panel's: 0x00b80059)
+ *   0x220  the framebuffer's width - 1 and height - 1, (h - 1) << 16 | (w - 1)                 (0x0b8f059f)
+ *   0x228  its bound max x and y, the same                                                      (0x0b8f059f)
+ *   0x2a0  the render target's base (64 bits)                                                   (0x04000000, the panel)
+ *   0x2a8  the render target's row stride in bytes                                              (5760)
+ *   0x30c  the tiler context's framebuffer width - 1 and height - 1                             (0x0b8f059f)
+ *   0x49c  the viewport's scissor max x and y                                                   (0x0b8f059f)
+ * and the quad (0x500) and its texel coordinates (0x540) at the frame's own corners, the texture's size (0x644) as
+ * sgp_canvas_locked() writes it. The tiler's hierarchy mask (0x308, 0xff) is what Mesa's
+ * pan_select_tiler_hierarchy_mask() gives for both sizes (the larger side in 16-pixel bins: 185 and 107, eight levels
+ * either way). Each word is checked to hold the panel's value before it is rewritten: a blob of another layout is
+ * refused, and the caller falls back to the scaled present.
+ *
+ * The buffers are mapped once into AS0 at SGP_SCAN_VA with the level-3 tables of the last two surface slots (24 MiB;
+ * the surfaces keep the first two slots from then on).
+ */
+#define SGP_SCAN_VA             0x18000000ull   /* AS0: free between the tiler heap (0x10000000, 16 MiB) and the slots */
+#define SGP_SCAN_TABLES         (2u * SGP_SLOT_TABLES)
+#define SGP_BLOB_FRAG_BOUNDS    0x124u
+#define SGP_BLOB_FB_SIZE        0x220u
+#define SGP_BLOB_FB_BOUND       0x228u
+#define SGP_BLOB_RT_BASE        0x2a0u
+#define SGP_BLOB_RT_STRIDE      0x2a8u
+#define SGP_BLOB_TILER_SIZE     0x30cu
+#define SGP_BLOB_SCISSOR_MAX    0x49cu
+static uint64_t sgp_scan_bytes;                 /* mapped at SGP_SCAN_VA, 0 none */
+static uint64_t sgp_copy_frames, sgp_copy_ns_sum, sgp_copy_ns_max, sgp_copy_window;
+
+int starlte_gpu_present_scan_map(uint64_t pa, uint64_t bytes);
+bool starlte_gpu_present_copy(int s, uint32_t off, uint32_t stride, uint32_t w, uint32_t h, uint64_t dst_off,
+    uint32_t dst_stride);
+bool starlte_gpu_present_from_scan(uint64_t src_off, uint32_t stride, uint32_t w, uint32_t h);
+
+/* The DPP's buffers [pa, pa + bytes) at SGP_SCAN_VA, once. 0, or -1 (nothing changed). The vsync thread only. */
+int
+starlte_gpu_present_scan_map(uint64_t pa, uint64_t bytes)
+{
+	unsigned pages = (unsigned)((bytes + 0xfff) / 0x1000);
+
+	if (!sgp_ready || (pa & 0xfff) || bytes == 0 || pages > SGP_SCAN_TABLES * 512u || sgp_scan_bytes != 0) {
+		return sgp_scan_bytes != 0 && sgp_scan_bytes >= bytes ? 0 : -1;
+	}
+	volatile uint64_t *l2 = (volatile uint64_t *)(sg_mem + 0x2000);
+	/* the last two slots given up: their surfaces' entries out of the level-2 table, their tables ours */
+	for (unsigned s = 2; s < SGP_SLOTS; s++) {
+		if (sgp_slots[s].va) {
+			for (unsigned t = 0; t < SGP_SLOT_TABLES; t++) {
+				l2[((sgp_slots[s].va >> 21) & 0x1ff) + t] = 0;
+			}
+		}
+		sgp_slots[s].id = 0;
+		sgp_slots[s].first_pa = 0;
+		sgp_slots[s].va = 0;
+	}
+	sgp_usable = 2;
+	for (unsigned t = 0; t * 512 < pages; t++) {
+		uint32_t table = SGP_L3_OFF + (2 * SGP_SLOT_TABLES + t) * 0x1000;
+		volatile uint64_t *l3 = (volatile uint64_t *)(sg_mem + table);
+		for (unsigned i = 0; i < 512; i++) {
+			unsigned p = t * 512 + i;
+			l3[i] = p < pages ? ((pa + (uint64_t)p * 0x1000) | 0x2c1) : 0;
+		}
+		l2[((SGP_SCAN_VA >> 21) & 0x1ff) + t] = (SG_MEM_PA + table) | 3;
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+	if (!sgp_mmu_flush(0, 30)) {
+		printf("STARLTE GPU PRESENT: MMU flush timeout (the DPP's buffers)\n");
+	}
+	sgp_scan_bytes = bytes;
+	printf("STARLTE GPU PRESENT: dpp: %u pages at %#llx mapped at VA %#llx; surfaces keep slots 0 and 1\n", pages, pa,
+	    SGP_SCAN_VA);
+	return 0;
+}
+
+/* The fresh blob with its texture at `src_va` (stride, w x h), and run. sg_lock held by the caller. */
+static bool
+sgp_run_locked(uint32_t base, uint64_t src_va, uint32_t stride, uint32_t h, uint64_t *ns_out)
+{
+	sg_put64(base + SG_PRES_SURFACE + 0, src_va);
+	sg_put32(base + SG_PRES_SURFACE + 8, stride);
+	sg_put32(base + SG_PRES_SURFACE + 12, stride * h);
+	__asm__ volatile ("dsb sy" ::: "memory");
+	uint64_t t0 = mach_absolute_time();
+	sg_run_quiet = true;
+	bool ok = sg_run(1, SG_PRES_BLOB_VA + SG_PRES_TILER_JOB, sgp_shaders, "PRESENT tiler") &&
+	    sg_run(0, SG_PRES_BLOB_VA + SG_PRES_FRAG_JOB, sgp_shaders, "PRESENT fragment");
+	sg_run_quiet = false;
+	absolutetime_to_nanoseconds(mach_absolute_time() - t0, ns_out);
+	return ok;
+}
+
+static uint32_t
+sgp_get32(uint32_t base, uint32_t off)
+{
+	return *(volatile uint32_t *)(sg_mem + SG_DATA_OFF + base + off);
+}
+
+/*
+ * The frame (slot s, byte offset off, stride, w x h) copied one for one into the DPP's buffer at dst_off of the mapped
+ * buffers (dst_stride a row). The time is measured as starlte_gpu_present_draw() measures its own (the two jobs).
+ * False: not copied (the caller falls back to the scaled present); a GPU fault here does not switch the GPU present off.
+ */
+bool
+starlte_gpu_present_copy(int s, uint32_t off, uint32_t stride, uint32_t w, uint32_t h, uint64_t dst_off,
+    uint32_t dst_stride)
+{
+	static bool said_layout;
+
+	if (!sgp_ready || s < 0 || s >= (int)sgp_usable || w < 16 || h < 16 || w > SGP_PANEL_W || h > SGP_PANEL_H ||
+	    stride < w * 4 || (uint64_t)stride * h > (uint64_t)SGP_SLOT_PAGES * 4096 || dst_stride < w * 4 ||
+	    (dst_stride & 63) || (dst_off & 63) || dst_off + (uint64_t)dst_stride * h > sgp_scan_bytes) {
+		return false;
+	}
+	lck_mtx_lock(&sg_lock);
+	uint32_t base = (uint32_t)(SG_PRES_BLOB_VA - SG_VA);
+	for (unsigned i = 0; i < SG_PRES_BLOB_WORDS; i++) {
+		sg_put32(base + i * 4, sg_pres_blob[i]);
+	}
+	/* the blob as expected: the panel's values where they are rewritten */
+	const uint32_t panel_wh = (SGP_PANEL_H - 1) << 16 | (SGP_PANEL_W - 1);
+	const uint32_t panel_tiles = ((SGP_PANEL_H - 1) >> 4) << 16 | ((SGP_PANEL_W - 1) >> 4);
+	if (sgp_get32(base, SGP_BLOB_FRAG_BOUNDS) != panel_tiles || sgp_get32(base, SGP_BLOB_FB_SIZE) != panel_wh ||
+	    sgp_get32(base, SGP_BLOB_FB_BOUND) != panel_wh || sgp_get32(base, SGP_BLOB_TILER_SIZE) != panel_wh ||
+	    sgp_get32(base, SGP_BLOB_SCISSOR_MAX) != panel_wh || sgp_get32(base, SGP_BLOB_RT_BASE) != (uint32_t)SG_PANEL_VA ||
+	    sgp_get32(base, SGP_BLOB_RT_BASE + 4) != 0 || sgp_get32(base, SGP_BLOB_RT_STRIDE) != SG_FB_STRIDE) {
+		lck_mtx_unlock(&sg_lock);
+		if (!said_layout) {
+			said_layout = true;
+			printf("STARLTE GPU PRESENT: dpp: the present blob is not laid out as expected: no copy\n");
+		}
+		return false;
+	}
+	const uint32_t wh = (h - 1) << 16 | (w - 1);
+	sg_put32(base + SGP_BLOB_FRAG_BOUNDS, ((h - 1) >> 4) << 16 | ((w - 1) >> 4));
+	sg_put32(base + SGP_BLOB_FB_SIZE, wh);
+	sg_put32(base + SGP_BLOB_FB_BOUND, wh);
+	sg_put64(base + SGP_BLOB_RT_BASE, SGP_SCAN_VA + dst_off);
+	sg_put32(base + SGP_BLOB_RT_STRIDE, dst_stride);
+	sg_put32(base + SGP_BLOB_TILER_SIZE, wh);
+	sg_put32(base + SGP_BLOB_SCISSOR_MAX, wh);
+	/* the quad over the whole target, the texel coordinates the same: one texel a pixel */
+	const uint32_t px[4] = { 0, w, 0, w }, py[4] = { 0, 0, h, h };
+	for (unsigned i = 0; i < 4; i++) {
+		sg_put32(base + SGP_BLOB_POS + i * 16 + 0, sgp_float_bits(px[i]));
+		sg_put32(base + SGP_BLOB_POS + i * 16 + 4, sgp_float_bits(py[i]));
+		sg_put32(base + SGP_BLOB_TC + i * 16 + 0, sgp_float_bits(px[i]));
+		sg_put32(base + SGP_BLOB_TC + i * 16 + 4, sgp_float_bits(py[i]));
+	}
+	sg_put32(base + SGP_BLOB_TEX_WH, ((h - 1) << 16) | (w - 1));
+	uint64_t ns = 0;
+	bool ok = sgp_run_locked(base, sgp_slots[s].va + off, stride, h, &ns);
+	lck_mtx_unlock(&sg_lock);
+	sgp_copy_frames++;
+	sgp_copy_window++;
+	sgp_copy_ns_sum += ns;
+	if (ns > sgp_copy_ns_max) {
+		sgp_copy_ns_max = ns;
+	}
+	if (sgp_copy_frames <= 3 || !ok) {
+		printf("STARLTE GPU PRESENT: dpp copy %llu %ux%u stride %u slot %d -> %u bytes a row at +%#llx: %llu us -> %s\n",
+		    sgp_copy_frames, w, h, stride, s, dst_stride, dst_off, ns / 1000, ok ? "ok" : "FAILED");
+	} else if (sgp_copy_window == 600) {
+		printf("STARLTE GPU PRESENT: dpp copy: %llu frames, average %llu us, max %llu us\n",
+		    sgp_copy_frames, sgp_copy_ns_sum / 600 / 1000, sgp_copy_ns_max / 1000);
+		sgp_copy_window = sgp_copy_ns_sum = sgp_copy_ns_max = 0;
+	}
+	return ok;
+}
+
+/*
+ * The DPP's buffer at src_off (stride, w x h) scaled to the panel as the present draws a frame: when the DPP is left
+ * (sweetfb_dpp switched off, the display off, a frame it cannot take) the boot framebuffer gets the picture the panel
+ * showed, before the DECON goes back to reading it. False: not drawn.
+ */
+bool
+starlte_gpu_present_from_scan(uint64_t src_off, uint32_t stride, uint32_t w, uint32_t h)
+{
+	if (!sgp_ready || w == 0 || h == 0 || w > 4096 || h > 4096 || stride < w * 4 ||
+	    src_off + (uint64_t)stride * h > sgp_scan_bytes) {
+		return false;
+	}
+	lck_mtx_lock(&sg_lock);
+	uint32_t base = (uint32_t)(SG_PRES_BLOB_VA - SG_VA);
+	for (unsigned i = 0; i < SG_PRES_BLOB_WORDS; i++) {
+		sg_put32(base + i * 4, sg_pres_blob[i]);
+	}
+	if (w != SG_PRES_CANVAS_W || h != SG_PRES_CANVAS_H) {
+		sgp_canvas_locked(base, w, h);
+	}
+	uint64_t ns = 0;
+	bool ok = sgp_run_locked(base, SGP_SCAN_VA + src_off, stride, h, &ns);
+	lck_mtx_unlock(&sg_lock);
+	printf("STARLTE GPU PRESENT: dpp: the shown buffer drawn to the panel's own in %llu us -> %s\n", ns / 1000,
+	    ok ? "ok" : "FAILED");
+	return ok;
+}
+
+/*
+ * kern.hakios.sweetfb_dpp: sweetfb_dpp's switch while the system runs (the USB console's "sysctl kern.hakios.sweetfb_dpp=0"
+ * puts the present back on today's path at the next refresh tick; "=1" asks for the DPP again, also after it gave itself
+ * up). SweetFramebuffer.cpp reads both words at every tick; the boot-arg sweetfb_dpp sets the first at start.
+ */
+uint32_t sweet_fb_dpp_want;             /* 1: the present by the DPP asked for */
+uint32_t sweet_fb_dpp_rearm;            /* one more for every write of 1: a DPP that gave itself up may try again */
+#include <sys/sysctl.h>
+SYSCTL_DECL(_kern_hakios);
+static int
+sweet_fb_dpp_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int value = (int)__atomic_load_n(&sweet_fb_dpp_want, __ATOMIC_RELAXED), error;
+
+	error = sysctl_io_number(req, value, sizeof(value), &value, NULL);
+	if (error != 0 || req->newptr == 0) {
+		return error;
+	}
+	if (value != 0 && value != 1) {
+		return EINVAL;
+	}
+	__atomic_store_n(&sweet_fb_dpp_want, (uint32_t)value, __ATOMIC_RELEASE);
+	if (value == 1) {
+		__atomic_fetch_add(&sweet_fb_dpp_rearm, 1, __ATOMIC_RELEASE);
+	}
+	printf("A5XELTE FB dpp: kern.hakios.sweetfb_dpp=%d: %s from the next refresh tick\n", value,
+	    value ? "the present by the DPP asked for" : "today's present (the scaled copy into the panel's buffer)");
+	return 0;
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, sweetfb_dpp, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
+    sweet_fb_dpp_sysctl, "I", "the present by the DPU's scaler (1) or the GPU's scaled copy as before (0) (sweetfb_dpp=)");
 
 /*
  * Stage 6: the GPU for apps (iokit/Kernel/arm/StarbiteMali.cpp, the
