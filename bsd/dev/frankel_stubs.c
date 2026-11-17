@@ -69,6 +69,8 @@ bool starlte_gpu_user_param(uint32_t param, uint64_t *value);
 bool starlte_gpu_user_param(uint32_t param, uint64_t *value) { (void)param; (void)value; return false; }
 bool starlte_gpu_user_map(uint64_t va, const uint64_t *pages, unsigned n);
 bool starlte_gpu_user_map(uint64_t va, const uint64_t *pages, unsigned n) { (void)va; (void)pages; (void)n; return false; }
+bool starlte_gpu_user_map_prot(uint64_t va, const uint64_t *pages, unsigned n, bool gpu_writes);
+bool starlte_gpu_user_map_prot(uint64_t va, const uint64_t *pages, unsigned n, bool gpu_writes) { (void)va; (void)pages; (void)n; (void)gpu_writes; return false; }
 void starlte_gpu_user_unmap(uint64_t va, unsigned n);
 void starlte_gpu_user_unmap(uint64_t va, unsigned n) { (void)va; (void)n; }
 int starlte_gpu_user_submit(uint64_t jc, uint32_t requirements);

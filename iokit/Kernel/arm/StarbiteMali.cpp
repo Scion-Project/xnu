@@ -44,6 +44,7 @@ extern "C" {
 int starlte_gpu_user_ready(void);
 bool starlte_gpu_user_param(uint32_t param, uint64_t *value);
 bool starlte_gpu_user_map(uint64_t va, const uint64_t *pages, unsigned n);
+bool starlte_gpu_user_map_prot(uint64_t va, const uint64_t *pages, unsigned n, bool gpu_writes);
 void starlte_gpu_user_unmap(uint64_t va, unsigned n);
 int starlte_gpu_user_submit(uint64_t jc, uint32_t requirements);
 int starlte_gpu_user_submit2(uint64_t jc, uint32_t requirements, bool async, uint64_t *seq);
@@ -568,7 +569,8 @@ StarbiteMaliUserClient::importSurface(sbm_surface *a)
 		pa[i] = s->memory->getPhysicalSegment((IOByteCount)i * 0x1000, &len, kIOMemoryMapperNone);
 		ok = pa[i] != 0;
 	}
-	ok = ok && starlte_gpu_user_map(va, pa, pages);
+	/* a surface over pages its maker may only read (SweetSurface wraps them kIODirectionOut): the GPU only reads them */
+	ok = ok && starlte_gpu_user_map_prot(va, pa, pages, (s->memory->getDirection() & kIODirectionIn) != 0);
 	if (pa != NULL) {
 		IOFreeData(pa, (vm_size_t)pages * sizeof(uint64_t));
 	}
@@ -611,11 +613,17 @@ StarbiteMaliUserClient::importHost(sbm_import_host *a)
 		handle = ++fCount;
 	}
 	IOMemoryDescriptor *mem = IOMemoryDescriptor::withAddressRange(a->addr, a->size, kIODirectionInOut, fTask);
+	bool gpu_writes = true;
 	if (mem == NULL) {
 		return kIOReturnNoMemory;
 	}
 	if (mem->prepare() != kIOReturnSuccess) {
-		/* read-only memory (a mapped file, a constant buffer): wired for the GPU to read */
+		/*
+		 * read-only memory (a mapped file, a constant buffer, a shared library): wired for the GPU to read, and mapped
+		 * so that it can only read it. Its pages are the file's own, shared with every process that maps it; a GPU
+		 * that could write them would change them for all of those.
+		 */
+		gpu_writes = false;
 		mem->release();
 		mem = IOMemoryDescriptor::withAddressRange(a->addr, a->size, kIODirectionOut, fTask);
 		if (mem == NULL) {
@@ -635,7 +643,7 @@ StarbiteMaliUserClient::importHost(sbm_import_host *a)
 		pa[i] = mem->getPhysicalSegment((IOByteCount)i * 0x1000, &len, kIOMemoryMapperNone);
 		ok = pa[i] != 0;
 	}
-	ok = ok && starlte_gpu_user_map(va, pa, pages);
+	ok = ok && starlte_gpu_user_map_prot(va, pa, pages, gpu_writes);
 	if (pa != NULL) {
 		IOFreeData(pa, (vm_size_t)pages * sizeof(uint64_t));
 	}

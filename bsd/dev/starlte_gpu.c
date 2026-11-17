@@ -865,6 +865,7 @@ static uint64_t sgu_jobs, sgu_faults;
 int starlte_gpu_user_ready(void);
 bool starlte_gpu_user_param(uint32_t param, uint64_t *value);
 bool starlte_gpu_user_map(uint64_t va, const uint64_t *pages, unsigned n);
+bool starlte_gpu_user_map_prot(uint64_t va, const uint64_t *pages, unsigned n, bool gpu_writes);
 void starlte_gpu_user_unmap(uint64_t va, unsigned n);
 int starlte_gpu_user_submit(uint64_t jc, uint32_t requirements);
 extern void starbite_mali_publish(void);        /* iokit/Kernel/arm/StarbiteMali.cpp */
@@ -1015,9 +1016,20 @@ sgu_unmap_locked(uint64_t va, unsigned n)
 	}
 }
 
-/* Map n 4 KiB pages at GPU VA va (4 KiB aligned, below 4 GiB) in AS1; all or nothing. */
+/*
+ * Map n 4 KiB pages at GPU VA va (4 KiB aligned, below 4 GiB) in AS1; all or nothing. gpu_writes false: the GPU may
+ * only read them (pages its client may only read: a file's, a shared library's). An entry is the page's address and
+ * 0x2c1 (bit 0 an address entry, bit 6 the GPU may read, bit 7 it may write, bits 9:8 shareable), or 0x241 without bit
+ * 7: a write through it is a fault, and the chain that made it fails.
+ */
 bool
 starlte_gpu_user_map(uint64_t va, const uint64_t *pages, unsigned n)
+{
+	return starlte_gpu_user_map_prot(va, pages, n, true);
+}
+
+bool
+starlte_gpu_user_map_prot(uint64_t va, const uint64_t *pages, unsigned n, bool gpu_writes)
 {
 	if (!sgu_ready || (va & 0xfff) || va + (uint64_t)n * 0x1000 > (1ull << 32)) {
 		return false;
@@ -1051,7 +1063,7 @@ starlte_gpu_user_map(uint64_t va, const uint64_t *pages, unsigned n)
 		if (l3[(v >> 12) & 0x1ff] == 0) {
 			sgu_l3_count[sgu_l3_index(l2[l2i])]++;
 		}
-		l3[(v >> 12) & 0x1ff] = (pages[i] & ~0xfffull) | 0x2c1;
+		l3[(v >> 12) & 0x1ff] = (pages[i] & ~0xfffull) | (gpu_writes ? 0x2c1 : 0x241);
 	}
 	bool ok = i == n;
 	if (!ok) {
