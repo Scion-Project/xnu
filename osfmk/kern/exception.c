@@ -1024,6 +1024,45 @@ sweet_crash_where(const char *name, const char *what, uint64_t addr)
 
 static void sweet_crash_strings(const char *name);
 
+/*
+ * sweet (17 Nov 2026): the crashing (current) thread's user pc, lr and up to 10 frame-pointer return addresses (the same
+ * walk as the "bt" line of sweet_crash_log), and the shared cache's slide, for sweet_crash_images() in
+ * bsd/kern/kern_exit.c (boot-arg sweetcrashimg=, off by default). Returns how many addresses it put in out[].
+ */
+unsigned sweet_crash_frames(uint64_t *out, unsigned max, uint64_t *slide);
+unsigned
+sweet_crash_frames(uint64_t *out, unsigned max, uint64_t *slide)
+{
+	arm_saved_state_t *ss = find_user_regs(current_thread());
+	vm_shared_region_t sr = vm_shared_region_get(current_task());
+	unsigned n = 0;
+
+	*slide = 0;
+	if (sr != NULL) {
+		*slide = sr->sr_slide;
+		vm_shared_region_deallocate(sr);
+	}
+	if (ss == NULL || !is_saved_state64(ss) || max < 2) {
+		return 0;
+	}
+	out[n++] = get_saved_state_pc(ss);
+	out[n++] = get_saved_state_lr(ss);
+	uint64_t fp = get_saved_state_fp(ss);
+	for (int i = 0; i < 10 && n < max && fp != 0 && (fp & 7) == 0; i++) {
+		uint64_t frame[2];
+		if (copyin((user_addr_t)fp, frame, sizeof(frame)) != 0) {
+			break;
+		}
+		out[n++] = frame[1];
+		if (frame[0] <= fp) {
+			break;
+		}
+		fp = frame[0];
+	}
+	return n;
+}
+
+
 void
 sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subcode)
 {
