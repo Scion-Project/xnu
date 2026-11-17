@@ -290,7 +290,8 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
 static uint64_t sweet_sandbox_seen;
 
 /*
- * Sandbox extensions (boot-arg sweetspeed&0x2000000, off by default). A process hands another one
+ * Sandbox extensions (on by default on STARLTE: sweet_sbx_ext=0 turns them off; elsewhere boot-arg sweetspeed&0x2000000,
+ * which every board still honours). A process hands another one
  * the right to a file as a token: sandbox_extension_issue_* (operation 5) makes it,
  * sandbox_extension_consume (6) turns it into a handle, release (7) gives the handle back. With no
  * sandbox every process already has every right, so a token grants nothing, but the programs check
@@ -304,6 +305,20 @@ static uint64_t sweet_sandbox_seen;
 #define SWEET_SPEED_SBX_EXT     0x2000000
 #define SWEET_SBX_TOKEN_MAX     1280
 extern uint32_t sweet_speed_flags(void);        /* boot-arg sweetspeed (osfmk/arm64/sweet_a64e.c) */
+
+/*
+ * On by default on STARLTE (17 November 2026): tccd hands the token with every answer it gives, and without one it turns
+ * an "Allow" into an error ("Failed to issue Sandbox Extension for kTCCServiceCamera", Camera.app's -11852), so the camera,
+ * the microphone and the photo library's access by TCC depended on a bit of a test line. A token grants nothing here (no
+ * sandbox is enforced: every process already has every right it names); what changes is that the programs that ask for
+ * one go on as on an iPhone instead of taking their error path. TCC's own decisions are unchanged.
+ */
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+#define SWEET_SBX_EXT_DEFAULT   1
+#else
+#define SWEET_SBX_EXT_DEFAULT   0
+#endif
+static TUNABLE(uint32_t, sweet_sbx_ext, "sweet_sbx_ext", SWEET_SBX_EXT_DEFAULT);
 static _Atomic int64_t sweet_sandbox_handle;
 
 static int
@@ -363,7 +378,7 @@ sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
 		proc_name(proc_pid(p), name, sizeof(name));
 		printf("SWEET Sandbox: %s op %d\n", name, call);
 	}
-	if ((call == 5 || call == 6) && (sweet_speed_flags() & SWEET_SPEED_SBX_EXT) != 0) {
+	if ((call == 5 || call == 6) && (sweet_sbx_ext != 0 || (sweet_speed_flags() & SWEET_SPEED_SBX_EXT) != 0)) {
 		return call == 5 ? sweet_sandbox_extension_issue(arg) : sweet_sandbox_extension_consume(arg);
 	}
 	switch (call) {
