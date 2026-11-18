@@ -668,6 +668,7 @@ arm_init(
 	unsigned int dt_entry_size = 0;
 
 #if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	sweet_early_boot_args(args->CommandLine);
 	sweet_early_mark(1, "arm_init entered (MMU on)");
 
 #endif

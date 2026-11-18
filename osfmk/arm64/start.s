@@ -558,6 +558,7 @@ LEXT(start_first_cpu)
 	MOV64	x11, 0x3145544c45554e58
 	str		x11, [x10]
 	dsb		sy
+#if A5XELTE_EARLY_FB_DEBUG
 	/* XNU-owned green entry block on the Exynos DECON scanout buffer. */
 	MOV64	x10, (A5XELTE_CONSOLE_PA+88*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xff00ff00
@@ -579,6 +580,7 @@ La5_entry_pixel:
 	mov	x1, #24
 	mov	x2, #256
 	bl	La5_draw_text
+#endif /* A5XELTE_EARLY_FB_DEBUG */
 #endif
 
 #if defined(SWEET) && !defined(A5XELTE) && !defined(FRANKEL)
@@ -939,7 +941,7 @@ common_start:
 #endif
 
 #if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
-#if defined(A5XELTE)
+#if defined(A5XELTE) && A5XELTE_EARLY_FB_DEBUG
 	/* Blue block: the 4 KiB MMU is active and the framebuffer alias works. */
 	MOV64	x10, (A5XELTE_CONSOLE_PA+120*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xff0000ff
@@ -991,7 +993,7 @@ La5_mmu_pixel:
 	msr		CPACR_EL1, x0
 #endif
 
-#if defined(A5XELTE)
+#if defined(A5XELTE) && A5XELTE_EARLY_FB_DEBUG
 	/* fp_enabled: write directly to the DECON scanout alias. */
 	MOV64	x10, (A5XELTE_CONSOLE_PA+152*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xff00ffff
@@ -1039,7 +1041,7 @@ La5_fp_enabled_pixel:
 
 	APPLY_TUNABLES x12, x13, x14
 
-#if defined(A5XELTE)
+#if defined(A5XELTE) && A5XELTE_EARLY_FB_DEBUG
 	/* tunables_done: write directly to the DECON scanout alias. */
 	MOV64	x10, (A5XELTE_CONSOLE_PA+184*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xffff00ff
@@ -1086,7 +1088,7 @@ La5_tunables_done_pixel:
 	mov	lr, x21
 #endif
 
-#if defined(A5XELTE)
+#if defined(A5XELTE) && A5XELTE_EARLY_FB_DEBUG
 	/* arm_init_jump: write directly to the DECON scanout alias. */
 	MOV64	x10, (A5XELTE_CONSOLE_PA+216*A5XELTE_FB_STRIDE+960)
 	MOV64	x11, 0xffffff00
@@ -1180,7 +1182,7 @@ arm_init_tramp:
 	/* Return to arm_init() */
 	ret
 
-#if defined(A5XELTE)
+#if defined(A5XELTE) && A5XELTE_EARLY_FB_DEBUG
 /* Physical DECON framebuffer text using XNU's built-in 8x16 iso_font.
  * x0: NUL-terminated string, x1: x pixel, x2: y pixel. No stack.
  * Caller-saved x0-x14 only; lr is untouched until ret. */

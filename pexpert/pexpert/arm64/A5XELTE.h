@@ -90,4 +90,15 @@
 #define PLATFORM_PANIC_LOG_DISABLED
 #endif
 
+/*
+ * Early framebuffer diagnostics (the coloured stage blocks and "XNU ENTRY"
+ * text drawn by start.s) are compiled out: they run before boot-args exist,
+ * so they cannot honour the quiet-boot rule (no framebuffer output without -v)
+ * and would draw over the bootloader's splash. Build with
+ * -DA5XELTE_EARLY_FB_DEBUG=1 to bring them back for a bring-up.
+ */
+#ifndef A5XELTE_EARLY_FB_DEBUG
+#define A5XELTE_EARLY_FB_DEBUG        0
+#endif
+
 #endif /* _PEXPERT_ARM64_A5XELTE_H */
