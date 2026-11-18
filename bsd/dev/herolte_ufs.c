@@ -473,26 +473,28 @@ ufs_find_partition(const char *want)
  *   RADIO  the modem's image (bsd/dev/hakios.shannon.c, boot-arg cp=N)
  *   EFS    the modem's non-volatile data, /efs/nv_data.bin, read by the same driver with cp_nv=2 only (the owner's
  *          decision, 13 Nov 2026: read at boot, kept in RAM, never written, never mounted)
+ *   BOOT, RECOVERY  the boot images, read by the warm restart (bsd/dev/starlte_warm.c, sweetwarm=, off by default) to
+ *          start the loader and the next kernel again without a reset; read only, like the others
  * Every other name is refused. With dst NULL or len 0 it only gives the partition's size.
  */
 int hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes);
 int
 hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes)
 {
-	static const char *const names[] = { "RADIO", "EFS" };
-	static uint64_t firsts[2], counts[2];
+	static const char *const names[] = { "RADIO", "EFS", "BOOT", "RECOVERY" };
+	static uint64_t firsts[4], counts[4];
 	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
 	uint64_t radio_first, radio_blocks;
 	const char *want;
 	unsigned which;
 	int error = 0;
 
-	for (which = 0; which < 2; which++) {
+	for (which = 0; which < 4; which++) {
 		if (name != NULL && strcmp(name, names[which]) == 0) {
 			break;
 		}
 	}
-	if (which == 2) {
+	if (which == 4) {
 		return EPERM;
 	}
 	want = names[which];
@@ -570,6 +572,28 @@ hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint6
 	}
 	lck_mtx_unlock(&herolte_ufs_lock);
 	return error;
+}
+
+/*
+ * The warm restart (bsd/dev/starlte_warm.c), after its point of no return: no request to the flash after this one.
+ * The driver's lock is taken and never given back (whoever waits for it waits for the next kernel), and the device's
+ * write cache synced, so that what this kernel wrote is on the flash and the host has no command in flight when the
+ * next kernel takes it over. 0, or EBUSY when the lock stays taken for 2 s (the caller then resets the phone).
+ */
+int starlte_ufs_hold_for_handoff(void);
+int
+starlte_ufs_hold_for_handoff(void)
+{
+	for (int i = 0; i < 2000; i++) {
+		if (lck_mtx_try_lock(&herolte_ufs_lock)) {
+			if (su.ready && su.lun == 0) {
+				(void)ufs_sync_cache();
+			}
+			return 0;
+		}
+		delay(1000);
+	}
+	return EBUSY;
 }
 
 /*
@@ -1110,11 +1134,12 @@ starlte_pmsg_put(volatile uint8_t *d, uint32_t *o, const char *s, uint32_t n)
  * The panic log's head (panic string, panicked thread, backtrace; its tail is
  * the binary stackshot) and the console's last lines before the panic, into
  * the ramoops pmsg ring that TWRP shows as /sys/fs/pstore/pmsg-ramoops-0.
+ * With panic_head false (the warm restart's handoff, starlte_pmsg_note) only
+ * the header and the console's last lines.
  */
 static void
-starlte_panic_to_recovery(void)
+starlte_pmsg_console(const char *hdr, bool panic_head)
 {
-	static const char hdr[] = "STARBITE: XNU panic (sweetreboot), panic log head:\n";
 	static const char mid[] = "\n--- console before the panic:\n";
 	volatile uint32_t *h = (volatile uint32_t *)(void *)starlte_pmsg_va;
 	volatile uint8_t *d;
@@ -1125,13 +1150,16 @@ starlte_panic_to_recovery(void)
 
 	if (h != NULL) {
 		d = starlte_pmsg_va + 12;
-		starlte_pmsg_put(d, &o, hdr, sizeof(hdr) - 1);
-		if (b != NULL && e > b) {
-			starlte_pmsg_put(d, &o, b, (uint32_t)MIN(e - b, 11 * 1024));
+		starlte_pmsg_put(d, &o, hdr, (uint32_t)strlen(hdr));
+		if (panic_head) {
+			if (b != NULL && e > b) {
+				starlte_pmsg_put(d, &o, b, (uint32_t)MIN(e - b, 11 * 1024));
+			}
+			starlte_pmsg_put(d, &o, mid, sizeof(mid) - 1);
 		}
-		starlte_pmsg_put(d, &o, mid, sizeof(mid) - 1);
 		a5xelte_log_snapshot(&ring, &rsize, &total);
-		uint64_t n = MIN(total, MIN((uint64_t)rsize, (uint64_t)(STARLTE_PMSG_DATA - o)));
+		/* a note leaves 2 KiB for the loader's lines after it (the ring wraps over the oldest bytes) */
+		uint64_t n = MIN(total, MIN((uint64_t)rsize, (uint64_t)(STARLTE_PMSG_DATA - o - (panic_head ? 0 : 2048))));
 		for (uint64_t k = total - n; k < total; k++) {
 			starlte_pmsg_put(d, &o, &ring[k % rsize], 1);
 		}
@@ -1140,7 +1168,57 @@ starlte_panic_to_recovery(void)
 		h[2] = o;
 		__asm__ volatile ("dsb sy" ::: "memory");
 	}
+}
+
+static void
+starlte_panic_to_recovery(void)
+{
+	starlte_pmsg_console("STARBITE: XNU panic (sweetreboot), panic log head:\n", true);
 	starlte_reset_to_recovery();
+}
+
+/*
+ * The warm restart (bsd/dev/starlte_warm.c) right before it leaves this kernel: `hdr` and the console's last lines into
+ * the pmsg ring (the loader appends its own lines after them), so that TWRP shows how far a warm restart got whatever
+ * ends it. Nothing when the ring was not mapped (no sweetreboot=, sweetwdog= or console mapping at boot).
+ */
+void starlte_pmsg_note(const char *hdr);
+void
+starlte_pmsg_note(const char *hdr)
+{
+	starlte_pmsg_console(hdr, false);
+}
+
+/*
+ * One line appended to the pmsg ring as the loader appends (xnuloader/sboot xnu_boot.c pmsg_put: a ring that is not a
+ * ring is started again). For the warm restart's steps once interrupts are off, when printf may not be called (XNU
+ * panics "Console I/O from interrupt-disabled context"). Nothing when the ring was not mapped.
+ */
+void starlte_pmsg_append(const char *s);
+void
+starlte_pmsg_append(const char *s)
+{
+	volatile uint32_t *h = (volatile uint32_t *)(void *)starlte_pmsg_va;
+	volatile uint8_t *d;
+
+	if (h == NULL) {
+		return;
+	}
+	d = starlte_pmsg_va + 12;
+	if (h[0] != 0x43474244U || h[1] >= STARLTE_PMSG_DATA || h[2] > STARLTE_PMSG_DATA) {
+		h[0] = 0x43474244U;                     /* "DBGC" */
+		h[1] = 0;
+		h[2] = 0;
+	}
+	for (; *s != '\0'; s++) {
+		uint32_t start = h[1];
+		d[start] = (uint8_t)*s;
+		h[1] = (start + 1) % STARLTE_PMSG_DATA;
+		if (h[2] < STARLTE_PMSG_DATA) {
+			h[2] = h[2] + 1;
+		}
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
 static void
@@ -1188,6 +1266,7 @@ starlte_reset_normal(void)
 }
 
 extern unsigned panic_active(void);
+extern void starlte_warm_from_restart(void);   /* bsd/dev/starlte_warm.c */
 
 static int
 starlte_halt_restart(unsigned int type)
@@ -1203,6 +1282,7 @@ starlte_halt_restart(unsigned int type)
 	}
 	switch (type) {
 	case kPERestartCPU:
+		starlte_warm_from_restart();    /* sweetwarm=2: a warm restart instead, when it can be had (returns if not) */
 		printf("STARLTE HALT: restart (type %u): PMU reset into the system\n", type);
 		delay(50 * 1000);               /* the line out on the USB console */
 		starlte_reset_normal();

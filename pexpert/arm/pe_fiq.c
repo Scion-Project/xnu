@@ -474,6 +474,32 @@ a5xelte_gic_cpu_lost(void)
 	}
 	return lost;
 }
+
+/*
+ * bsd/dev/starlte_warm.c (sweetwarm=, NOT run on a phone): before a warm restart hands the SoC to the loader and the
+ * next kernel without a reset, every interrupt is disabled, none is left pending or active, and this core's CPU
+ * interface is off; the next kernel's pe_init_fiq() enables the distributor, the interface and what it uses again.
+ * GICD_TYPER's ITLinesNumber says how many lines there are. SGIs' pending bits clear through GICD_CPENDSGIR.
+ */
+void a5xelte_gic_quiesce(void);
+void
+a5xelte_gic_quiesce(void)
+{
+	if (!a5_gicd_base || !a5_gicc_base) {
+		return;
+	}
+	unsigned int words = (a5_gic_read32(a5_gicd_base, 0x004) & 0x1fU) + 1;
+	for (unsigned int n = 0; n < words; n++) {
+		a5_gic_write32(a5_gicd_base, 0x180 + 4 * n, 0xffffffffU);      /* GICD_ICENABLER */
+		a5_gic_write32(a5_gicd_base, 0x280 + 4 * n, 0xffffffffU);      /* GICD_ICPENDR */
+		a5_gic_write32(a5_gicd_base, 0x380 + 4 * n, 0xffffffffU);      /* GICD_ICACTIVER */
+	}
+	for (unsigned int n = 0; n < 4; n++) {
+		a5_gic_write32(a5_gicd_base, 0xf10 + 4 * n, 0xffffffffU);      /* GICD_CPENDSGIR */
+	}
+	a5_gic_write32(a5_gicc_base, 0x000, a5_gic_read32(a5_gicc_base, 0x000) & ~1U);   /* GICC_CTLR: off */
+	__builtin_arm_dsb(DSB_SY);
+}
 #endif
 #else
 void
