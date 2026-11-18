@@ -440,7 +440,10 @@ extern void vm_compressor_kdp_teardown(void);
 #define SWAPPER_HAS_CAUGHTUP()                  ((AVAILABLE_NON_COMPRESSED_MEMORY > VM_PAGE_COMPRESSOR_SWAP_HAS_CAUGHTUP_THRESHOLD) ? 1 : 0)
 
 
-#if !XNU_TARGET_OS_OSX
+#if (defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)) && !XNU_TARGET_OS_OSX
+/* sweet: 28 pages of 16 KiB on an iPhone; the same 448 KiB on this 4 KiB-page kernel (see VM_PAGE_FREE_TARGET) */
+#define COMPRESSOR_FREE_RESERVED_LIMIT          (28 * ((16384 >> PAGE_SHIFT) ? (16384 >> PAGE_SHIFT) : 1))
+#elif !XNU_TARGET_OS_OSX
 #define COMPRESSOR_FREE_RESERVED_LIMIT          28
 #else /* !XNU_TARGET_OS_OSX */
 #define COMPRESSOR_FREE_RESERVED_LIMIT          128

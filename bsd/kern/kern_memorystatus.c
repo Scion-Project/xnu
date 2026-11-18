@@ -9913,3 +9913,36 @@ memorystatus_cmd_increase_jetsam_task_limit(pid_t pid, uint32_t byte_increase)
 	return error;
 }
 #endif /* DEVELOPMENT */
+
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * sweet: memorystatus's side of the "SWEET VM:" line (osfmk/vm/vm_pageout.c, boot-arg sweet_vmlog): available pages,
+ * the pressure level, the health flags the memorystatus thread acts on, the processes per jetsam band, and the kills.
+ */
+void sweet_memstat_summary(char *buf, size_t len);
+
+static unsigned int
+sweet_memstat_kills(void)
+{
+	unsigned int sum = 0;
+	for (int p = 0; p <= JETSAM_PRIORITY_MAX; p++) {
+		for (int c = 0; c < JETSAM_REASON_MEMORYSTATUS_MAX - 1; c++) {
+			sum += os_atomic_load(&memorystatus_kill_counts[p][c], relaxed);
+		}
+	}
+	return sum;
+}
+
+void
+sweet_memstat_summary(char *buf, size_t len)
+{
+	int n = scnprintf(buf, len, "avail %llu MiB lvl %d starved %d kills %u | bands",
+	    ((uint64_t)memorystatus_get_available_page_count() * PAGE_SIZE) >> 20, (int)memorystatus_vm_pressure_level,
+	    os_atomic_load(&memorystatus_pageout_starved, relaxed) ? 1 : 0, sweet_memstat_kills());
+	for (int i = 0; i < MEMSTAT_BUCKET_COUNT && n < (int)len - 12; i++) {
+		if (memstat_bucket[i].count) {
+			n += scnprintf(buf + n, len - n, " %d:%u", i, memstat_bucket[i].count);
+		}
+	}
+}
+#endif /* SWEET || A5XELTE */
