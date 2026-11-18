@@ -134,6 +134,7 @@ static struct {
 	uint64_t ncmds, last_lba;               /* STARLTE heartbeat */
 	uint32_t busy;                          /* a command is in flight */
 	uint64_t first_block, nblocks;          /* partition, in 4 KiB device blocks */
+	uint64_t disk_blocks;                   /* the whole LUN (GPT backup header's LBA + 1), 0 if unknown */
 	uint32_t secsize;                       /* logical sector size for the BSD layer */
 	bool writable;                          /* boot-arg ufsrw=1 */
 	bool cache;                             /* boot-arg ufscache=1 */
@@ -407,8 +408,11 @@ ufs_find_partition(const char *want)
 		printf("HEROLTE UFS: LUN %u has no GPT\n", su.lun);
 		return ENXIO;
 	}
-	uint64_t entry_lba;
+	uint64_t entry_lba, alt_lba;
 	uint32_t nent, esz;
+	/* The backup GPT header sits on the LUN's last block: its LBA + 1 is the LUN's size (MobileGestalt's disk size, SweetMedia.cpp). */
+	memcpy(&alt_lba, b + 32, 8);
+	su.disk_blocks = (alt_lba != 0 && alt_lba < (1ULL << 40)) ? alt_lba + 1 : 0;
 	memcpy(&entry_lba, b + 72, 8);
 	memcpy(&nent, b + 80, 4);
 	memcpy(&esz, b + 84, 4);
@@ -1802,6 +1806,9 @@ restore:
 }
 #endif
 
+/* iokit/Kernel/arm/SweetMedia.cpp */
+extern void sweet_media_publish(uint64_t bytes);
+
 static int
 herolte_ufs_init(void)
 {
@@ -1887,6 +1894,10 @@ herolte_ufs_init(void)
 	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20,
 	    su.writable ? "read-write" : "read-only", su.dma_pa);
 	herolte_log_start();
+	/* "disk0" in the IORegistry: iOS 27's MobileGestalt reads the disk's size from there (Settings > General > About > Capacity). */
+	if (su.disk_blocks) {
+		sweet_media_publish(su.disk_blocks * UFS_BLOCK);
+	}
 	return 0;
 }
 
