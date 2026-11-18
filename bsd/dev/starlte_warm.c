@@ -264,7 +264,8 @@ struct warm_plan {
 	struct warm_part part[3];
 	unsigned nparts;
 	uint32_t method;
-	uint64_t slot_size;             /* the loader Image + payload, as the loader's header says */
+	uint64_t slot_size;             /* BOOT's kernel slot: the loader Image + payload, its kernel_size (what S-Boot loads) */
+	uint64_t declared;              /* the Image header's image_size (S-Boot's reservation; the packer pads it) */
 	uint64_t payload_off;           /* where the SWEETXNU payload starts in the slot */
 	uint64_t span_pa, span_len;     /* the next kernel's span (the loader writes it) */
 	char line[SCNR_LINE];
@@ -362,35 +363,66 @@ warm_in_dst(const struct warm_plan *w, uint64_t pa)
 }
 
 /*
- * The loader slot (the Image + its appended SWEETXNU payload): the loader has the warm entry, the payload is one the
- * loader will take, the next kernel's span is known. Mirrors xnu_boot.c payload_bad().
+ * The sizes of BOOT's kernel slot (scion-kernel tools/warm_slot.c is this function for the host test; keep the two the
+ * same). S-Boot loads the BOOT header's kernel_size bytes of the slot to 0x80080000; the arm64 Image header's
+ * image_size is only how much room it keeps there, and tools/ios27/starlte-pack-boot.py pads it on purpose to the
+ * template's (the TWRP kernel's 0x2842000, about 42 MB) or to the slot + 64 KiB, whichever is larger: it is always
+ * larger than the slot. So kernel_size is what is read again, hashed and copied (rounded up to whole pages: the rest of
+ * the last page is the zeroes of the staging buffer); image_size is only checked to be what the cold boot used too
+ * (the loader's boot_payload looks for the payload in [_image_end, base + image_size), which must end below its
+ * RAM_BASE 0x92000000) and never decides how much is read or copied. NULL, or why not (in `why`, with the numbers).
  */
+#define WARM_LOADER_RAM_BASE 0x92000000ULL
 static const char *
-warm_check_slot(struct warm_plan *w)
+warm_slot(const uint8_t *s, uint64_t ksize, uint64_t base, uint64_t limit, uint64_t *declared, uint64_t *payload_off,
+    char *why, size_t whylen)
 {
-	const uint8_t *s = (const uint8_t *)w->part[0].va;
-	uint64_t ksize = w->part[0].size;
+	uint64_t copy = (ksize + WARM_PG - 1) & ~(WARM_PG - 1);
 
+	*declared = 0;
+	*payload_off = 0;
+	if (ksize < 0x1000 || ksize > limit - base || copy > limit - base) {
+		snprintf(why, whylen, "BOOT's kernel slot (%llu bytes) does not fit 0x%llx..0x%llx", ksize, base, limit);
+		return why;
+	}
 	if (rd32(s + 56) != 0x644d5241U) {
 		return "BOOT's kernel slot is not an arm64 Image";
 	}
 	if (memcmp(s + SCNR_MARK_OFFSET, "SCNR", 4) != 0 || rd32(s + SCNR_MARK_OFFSET + 4) != SCNR_VERSION) {
 		return "BOOT's loader has no warm entry (an older loader: make the boot image with this one)";
 	}
-	w->slot_size = rd64(s + 16);
-	if (w->slot_size < 0x1000 || w->slot_size > round_page(ksize) || WARM_SLOT_PA + w->slot_size > WARM_TWRP_K_PA) {
-		return "the loader's image_size does not fit";
+	*declared = rd64(s + 16);
+	if (*declared < ksize || *declared > WARM_LOADER_RAM_BASE - base) {
+		snprintf(why, whylen, "the loader's Image header image_size 0x%llx is below the slot's %llu bytes or past "
+		    "0x%llx: the loader would not see the payload as it does on a cold boot", *declared, ksize,
+		    WARM_LOADER_RAM_BASE);
+		return why;
 	}
-	w->payload_off = 0;
-	for (uint64_t o = 0x10000; o + 0x2a8 <= w->slot_size; o += WARM_PG) {
+	for (uint64_t o = 0x10000; o + 0x2a8 <= ksize; o += WARM_PG) {
 		const uint8_t *p = s + o;
 		if (memcmp(p, "SWEETXNU", 8) == 0 && rd32(p + 8) == 1 && rd32(p + 12) >= 1 && rd32(p + 12) <= 32) {
-			w->payload_off = o;
-			break;
+			*payload_off = o;
+			return NULL;
 		}
 	}
-	if (w->payload_off == 0) {
-		return "no SWEETXNU payload after the loader";
+	return "no SWEETXNU payload after the loader";
+}
+
+/*
+ * The loader slot (the Image + its appended SWEETXNU payload): the loader has the warm entry, the payload is one the
+ * loader will take, the next kernel's span is known. Mirrors xnu_boot.c payload_bad().
+ */
+static const char *
+warm_check_slot(struct warm_plan *w)
+{
+	static char why[200];
+	const uint8_t *s = (const uint8_t *)w->part[0].va;
+	const char *bad;
+
+	w->slot_size = w->part[0].size;
+	if ((bad = warm_slot(s, w->slot_size, WARM_SLOT_PA, WARM_TWRP_K_PA, &w->declared, &w->payload_off, why,
+	    sizeof(why))) != NULL) {
+		return bad;
 	}
 	const uint8_t *p = s + w->payload_off;
 	uint64_t length = w->slot_size - w->payload_off;
@@ -731,7 +763,7 @@ warm_go(struct warm_plan *w)
 	register uint64_t x2 __asm__("x2") = w->list_n;
 	register uint64_t x3 __asm__("x3") = WARM_SLOT_PA + SCNR_ENTRY_OFFSET;
 	register uint64_t x4 __asm__("x4") = WARM_SLOT_PA;
-	register uint64_t x5 __asm__("x5") = (w->method == SCNR_M_ANDROID ? WARM_LOW_END : WARM_SLOT_PA + w->slot_size) - WARM_SLOT_PA;
+	register uint64_t x5 __asm__("x5") = (w->method == SCNR_M_ANDROID ? WARM_LOW_END : WARM_SLOT_PA + round_page(w->slot_size)) - WARM_SLOT_PA;
 	register uint64_t x6 __asm__("x6") = w->span_pa;
 	register uint64_t x7 __asm__("x7") = w->span_len;
 	register uint64_t x8 __asm__("x8") = WARM_L1_PA;
@@ -780,11 +812,14 @@ warm_start(uint32_t method, const char *args, bool whole_line, bool dry)
 		warm_go(&warm_plan);
 	}
 	if (why == NULL) {
-		printf("STARLTE WARM: dry run: %s read and checked, %llu pages listed, payload at +0x%llx, SHA-256 "
-		    "%02x%02x%02x%02x..., the next kernel at 0x%llx (%llu MiB), line \"%s\": nothing stopped, running on\n",
-		    method == SCNR_M_ANDROID ? "BOOT and RECOVERY" : "BOOT", warm_plan.list_n, warm_plan.payload_off,
-		    warm_plan.sha[0], warm_plan.sha[1], warm_plan.sha[2], warm_plan.sha[3], warm_plan.span_pa,
-		    warm_plan.span_len >> 20, warm_plan.line);
+		printf("STARLTE WARM: dry run: %s read and checked: kernel slot %llu bytes (kernel_size; Image header "
+		    "image_size 0x%llx not used for the copy), %llu pages listed (0x%llx..0x%llx), payload at +0x%llx, "
+		    "%llu bytes hashed, SHA-256 %02x%02x%02x%02x..., the next kernel at 0x%llx (%llu MiB), line \"%s\": "
+		    "nothing stopped, running on\n",
+		    method == SCNR_M_ANDROID ? "BOOT and RECOVERY" : "BOOT", warm_plan.slot_size, warm_plan.declared,
+		    warm_plan.list_n, WARM_SLOT_PA, WARM_SLOT_PA + round_page(warm_plan.slot_size), warm_plan.payload_off,
+		    warm_plan.slot_size - warm_plan.payload_off, warm_plan.sha[0], warm_plan.sha[1], warm_plan.sha[2],
+		    warm_plan.sha[3], warm_plan.span_pa, warm_plan.span_len >> 20, warm_plan.line);
 	} else {
 		printf("STARLTE WARM: not started: %s; the system runs on\n", why);
 	}
