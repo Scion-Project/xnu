@@ -375,7 +375,7 @@ st_top_a64e(uint64_t window_ns)
 	}
 
 	/* the hottest trapping PCs of the window */
-	struct sweet_lse_site { uint64_t pc, count; };
+	struct sweet_lse_site { uint64_t pc, count; int pid; };
 	extern struct sweet_lse_site sweet_lse_sites[512];
 	char hot[400];
 	int hn = snprintf(hot, sizeof(hot), "STARLTE LSE hot:");
@@ -390,8 +390,8 @@ st_top_a64e(uint64_t window_ns)
 		if (best == 512 || hn >= (int)sizeof(hot) - 40) {
 			break;
 		}
-		hn += snprintf(hot + hn, sizeof(hot) - (size_t)hn, " %llx:%llu", sweet_lse_sites[best].pc,
-		    sweet_lse_sites[best].count);
+		hn += snprintf(hot + hn, sizeof(hot) - (size_t)hn, " %llx:%llu@%d", sweet_lse_sites[best].pc,
+		    sweet_lse_sites[best].count, sweet_lse_sites[best].pid);
 		sweet_lse_sites[best].count = 0;
 	}
 	if (hn > 17) {
