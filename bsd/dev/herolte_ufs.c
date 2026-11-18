@@ -473,26 +473,28 @@ ufs_find_partition(const char *want)
  *   RADIO  the modem's image (bsd/dev/hakios.shannon.c, boot-arg cp=N)
  *   EFS    the modem's non-volatile data, /efs/nv_data.bin, read by the same driver with cp_nv=2 only (the owner's
  *          decision, 13 Nov 2026: read at boot, kept in RAM, never written, never mounted)
+ *   BOOT, RECOVERY  the boot images, read by the warm restart (bsd/dev/starlte_warm.c, sweetwarm=, off by default) to
+ *          start the loader and the next kernel again without a reset; read only, like the others
  * Every other name is refused. With dst NULL or len 0 it only gives the partition's size.
  */
 int hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes);
 int
 hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes)
 {
-	static const char *const names[] = { "RADIO", "EFS" };
-	static uint64_t firsts[2], counts[2];
+	static const char *const names[] = { "RADIO", "EFS", "BOOT", "RECOVERY" };
+	static uint64_t firsts[4], counts[4];
 	const uint8_t *b = (const uint8_t *)(su.dma + DMA_BOUNCE);
 	uint64_t radio_first, radio_blocks;
 	const char *want;
 	unsigned which;
 	int error = 0;
 
-	for (which = 0; which < 2; which++) {
+	for (which = 0; which < 4; which++) {
 		if (name != NULL && strcmp(name, names[which]) == 0) {
 			break;
 		}
 	}
-	if (which == 2) {
+	if (which == 4) {
 		return EPERM;
 	}
 	want = names[which];
@@ -570,6 +572,28 @@ hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint6
 	}
 	lck_mtx_unlock(&herolte_ufs_lock);
 	return error;
+}
+
+/*
+ * The warm restart (bsd/dev/starlte_warm.c), after its point of no return: no request to the flash after this one.
+ * The driver's lock is taken and never given back (whoever waits for it waits for the next kernel), and the device's
+ * write cache synced, so that what this kernel wrote is on the flash and the host has no command in flight when the
+ * next kernel takes it over. 0, or EBUSY when the lock stays taken for 2 s (the caller then resets the phone).
+ */
+int starlte_ufs_hold_for_handoff(void);
+int
+starlte_ufs_hold_for_handoff(void)
+{
+	for (int i = 0; i < 2000; i++) {
+		if (lck_mtx_try_lock(&herolte_ufs_lock)) {
+			if (su.ready && su.lun == 0) {
+				(void)ufs_sync_cache();
+			}
+			return 0;
+		}
+		delay(1000);
+	}
+	return EBUSY;
 }
 
 /*
@@ -1188,6 +1212,7 @@ starlte_reset_normal(void)
 }
 
 extern unsigned panic_active(void);
+extern void starlte_warm_from_restart(void);   /* bsd/dev/starlte_warm.c */
 
 static int
 starlte_halt_restart(unsigned int type)
@@ -1203,6 +1228,7 @@ starlte_halt_restart(unsigned int type)
 	}
 	switch (type) {
 	case kPERestartCPU:
+		starlte_warm_from_restart();    /* sweetwarm=2: a warm restart instead, when it can be had (returns if not) */
 		printf("STARLTE HALT: restart (type %u): PMU reset into the system\n", type);
 		delay(50 * 1000);               /* the line out on the USB console */
 		starlte_reset_normal();

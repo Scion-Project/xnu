@@ -117,6 +117,7 @@ bsd/dev/starlte_c2.c	optional scion_generic_arm64
 bsd/dev/hakios.dwc3.c	optional scion_generic_arm64
 bsd/dev/hakios.exynos_usb.c	optional scion_generic_arm64
 bsd/dev/starlte_usbcon.c	optional scion_generic_arm64
+bsd/dev/starlte_warm.c	optional scion_generic_arm64
 bsd/dev/starlte_muic.c	optional scion_generic_arm64
 bsd/dev/hakios.exynos_hsi2c.c	optional scion_generic_arm64
 bsd/dev/hakios.exynos_camera.c	optional scion_generic_arm64
