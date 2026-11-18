@@ -78,9 +78,14 @@ starlte_cpu_clock_report(void)
 	__asm__ volatile ("mrs %0, pmcr_el0" : "=r"(pmcr));
 	__asm__ volatile ("msr pmcr_el0, %0" : : "r"(pmcr | 1u));   /* E */
 	__asm__ volatile ("msr pmcntenset_el0, %0" : : "r"(1ull << 31));
-	__asm__ volatile ("isb; mrs %0, cntvct_el0; mrs %1, pmccntr_el0" : "=r"(t0), "=r"(c0));
+	/*
+	 * One instruction a line: in Darwin's arm64 assembler ";" starts a comment (the separator is "%%"), so
+	 * "isb; mrs ...; mrs ..." was "isb" alone and t0/c0/t1/c1 were never read (UniXNU found the same in its ArmCpu,
+	 * github.com/UniXNU/ArmCpu commit 4168c17).
+	 */
+	__asm__ volatile ("isb\n\tmrs %0, cntvct_el0\n\tmrs %1, pmccntr_el0" : "=r"(t0), "=r"(c0));
 	delay(20000);
-	__asm__ volatile ("isb; mrs %0, cntvct_el0; mrs %1, pmccntr_el0" : "=r"(t1), "=r"(c1));
+	__asm__ volatile ("isb\n\tmrs %0, cntvct_el0\n\tmrs %1, pmccntr_el0" : "=r"(t1), "=r"(c1));
 	__asm__ volatile ("mrs %0, mpidr_el1" : "=r"(mpidr));
 	uint64_t ticks = t1 - t0;
 	printf("STARLTE CPU: mpidr %#llx runs at ~%llu MHz (%llu cycles in %llu timer ticks)\n",
