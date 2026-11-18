@@ -2597,4 +2597,21 @@ starlte_gpu_probe(void)
 		thread_deallocate(thread);
 	}
 }
+
+/*
+ * bsd/dev/starlte_warm.c (sweetwarm=, NOT run on a phone): before a warm restart hands the memory to the next kernel,
+ * the GPU stops reading and writing it (its page tables and buffers are in this kernel's RAM): a soft reset, which ends
+ * every job and the MMU's state, then its cores off. Called with interrupts off, after the warm restart's point of no
+ * return; nothing when this driver never mapped the GPU.
+ */
+void starlte_gpu_quiesce(void);
+void
+starlte_gpu_quiesce(void)
+{
+	if (!sg_gpu) {
+		return;
+	}
+	(void)sg_soft_reset();
+	sg_cores_off();
+}
 #endif /* ARM64_BOARD_CONFIG_STARLTE */

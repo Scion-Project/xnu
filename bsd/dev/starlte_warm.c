@@ -136,6 +136,7 @@ extern void hakios_exynos_camera_quiesce(void);
 extern void hakios_shannon_quiesce(void);
 extern void hakios_exynos_pcie_quiesce(void);
 extern void hakios_usb_gadget_quiesce(void);
+extern void starlte_gpu_quiesce(void);             /* bsd/dev/starlte_gpu.c */
 extern unsigned int processor_avail_count;
 extern int get_preemption_level(void);
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -494,8 +495,13 @@ warm_prepare(struct warm_plan *w, uint32_t method, const char *args, bool whole_
 	if (processor_avail_count > 1 && !warm_smp) {
 		return "more than one processor runs: boot with cpus=1 (step 1), or sweetwarm_smp=1 (step 2)";
 	}
-	if (PE_parse_boot_argn("fb_flip", tail, sizeof(tail)) || PE_parse_boot_argn("fb_dpp", tail, sizeof(tail))) {
-		return "fb_flip/fb_dpp move the DECON off the boot framebuffer, which the loader and the next kernel expect";
+	{
+		uint32_t on = 0;
+		if ((PE_parse_boot_argn("fb_flip", &on, sizeof(on)) && on) || (PE_parse_boot_argn("fb_dpp", &on, sizeof(on)) && on) ||
+		    (PE_parse_boot_argn("sweetfb_dpp", &on, sizeof(on)) && on)) {
+			return "fb_flip/fb_dpp/sweetfb_dpp move the DECON off the boot framebuffer, which the loader and the next "
+			       "kernel expect";
+		}
 	}
 	{
 		uint64_t tcr = __builtin_arm_rsr64("TCR_EL1"), t0sz = tcr & 0x3f;
@@ -700,6 +706,9 @@ warm_go(struct warm_plan *w)
 		}
 	}
 	(void)ml_set_interrupts_enabled(FALSE);
+	/* with nothing else running from here (one processor, interrupts off), what other threads could have started
+	 * again: the GPU's jobs (a soft reset and its cores off) */
+	starlte_gpu_quiesce();
 	__builtin_arm_wsr64("CNTV_CTL_EL0", CNTV_CTL_EL0_IMASKED);
 	__builtin_arm_wsr64("CNTP_CTL_EL0", 0);
 	a5xelte_gic_quiesce();
