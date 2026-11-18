@@ -34,6 +34,10 @@
 #include <sys/mount.h>
 #include <sys/priv.h>
 #include <sys/proc.h>
+#include <sys/proc_internal.h>
+#include <sys/proc_private.h>
+#include <kern/task.h>
+#include <vm/vm_map_xnu.h>
 #include <sys/systm.h>
 #include <sys/sysctl.h>
 #include <sys/ubc_internal.h>
@@ -284,7 +288,8 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
  * (backboardd cannot reach mobilegestalt or iohideventsystem; tccd:
  * "profile not found"). SWEET runs without a sandbox: operations succeed
  * (checks allow, profile init is accepted); the few that must return
- * data (container paths, extension tokens) fail with ENOENT. The first
+ * data answer what is known (container paths: below; extension tokens:
+ * sweet_sbx_ext) and fail with ENOENT otherwise. The first
  * use of each operation number is logged.
  */
 static uint64_t sweet_sandbox_seen;
@@ -369,6 +374,101 @@ sweet_sandbox_extension_consume(user_addr_t arg)
 	return copyout(&handle, (user_addr_t)a.handle, sizeof(handle));
 }
 
+/*
+ * Operation 4, "container path of a process": sandbox_container_path_for_pid() and
+ * sandbox_container_path_for_audit_token() of libsystem_sandbox (iOS 27: { pid, its version, buffer, size, whether the
+ * version is to be compared }, 8 bytes each). It used to fail with ENOENT for everyone, and an application extension
+ * hosted by PlugInKit does not run without an answer: -[PKService checkEnvironment:] puts "?" in a 1 KiB buffer, asks
+ * for its own container and raises NSInternalInconsistencyException (with errno) unless the call succeeds with a path
+ * longer than one byte. Every PlugInKit extension died there at start: SettingsImportExtension and the Spotlight index
+ * extensions of Music, TV, Books, Home, Tips, Notes, Phone, Podcasts, Voice Memos, SupportFlow and Contacts, 30 to 70
+ * aborts a boot (24B156), each one relaunched by its host.
+ *
+ * On an iPhone the Sandbox learns the container when the program is executed. Here nothing is confined, but whoever
+ * starts a program that lives in a container (RunningBoard an application, pkd an extension) has had its path from
+ * containermanagerd and passes it in the environment as CFFIXED_USER_HOME, where Foundation takes the home directory
+ * from. That is the answer: it is looked up among the strings exec left at the top of the process's stack (as
+ * sysctl kern.procargs2 reads them). A process without the variable has no container and gets ENOENT, as before.
+ */
+#define SWEET_SBX_CONTAINER_VARIABLE    "CFFIXED_USER_HOME="
+
+static int
+sweet_sandbox_container_path(user_addr_t arg)
+{
+	struct {
+		int64_t     pid;
+		uint64_t    pidversion;
+		user_addr_t buffer;
+		user_size_t size;
+		uint64_t    check_pidversion;
+	} a;
+	const size_t prefix = sizeof(SWEET_SBX_CONTAINER_VARIABLE) - 1;
+	user_addr_t user_stack;
+	size_t argslen, strings_size, len;
+	const char *s, *end;
+	char *strings;
+	vm_map_t map;
+	task_t task;
+	proc_t p;
+	int error;
+
+	if ((error = copyin(arg, &a, sizeof(a))) != 0) {
+		return error;
+	}
+	if (a.buffer == 0 || a.size == 0) {
+		return EINVAL;
+	}
+	p = proc_find((int)a.pid);
+	if (p == PROC_NULL) {
+		return ESRCH;
+	}
+	if (a.check_pidversion && (uint64_t)proc_pidversion(p) != a.pidversion) {
+		proc_rele(p);
+		return ESRCH;
+	}
+	user_stack = p->user_stack;
+	argslen = p->p_argslen;
+	task = proc_task(p);
+	if (user_stack == 0 || argslen == 0 || argslen > ARG_MAX || task == TASK_NULL) {
+		proc_rele(p);
+		return ENOENT;
+	}
+	/* as sysctl_procargsx(): the task keeps the map alive once the process is let go */
+	task_reference(task);
+	proc_rele(p);
+	map = get_task_map_reference(task);
+	task_deallocate(task);
+	if (map == VM_MAP_NULL) {
+		return ENOENT;
+	}
+	strings_size = vm_map_round_page(argslen, vm_map_page_mask(map));
+	strings = kalloc_data(strings_size, Z_WAITOK | Z_ZERO);
+	if (strings == NULL) {
+		vm_map_deallocate(map);
+		return ENOMEM;
+	}
+	if (vm_map_read_user(map, (vm_map_address_t)(user_stack - strings_size), strings, strings_size) != KERN_SUCCESS) {
+		vm_map_deallocate(map);
+		kfree_data(strings, strings_size);
+		return ENOENT;          /* the process is on its way out, or has unmapped its own stack */
+	}
+	vm_map_deallocate(map);
+
+	error = ENOENT;
+	end = strings + strings_size;
+	for (s = end - argslen; s < end; s += len + 1) {
+		len = strnlen(s, end - s);
+		if (len > prefix && s + len < end && strncmp(s, SWEET_SBX_CONTAINER_VARIABLE, prefix) == 0) {
+			s += prefix;
+			len -= prefix;
+			error = len < a.size ? copyout(s, a.buffer, len + 1) : ENAMETOOLONG;
+			break;
+		}
+	}
+	kfree_data(strings, strings_size);
+	return error;
+}
+
 static int
 sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
 {
@@ -383,6 +483,7 @@ sweet_sandbox_syscall(struct proc *p, int call, user_addr_t arg)
 	}
 	switch (call) {
 	case 4:         /* container path (audit token / pid) */
+		return sweet_sandbox_container_path(arg);
 	case 5:         /* extension issue */
 	case 6:         /* extension consume */
 		return ENOENT;
