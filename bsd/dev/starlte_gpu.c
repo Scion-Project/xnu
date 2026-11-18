@@ -198,6 +198,22 @@ sg_probe(vm_offset_t pmu, const char *when)
 #define ASN(n)                  (0x2400u + (n) * 0x40u)
 
 static vm_offset_t sg_mem;
+/*
+ * Stages 3 and 4 are self-tests: a green square and a magenta triangle drawn by the GPU. On a
+ * normal boot they must not show: the panel holds the loader's splash. So the panel's GPU
+ * mapping (SG_PANEL_VA) points at a scratch window (the last SG_SCRATCH_PAGES pages of stage 4's
+ * tiler heap, which one triangle never reaches) while they run, and the result is logged to the
+ * console as before. The real panel is mapped for them only with the boot-arg -v or
+ * stargpu_selftest=1 (a developer looking at the picture). Cleared before stage 5 (the present).
+ */
+#define SG_SCRATCH_PAGES 256u
+static bool sg_selftest_offscreen;
+static bool
+sg_selftest_visible(void)
+{
+	uint32_t v = 0;
+	return PE_parse_boot_argn("-v", &v, sizeof(v)) || (PE_parse_boot_argn("stargpu_selftest", &v, sizeof(v)) && v);
+}
 
 static void
 sg_wr(vm_offset_t base, uint32_t off, uint32_t v)
@@ -282,7 +298,10 @@ sg_tables(void)
 		volatile uint64_t *pl3 = (volatile uint64_t *)(sg_mem + table);
 		l2[((SG_PANEL_VA >> 21) & 0x1ff) + t] = (SG_MEM_PA + table) | 3;
 		for (unsigned i = 0; i < 512 && t * 512 + i < pages; i++) {
-			pl3[i] = (SG_FB_PA + (uint64_t)(t * 512 + i) * 0x1000) | 0x2c1;
+			uint64_t pn = (uint64_t)(t * 512 + i);
+			pl3[i] = (sg_selftest_offscreen ?
+			    SG_HEAP_PA + SG_TRI_HEAP_BYTES - SG_SCRATCH_PAGES * 0x1000ull + (pn % SG_SCRATCH_PAGES) * 0x1000ull :
+			    SG_FB_PA + pn * 0x1000) | 0x2c1;
 		}
 	}
 	for (unsigned t = 0; t * 512 < SG_TRI_HEAP_BYTES / 0x1000; t++) {
@@ -2349,6 +2368,8 @@ sg_jobs(vm_offset_t pmu)
 		goto restore;
 	}
 	uint32_t shaders = sg_rd(sg_gpu, SHADER_PRESENT_LO);
+	sg_selftest_offscreen = !sg_selftest_visible();
+	printf("STARLTE GPU: self-test draws %s\n", sg_selftest_offscreen ? "offscreen (the panel keeps the splash)" : "on the panel");
 	if (sg_gpu_up(shaders)) {
 		bool a = sg_write_value(0x000, 0x100, 3, 0, 0, shaders, "WRITE_VALUE zero");
 		bool b = sg_write_value(0x200, 0x300, 7, 0x4554494252415453ull,
@@ -2368,6 +2389,7 @@ sg_jobs(vm_offset_t pmu)
 			 * the present (stage 5), which keeps the GPU powered. */
 			bool drawn = sg_gpu_up(shaders) && sg_stage4(shaders);
 			sweet_fb_hold_until = 0;
+			sg_selftest_offscreen = false;      /* the present maps the real panel */
 			if (drawn && sg_gpu_up(shaders)) {
 				sg_clock_up();
 				sgp_shaders = shaders;
@@ -2385,6 +2407,7 @@ sg_jobs(vm_offset_t pmu)
 			}
 		}
 	}
+	sg_selftest_offscreen = false;
 	sg_cores_off();
 restore:
 	if (starlte_pmic_write(1, SG_BUCK6, was) && starlte_pmic_read(1, SG_BUCK6, &now)) {
