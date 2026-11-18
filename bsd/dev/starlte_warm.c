@@ -128,6 +128,7 @@ _Static_assert(sizeof(struct scion_reentry) == SCNR_SIZE, "scion_reentry size");
 extern int hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes);
 extern int starlte_ufs_hold_for_handoff(void);           /* herolte_ufs.c: its lock taken for good, the cache synced */
 extern void herolte_log_flush_now(void);
+extern void starlte_pmsg_note(const char *hdr);   /* herolte_ufs.c: a header + the console's tail into the pmsg ring */
 extern void a5xelte_gic_quiesce(void);                   /* pexpert/arm/pe_fiq.c */
 extern void hakios_max98512_quiesce(void);
 extern void hakios_cs47l93_quiesce(void);
@@ -725,10 +726,15 @@ warm_go(struct warm_plan *w)
 	hakios_exynos_pcie_quiesce();
 	delay(50 * 1000);
 	hakios_usb_gadget_quiesce();
+	/* From here the console is gone: each step is a line in the log's ring, which a panic (sweetreboot=: to TWRP) and
+	 * the note before the jump put into the pmsg ring (TWRP: /sys/fs/pstore/pmsg-ramoops-0). */
+	printf("STARLTE WARM: step 1: the USB console stopped\n");
 	if (starlte_ufs_hold_for_handoff() != 0) {
 		warm_reset("the storage did not come to rest");
 	}
+	printf("STARLTE WARM: step 2: the storage held, its cache synced\n");
 	warm_wdt_arm();
+	printf("STARLTE WARM: step 3: the watchdog armed (WTCNT %u)\n", warm_wdt[2]);
 	if (others != 0) {
 		warm_off_sync = others;
 		(void)cpu_broadcast_xcall(&warm_off_sync, FALSE, warm_cpu_off, &warm_off_sync);
@@ -738,12 +744,15 @@ warm_go(struct warm_plan *w)
 		}
 	}
 	(void)ml_set_interrupts_enabled(FALSE);
+	printf("STARLTE WARM: step 4: interrupts off\n");
 	/* with nothing else running from here (one processor, interrupts off), what other threads could have started
 	 * again: the GPU's jobs (a soft reset and its cores off) */
 	starlte_gpu_quiesce();
+	printf("STARLTE WARM: step 5: the GPU stopped\n");
 	__builtin_arm_wsr64("CNTV_CTL_EL0", CNTV_CTL_EL0_IMASKED);
 	__builtin_arm_wsr64("CNTP_CTL_EL0", 0);
 	a5xelte_gic_quiesce();
+	printf("STARLTE WARM: step 6: the timers and the GIC off\n");
 	/* the staged pages to the point of coherency by address (any cache that holds them), then this core's caches */
 	for (unsigned i = 0; i < w->nparts; i++) {
 		for (vm_offset_t p = w->part[i].va; p < w->part[i].va + round_page(w->part[i].size); p += 64) {
@@ -756,6 +765,10 @@ warm_go(struct warm_plan *w)
 		}
 	}
 	__builtin_arm_dsb(DSB_SY);
+	printf("STARLTE WARM: step 7: the staged pages cleaned; TCR_EL1 %#llx SCTLR_EL1 %#llx; into the stub at 0x%llx "
+	    "(%llu pages, then the loader at 0x%llx)\n", __builtin_arm_rsr64("TCR_EL1"), __builtin_arm_rsr64("SCTLR_EL1"),
+	    WARM_STUB_PA, w->list_n, WARM_SLOT_PA + SCNR_ENTRY_OFFSET);
+	starlte_pmsg_note("STARBITE: warm restart: XNU's handoff reached the stub (no panic); the console's last lines:\n");
 	FlushPoC_Dcache();
 
 	register uint64_t x0 __asm__("x0") = WARM_REC_PA;

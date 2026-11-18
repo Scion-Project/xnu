@@ -1134,11 +1134,12 @@ starlte_pmsg_put(volatile uint8_t *d, uint32_t *o, const char *s, uint32_t n)
  * The panic log's head (panic string, panicked thread, backtrace; its tail is
  * the binary stackshot) and the console's last lines before the panic, into
  * the ramoops pmsg ring that TWRP shows as /sys/fs/pstore/pmsg-ramoops-0.
+ * With panic_head false (the warm restart's handoff, starlte_pmsg_note) only
+ * the header and the console's last lines.
  */
 static void
-starlte_panic_to_recovery(void)
+starlte_pmsg_console(const char *hdr, bool panic_head)
 {
-	static const char hdr[] = "STARBITE: XNU panic (sweetreboot), panic log head:\n";
 	static const char mid[] = "\n--- console before the panic:\n";
 	volatile uint32_t *h = (volatile uint32_t *)(void *)starlte_pmsg_va;
 	volatile uint8_t *d;
@@ -1149,13 +1150,16 @@ starlte_panic_to_recovery(void)
 
 	if (h != NULL) {
 		d = starlte_pmsg_va + 12;
-		starlte_pmsg_put(d, &o, hdr, sizeof(hdr) - 1);
-		if (b != NULL && e > b) {
-			starlte_pmsg_put(d, &o, b, (uint32_t)MIN(e - b, 11 * 1024));
+		starlte_pmsg_put(d, &o, hdr, (uint32_t)strlen(hdr));
+		if (panic_head) {
+			if (b != NULL && e > b) {
+				starlte_pmsg_put(d, &o, b, (uint32_t)MIN(e - b, 11 * 1024));
+			}
+			starlte_pmsg_put(d, &o, mid, sizeof(mid) - 1);
 		}
-		starlte_pmsg_put(d, &o, mid, sizeof(mid) - 1);
 		a5xelte_log_snapshot(&ring, &rsize, &total);
-		uint64_t n = MIN(total, MIN((uint64_t)rsize, (uint64_t)(STARLTE_PMSG_DATA - o)));
+		/* a note leaves 2 KiB for the loader's lines after it (the ring wraps over the oldest bytes) */
+		uint64_t n = MIN(total, MIN((uint64_t)rsize, (uint64_t)(STARLTE_PMSG_DATA - o - (panic_head ? 0 : 2048))));
 		for (uint64_t k = total - n; k < total; k++) {
 			starlte_pmsg_put(d, &o, &ring[k % rsize], 1);
 		}
@@ -1164,7 +1168,25 @@ starlte_panic_to_recovery(void)
 		h[2] = o;
 		__asm__ volatile ("dsb sy" ::: "memory");
 	}
+}
+
+static void
+starlte_panic_to_recovery(void)
+{
+	starlte_pmsg_console("STARBITE: XNU panic (sweetreboot), panic log head:\n", true);
 	starlte_reset_to_recovery();
+}
+
+/*
+ * The warm restart (bsd/dev/starlte_warm.c) right before it leaves this kernel: `hdr` and the console's last lines into
+ * the pmsg ring (the loader appends its own lines after them), so that TWRP shows how far a warm restart got whatever
+ * ends it. Nothing when the ring was not mapped (no sweetreboot=, sweetwdog= or console mapping at boot).
+ */
+void starlte_pmsg_note(const char *hdr);
+void
+starlte_pmsg_note(const char *hdr)
+{
+	starlte_pmsg_console(hdr, false);
 }
 
 static void
