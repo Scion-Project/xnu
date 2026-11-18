@@ -36,6 +36,9 @@
  */
 #include "SweetSurface.h"
 #include "hakios.sweetfb_frameinfo.h"   /* scion-kernel drivers/display/sweetfb, profiles/ios-27.copy */
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+#include "hakios.sweetfb_present.h"   /* sweetfb_nowait's state machine (scion-kernel drivers/display/sweetfb, fork_copy) */
+#endif
 
 extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
@@ -231,6 +234,7 @@ extern "C" bool sweet_fb_last_surface(uint64_t *pages, unsigned max_pages, unsig
 extern "C" int starlte_gpu_present_ready(void);
 extern "C" uint64_t starlte_gpu_user_seq(void);
 extern "C" int starlte_gpu_user_wait_seq(uint64_t seq, bool block);
+extern "C" uint64_t starlte_gpu_user_done(void);
 #endif
 extern "C" int herolte_gpu_present_slot(uint32_t id, uint64_t first_pa);
 extern "C" int herolte_gpu_present_map(uint32_t id, const uint64_t *pages, unsigned n);
@@ -339,16 +343,14 @@ enum {
 static int sweet_fb_relbuf;
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
 /*
- * boot-arg sweetfb_nowait=1 (off by default; NOT run on a phone when written, 17 Nov 2026): the vsync tick does not sleep
- * for the GPU. Without it a tick that takes a frame whose chains are still running sleeps until they are done, then
- * presents it; the tick handler holds the timer the whole time, so the next tick, and with it the window server's next
- * vsync callback, comes late: on 12 Nov phone 1 measured "tick slept for the GPU avg 13-16 ms" and "ticks avg 20-22 ms"
- * while swiping (sweetfb_prof=1), i.e. the 60 Hz callback stretched to 45-50 Hz before anything else. With it a frame whose
- * chains are not done stays pending and a later tick takes it once they are (never before: what is shown is always a
- * finished frame), unless a newer frame has come in meanwhile, which is then the one shown (the older is released as a
- * replaced one is). The cost: a frame done just after a tick waits up to a refresh to be shown.
+ * boot-arg sweetfb_nowait=1 (off by default; NOT run on a phone when written, 18 Nov 2026): the vsync tick never sleeps for the
+ * GPU (without it a tick that takes a frame whose chains are still running sleeps until they are done and holds the timer: "tick
+ * slept for the GPU avg 11-12 ms", "ticks avg 20 ms" while swiping, 17 Nov). A frame stays recorded until the first tick after
+ * its chains are done (the GPU queue's done number, written by the queue's worker as it retires each chain); a newer swap
+ * replaces it meanwhile; a frame that waits too long is taken by the old sleeping path, counted, and with the GPU idle logged
+ * once as a logic error. The state machine is hakios.sweetfb_present.h (host-tested); docs/ios27/PRESENT.md.
  */
-static uint32_t sweet_fb_nowait, sweet_fb_nowait_deferred, sweet_fb_nowait_dropped;
+static uint32_t sweet_fb_nowait;
 #endif
 static uint32_t sweet_fb_relbuf_sent;
 /*
@@ -431,6 +433,9 @@ public:
 	uint32_t      fSwapID;
 	bool          fConsolePaused;
 	uint8_t       fPending[SWEET_FB_SWAP_REC_MAX];      /* latest swap, not yet shown */
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	struct sfp    fPres;                                /* sweetfb_nowait: what fPending is waiting for (fDirty == fPres.recorded) */
+#endif
 	uint64_t      fPendingSeq;                          /* the last GPU chain queued when it came (STARLTE, sweetspeed&262144) */
 	bool          fDirty;
 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
@@ -845,6 +850,21 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 #endif
 	uint8_t *rec = NULL;
 	uint64_t recSeq = 0;
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (flush && sweet_fb_nowait) {
+		/* sweetfb_nowait: taken only when its chains are done (or for the old path: see hakios.sweetfb_present.h) */
+		uint32_t pid, idle_before = fb->fPres.idle_fallbacks;
+		uint64_t pseq;
+		enum sfp_action act = sfp_tick(&fb->fPres, starlte_gpu_user_done(), starlte_gpu_user_pending() == 0, &pid, &pseq);
+		flush = act == SFP_SHOW || act == SFP_FALLBACK;
+		if (fb->fPres.idle_fallbacks != idle_before && !fb->fPres.warned) {
+			fb->fPres.warned = true;
+			IOLog("A5XELTE FB nowait: SELF-CHECK: swap %u (GPU chain %llu) not seen done after %u ticks with the GPU idle (done "
+			    "%llu): taken by the old path; every such frame is counted on the nowait line\n", pid, pseq, SFP_IDLE_TICKS,
+			    starlte_gpu_user_done());
+		}
+	}
+#endif
 	if (flush) {
 		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_MAX);
 		if (rec != NULL) {
@@ -868,25 +888,6 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		if (sweet_fb_dp.attached && __atomic_load_n(&sweet_fb_dpp_want, __ATOMIC_ACQUIRE) == 0) {
 			fb->dppLeave("switched off (kern.hakios.sweetfb_dpp=0)", true, SWEET_FB_DPP_LEAVE_OFF);
 		}
-	}
-	if (rec != NULL && recSeq != 0 && sweet_fb_nowait && starlte_gpu_user_wait_seq(recSeq, false) != 0) {
-		/* sweetfb_nowait: its chains are not done; back to pending unless a newer frame came in meanwhile (see above) */
-		IOLockLock(fb->fLock);
-		bool newer = fb->fDirty;
-		if (!newer) {
-			fb->fDirty = true;              /* (fPending is still this frame: nothing has been recorded since) */
-		}
-		IOLockUnlock(fb->fLock);
-		if (newer) {
-			sweet_fb_nowait_dropped++;
-			if (sweet_fb_relbuf) {
-				fb->relbuf(sweet_fb_swap_id(rec));
-			}
-		} else {
-			sweet_fb_nowait_deferred++;
-		}
-		IOFreeData(rec, SWEET_FB_SWAP_REC_MAX);
-		rec = NULL;
 	}
 	if (rec != NULL) {
 		sweet_fb_trace_event('F', sweet_fb_swap_id(rec));
@@ -989,9 +990,11 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 				    sweet_fb_gaps[3], sweet_fb_gaps[4]);
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
 				if (sweet_fb_nowait) {
-					IOLog("A5XELTE FB nowait: ticks that left a frame for a later one (its chains not done) %u, frames a "
-					    "newer one replaced meanwhile %u\n", sweet_fb_nowait_deferred, sweet_fb_nowait_dropped);
-					sweet_fb_nowait_deferred = sweet_fb_nowait_dropped = 0;
+					struct sfp *ps = &fb->fPres;
+					IOLog("A5XELTE FB nowait: frames shown done %u; ticks that left a frame for a later one (its chains not "
+					    "done) %u, frames a newer one replaced meanwhile %u; taken by the old path: GPU slow %u, SELF-CHECK %u\n",
+					    ps->shown, ps->deferred, ps->replaced, ps->fallbacks, ps->idle_fallbacks);
+					ps->shown = ps->deferred = ps->replaced = ps->fallbacks = ps->idle_fallbacks = 0;
 				}
 #endif
 			}
@@ -1343,6 +1346,11 @@ AppleCLCD::swap(const uint8_t *rec, uint32_t size)
 #endif
 	IOLockLock(fLock);
 	uint32_t replaced = fDirty ? sweet_fb_swap_id(fPending) : 0;
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (sweet_fb_nowait) {
+		(void)sfp_swap(&fPres, sweet_fb_swap_id(rec), seq);
+	}
+#endif
 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_MAX);
 	fPendingSeq = seq;
 	fDirty = true;
@@ -2430,6 +2438,11 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 				fFB->fPowerOff = off;
 				fFB->fFadeStep = 0;
 				fFB->fDirty = true;     /* on: redraw the latest frame */
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+				if (sweet_fb_nowait) {
+					sfp_redraw(&fFB->fPres);
+				}
+#endif
 			}
 			IOLockUnlock(fFB->fLock);
 			IOLog("SWEET FB: display %s\n", off ? "off" : "on");
