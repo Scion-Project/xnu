@@ -558,8 +558,10 @@ __dead2 __unused
 static void
 arm64_implementation_specific_error(arm_saved_state_t *state, uint64_t esr, vm_offset_t far)
 {
-#pragma unused (state, esr, far)
-	panic_plain("Unhandled implementation specific error\n");
+#pragma unused (state)
+	/* The syndrome and the address name the access the system refused (an external abort: memory another owner keeps). */
+	/* From UniXNU's platform-error-name-address.patch (github.com/UniXNU/UniXNU commit eb0a987), BSD-2-Clause-Patent. */
+	panic_plain("Unhandled implementation specific error: esr 0x%llx far 0x%llx\n", (unsigned long long)esr, (unsigned long long)far);
 }
 
 #if CONFIG_KERNEL_INTEGRITY
