@@ -478,21 +478,30 @@ shared_region_pager_data_initialize(
 
 #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 /*
- * Boot-arg sweet_sr_spec=1 (off by default; NOT run on a phone): a source page read here for a neighbour of the requested
+ * Boot-arg sweet_sr_spec (on by default on the Galaxy S9, STARLTE, since 18 November 2026, off elsewhere; sweet_sr_spec=0
+ * turns it off, sweet_sr_spec=1 turns it on): a source page read here for a neighbour of the requested
  * page goes on the speculative queue, as the requested page's own source fault in the data request does. The fault is a
  * stealth one (fault_info.stealth), so a page it reads in is left on no paging queue, and a page on no queue is never
  * reclaimed: with 16 KiB slide pages on this 4 KiB kernel every page-in reads up to three such neighbours, which then stay
  * resident until their object goes. From UniXNU's native-4k-shared-region-slide.patch (github.com/UniXNU/UniXNU commit
  * edd7aff, 10 November 2026, by its contributors), BSD-2-Clause-Patent for its lines (LICENSES/BSD-2-Clause-Patent-UniXNU.txt
  * in scion-kernel); the boot-argument and the function around them are Scion's.
+ * It has run on a phone once: an S9 booted with it on (18 November 2026) without a fault; wired memory after the bench
+ * was 709 MiB with it against 916 MiB without, compressed 10 against 255,
+ * from two boots that were not a clean A/B.
  */
 static void
 sweet_sr_speculate(vm_page_t page)
 {
 	static int enabled = -1;
 	if (enabled < 0) {
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		uint32_t value = 1;
+#else
 		uint32_t value = 0;
-		enabled = (PE_parse_boot_argn("sweet_sr_spec", &value, sizeof(value)) && value == 1) ? 1 : 0;
+#endif
+		(void)PE_parse_boot_argn("sweet_sr_spec", &value, sizeof(value));
+		enabled = (value == 1) ? 1 : 0;
 	}
 	if (!enabled) {
 		return;
