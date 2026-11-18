@@ -64,6 +64,7 @@
 #include <ptrauth.h>
 extern boolean_t diversify_user_jop;
 #endif /* __has_feature(ptrauth_calls) */
+#include <pexpert/pexpert.h>      /* PE_parse_boot_argn (sweet_sr_spec) */
 
 extern int panic_on_dyld_issue;
 
@@ -477,6 +478,35 @@ shared_region_pager_data_initialize(
 
 #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 /*
+ * Boot-arg sweet_sr_spec=1 (off by default; NOT run on a phone): a source page read here for a neighbour of the requested
+ * page goes on the speculative queue, as the requested page's own source fault in the data request does. The fault is a
+ * stealth one (fault_info.stealth), so a page it reads in is left on no paging queue, and a page on no queue is never
+ * reclaimed: with 16 KiB slide pages on this 4 KiB kernel every page-in reads up to three such neighbours, which then stay
+ * resident until their object goes. From UniXNU's native-4k-shared-region-slide.patch (github.com/UniXNU/UniXNU commit
+ * edd7aff, 10 November 2026, by its contributors), BSD-2-Clause-Patent for its lines (LICENSES/BSD-2-Clause-Patent-UniXNU.txt
+ * in scion-kernel); the boot-argument and the function around them are Scion's.
+ */
+static void
+sweet_sr_speculate(vm_page_t page)
+{
+	static int enabled = -1;
+	if (enabled < 0) {
+		uint32_t value = 0;
+		enabled = (PE_parse_boot_argn("sweet_sr_spec", &value, sizeof(value)) && value == 1) ? 1 : 0;
+	}
+	if (!enabled) {
+		return;
+	}
+	if (page->vmp_q_state != VM_PAGE_ON_SPECULATIVE_Q) {
+		vm_page_lockspin_queues();
+		if (page->vmp_q_state != VM_PAGE_ON_SPECULATIVE_Q) {
+			vm_page_speculate(page, FALSE);
+		}
+		vm_page_unlock_queues();
+	}
+}
+
+/*
  * sweet: a 4 KiB-page kernel sliding a 16 KiB-page (arm64e, slide info v5)
  * cache. The loop below assumes slide pages are no larger than kernel pages;
  * here each 4 KiB page is slid inside its whole 16 KiB slide page, assembled
@@ -521,6 +551,7 @@ retry:
 		return error_code ? error_code : KERN_MEMORY_ERROR;
 	}
 	vm_object_t page_obj = VM_PAGE_OBJECT(page);
+	sweet_sr_speculate(page);
 	bcopy((const void *)phystokv((pmap_paddr_t)VM_PAGE_GET_PHYS_PAGE(page) << PAGE_SHIFT), buf, PAGE_SIZE);
 	vm_page_wakeup_done(page_obj, page);
 	vm_object_paging_end(page_obj);
