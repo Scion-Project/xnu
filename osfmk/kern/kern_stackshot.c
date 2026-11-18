@@ -5433,7 +5433,7 @@ kdp_stackshot_kcdata_format(void)
 		kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, STACKSHOT_KCTYPE_OS_BUILD_VERSION, length_to_copy, (void *)osversion));
 
 
-		length_to_copy =  MIN((uint32_t)(strlen(PE_boot_args()) + 1), BOOT_LINE_LENGTH);
+		length_to_copy =  MIN((uint32_t)(strlen(PE_boot_args()) + 1), PE_BOOT_ARGS_LENGTH);
 		kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, STACKSHOT_KCTYPE_BOOTARGS, length_to_copy, PE_boot_args()));
 
 		kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, KCDATA_TYPE_TIMEBASE, sizeof(timebase), &timebase));

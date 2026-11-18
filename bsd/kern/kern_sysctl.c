@@ -2358,10 +2358,18 @@ sysctl_sysctl_bootargs
 (__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
 {
 	int error;
-	char buf[BOOT_LINE_LENGTH];
+	char buf[PE_BOOT_ARGS_LENGTH];
 
-	strlcpy(buf, PE_boot_args(), BOOT_LINE_LENGTH);
-	error = sysctl_io_string(req, buf, BOOT_LINE_LENGTH, 0, NULL);
+	strlcpy(buf, PE_boot_args(), sizeof(buf));
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/*
+	 * The S9's line can be longer than BOOT_LINE_LENGTH (its built-in defaults, osfmk/arm/arm_init.c): a reader that
+	 * asks with a BOOT_LINE_LENGTH buffer gets the line's first BOOT_LINE_LENGTH - 1 bytes, not ENOMEM.
+	 */
+	error = sysctl_io_string(req, buf, sizeof(buf), 1, NULL);
+#else
+	error = sysctl_io_string(req, buf, sizeof(buf), 0, NULL);
+#endif
 	return error;
 }
 
