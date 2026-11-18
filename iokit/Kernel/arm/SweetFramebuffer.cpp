@@ -1557,6 +1557,9 @@ AppleCLCD::present(const uint8_t *rec)
 			/* Not PE_initialize_console(kPEDisableScreen): its console switch
 			 * writes the read-only-late cons_ops_index and panics. */
 			sweet_console_muted = 1;
+		} else {
+			/* The GUI presents now: end the quiet boot (pe_serial.c) and let kernel text draw as it always did. */
+			sweet_console_muted = 0;
 		}
 	}
 

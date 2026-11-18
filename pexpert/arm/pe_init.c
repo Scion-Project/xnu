@@ -552,6 +552,20 @@ PE_create_console(void)
 	 */
 	check_for_panic_log();
 
+#if defined(ARM64_BOARD_CONFIG_A5XELTE) || defined(ARM64_BOARD_CONFIG_SWEET)
+	extern int sweet_console_muted;     /* osfmk/console/serial_console.c, set by pe_serial.c for quiet boot */
+	if (sweet_console_muted) {
+		/*
+		 * Quiet boot: XNU's own video console must not map or clear the boot
+		 * framebuffer either. An empty PE_Video takes initialize_screen()'s
+		 * "No video - forcing serial mode" path, which touches no pixels.
+		 */
+		PE_Video none = {0};
+		PE_initialize_console(&none, kPETextMode);
+		return;
+	}
+#endif
+
 	if (PE_state.video.v_display) {
 		PE_initialize_console(&PE_state.video, kPEGraphicsMode);
 	} else {

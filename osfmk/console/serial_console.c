@@ -284,9 +284,10 @@ extern void a5xelte_log_append(const char *c, int size); /* bsd/dev/a5xelte_emmc
 #endif
 #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
 /*
- * Set by AppleCLCD (boot-arg sweetfb_noconsole=1) once the GUI presents:
- * console text still goes to the persistent log, but is not drawn over
- * the GUI. A panic draws again.
+ * Set by pe_serial.c for a quiet boot (no -v) and cleared by AppleCLCD when the
+ * GUI first presents. Set again by AppleCLCD with boot-arg sweetfb_noconsole=1:
+ * console text still goes to the persistent log, but is not drawn over the GUI.
+ * A panic draws again.
  */
 int sweet_console_muted;
 #endif
