@@ -176,10 +176,13 @@ TUNABLE(uint32_t, arm_diag, "diag", 0);
  *
  * The loader hands over a 608-byte command line (its boot_args is the older layout; this kernel's line is
  * BOOT_LINE_LENGTH long), and the S9's settings alone fill almost all of it, so a test line had to drop
- * one setting to add another. Each argument below is appended to the kernel's own copy of the line unless
- * the loader's line already names it, so the loader's line carries only what it changes, and user space
- * reads the whole line through kern.bootargs as before. "sweetreboot" is one of them on purpose: without
- * it neither the USB console's "return" nor a panic can get the phone back to recovery.
+ * one setting to add another. Each argument below is appended, unless the loader's line already names it, to
+ * the kernel's effective line: starlte_boot_line, a buffer of its own (PE_BOOT_ARGS_LENGTH bytes) that holds the
+ * longest loader line and every default together, so no default is ever left out for room. PE_boot_args()
+ * returns it, so PE_parse_boot_argn and kern.bootargs (user space: launchd) read the loader's arguments and the
+ * defaults as one line, as before. boot_args' own CommandLine keeps the loader's line as it came.
+ * "sweetreboot" is one of them on purpose: without it neither the USB console's "return" nor a panic can get
+ * the phone back to recovery.
  * Naming "sweetdef" on the loader's line (sweetdef=0) leaves the line exactly as the loader gave it.
  */
 static const char starlte_default_bootargs[] =
@@ -215,6 +218,7 @@ static const char starlte_default_bootargs[] =
      */
     "cam_s9=7 cam_switch=1 sgu_irq=1 decmpfs_lz4=1 sweetatpath=1";
 
+/* STARLTE_BOOTARGS_ASSEMBLY_BEGIN: from here to ..._END builds on its own too (a host test of the line's assembly). */
 static bool
 starlte_bootarg_sep(char c)
 {
@@ -248,23 +252,27 @@ starlte_bootarg_named(const char *line, const char *key, size_t klen)
 /*
  * A default that does not fit the kernel's line is left out, and until 17 November 2026 nothing said so: with a long
  * line from the loader the last defaults (the modem's, then the other hardware's) fell off silently and a feature
- * "did not start". Their names are kept here and said once the log is up (starlte_bootargs_report).
+ * "did not start". Their names are kept here and said once the log is up (starlte_bootargs_report). Since
+ * 18 November 2026 the effective line is long enough for the longest loader line and every default (the
+ * _Static_assert below), so this is an alarm that should never fire.
  */
 static char starlte_bootargs_dropped[256];
 static unsigned starlte_bootargs_dropped_n;
-static unsigned starlte_bootargs_len;
 
-static void
-starlte_bootargs_defaults(boot_args *ba)
+/*
+ * The effective line: the loader's line (`loader`), then each default it does not name, into `out` (outsz bytes).
+ * Returns the line's length.
+ */
+static size_t
+starlte_bootargs_assemble(char *out, size_t outsz, const char *loader, const char *d)
 {
-	char *line = ba->CommandLine;
-	const char *d = starlte_default_bootargs;
-	size_t len;
+	size_t len = strlcpy(out, loader, outsz);
 
-	line[BOOT_LINE_LENGTH - 1] = '\0';
-	len = strlen(line);
-	if (starlte_bootarg_named(line, "sweetdef", 8)) {
-		return;
+	if (len >= outsz) {
+		len = outsz - 1;
+	}
+	if (starlte_bootarg_named(out, "sweetdef", 8)) {
+		return len;
 	}
 	while (*d) {
 		while (starlte_bootarg_sep(*d)) {
@@ -281,10 +289,10 @@ starlte_bootargs_defaults(boot_args *ba)
 		if (tlen == 0) {
 			break;
 		}
-		if (starlte_bootarg_named(line, t, (size_t)(k - t))) {
+		if (starlte_bootarg_named(out, t, (size_t)(k - t))) {
 			continue;
 		}
-		if (len + 1 + tlen >= BOOT_LINE_LENGTH) {
+		if (len + 1 + tlen >= outsz) {
 			/* no room: its name (not its value) for the report */
 			size_t nlen = (size_t)(k - t), have = strlen(starlte_bootargs_dropped);
 
@@ -301,14 +309,36 @@ starlte_bootargs_defaults(boot_args *ba)
 			continue;
 		}
 		if (len != 0) {
-			line[len++] = ' ';
+			out[len++] = ' ';
 		}
 		for (size_t i = 0; i < tlen; i++) {
-			line[len++] = t[i];
+			out[len++] = t[i];
 		}
-		line[len] = '\0';
+		out[len] = '\0';
 	}
-	starlte_bootargs_len = (unsigned)len;
+	return len;
+}
+/* STARLTE_BOOTARGS_ASSEMBLY_END */
+
+/*
+ * Every default appended costs at most its own bytes plus one separator, so a line of BOOT_LINE_LENGTH - 1 bytes
+ * from the loader and all of starlte_default_bootargs fit together: the defaults can no longer be left out for room.
+ * A default added past this budget stops the build here instead of dropping silently on a phone.
+ */
+_Static_assert(PE_BOOT_ARGS_LENGTH >= BOOT_LINE_LENGTH + sizeof(starlte_default_bootargs),
+    "STARLTE: the effective boot line (PE_BOOT_ARGS_LENGTH) cannot hold the loader's line and every default");
+
+/* Read by PE_boot_args() (pexpert/arm/pe_bootargs.c); read only once the kernel's constant data is locked down. */
+char starlte_boot_line[PE_BOOT_ARGS_LENGTH] BOOTARGS_SECTION_ATTR;
+static unsigned starlte_bootargs_len, starlte_bootargs_loader_len;
+
+static void
+starlte_bootargs_defaults(boot_args *ba)
+{
+	ba->CommandLine[BOOT_LINE_LENGTH - 1] = '\0';
+	starlte_bootargs_loader_len = (unsigned)strlen(ba->CommandLine);
+	starlte_bootargs_len = (unsigned)starlte_bootargs_assemble(starlte_boot_line, sizeof(starlte_boot_line),
+	    ba->CommandLine, starlte_default_bootargs);
 }
 
 /* Said once, when the log can carry it: how full the line is, and loudly which defaults are NOT in force. */
@@ -319,10 +349,10 @@ starlte_bootargs_report(void)
 	if (starlte_bootargs_dropped_n != 0) {
 		printf("STARLTE BOOTARGS: WARNING: %u built-in default(s) did NOT fit the kernel's line (%u of %u bytes; the "
 		    "loader's line is too long) and are NOT IN FORCE: %s\n", starlte_bootargs_dropped_n, starlte_bootargs_len,
-		    (unsigned)BOOT_LINE_LENGTH, starlte_bootargs_dropped);
+		    (unsigned)sizeof(starlte_boot_line), starlte_bootargs_dropped);
 	} else if (starlte_bootargs_len != 0) {
-		printf("STARLTE BOOTARGS: the line is %u of %u bytes; no built-in default was left out for room\n",
-		    starlte_bootargs_len, (unsigned)BOOT_LINE_LENGTH);
+		printf("STARLTE BOOTARGS: the line is %u of %u bytes (%u from the loader); no built-in default was left out "
+		    "for room\n", starlte_bootargs_len, (unsigned)sizeof(starlte_boot_line), starlte_bootargs_loader_len);
 	}
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, starlte_bootargs_report);

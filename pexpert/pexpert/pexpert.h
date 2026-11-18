@@ -348,6 +348,19 @@ extern PE_state_t PE_state;
 extern char * PE_boot_args(
 	void);
 
+#if XNU_KERNEL_PRIVATE
+/*
+ * The longest string PE_boot_args() returns, its NUL included. On the Galaxy S9 (STARLTE) it is the kernel's own
+ * effective line, the loader's line with the S9's built-in defaults after it (osfmk/arm/arm_init.c), which is longer
+ * than the loader's BOOT_LINE_LENGTH; everywhere else it is boot_args' CommandLine.
+ */
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+#define PE_BOOT_ARGS_LENGTH     2048
+#else
+#define PE_BOOT_ARGS_LENGTH     BOOT_LINE_LENGTH
+#endif
+#endif /* XNU_KERNEL_PRIVATE */
+
 extern boolean_t PE_parse_boot_argn(
 	const char      *arg_string,
 	void            *arg_ptr,
