@@ -966,6 +966,12 @@ set_proc_name(struct image_params *imgp, proc_t p)
 	bcopy((caddr_t)imgp->ip_ndp->ni_cnd.cn_nameptr, (caddr_t)p->p_comm, buflen);
 	p->p_comm[buflen] = '\0';
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* the Scion loader's boot-loop guard: acknowledged a while after SpringBoard starts (bsd/dev/starlte_guard.c) */
+	extern void scion_guard_exec(const char *comm, int pid);
+	scion_guard_exec(p->p_comm, proc_getpid(p));
+#endif
+
 	/*
 	 * This happens during image activation, so the crash behavior flags from
 	 * posix_spawn will have already been set. So we don't have to worry about
