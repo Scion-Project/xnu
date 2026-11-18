@@ -856,9 +856,24 @@ extern unsigned char iso_font[256 * 16];
 #define FBCON_FG        0xffffffffu
 #define FBCON_BG        0xff000000u
 
+/* osfmk/console/serial_console.c: kernel text is withheld from the screen while set. */
+extern int sweet_console_muted;
+
 static volatile uint32_t *fbcon_base;
 static uint32_t fbcon_width, fbcon_height, fbcon_stride;
 static uint32_t fbcon_cols, fbcon_rows, fbcon_col, fbcon_row;
+
+/*
+ * Quiet boot (no -v): the framebuffer keeps what the bootloader drew (the
+ * splash). fbcon_probe sets sweet_console_muted for that; AppleCLCD clears it
+ * when the GUI first presents, after which kernel text behaves as before.
+ * A panic always draws.
+ */
+static bool
+fbcon_quiet(void)
+{
+	return sweet_console_muted && !panic_active();
+}
 
 static void
 fbcon_clear_row(uint32_t row)
@@ -886,6 +901,9 @@ fbcon_init(void)
 	fbcon_cols = fbcon_width / (8 * FBCON_SCALE);
 	fbcon_rows = fbcon_height / (16 * FBCON_SCALE);
 	fbcon_col = fbcon_row = 0;
+	if (fbcon_quiet()) {
+		return;
+	}
 	for (uint32_t r = 0; r < fbcon_rows; r++) {
 		fbcon_clear_row(r);
 	}
@@ -900,6 +918,9 @@ fbcon_transmit_ready(void)
 static void
 fbcon_transmit_data(uint8_t c)
 {
+	if (fbcon_quiet()) {
+		return;
+	}
 	if (c == '\r') {
 		fbcon_col = 0;
 		return;
@@ -981,6 +1002,11 @@ fbcon_probe(void)
 	fbcon_base = (volatile uint32_t *)ml_io_map_wcomb(reg[0], reg[1]);
 	sweet_early_mark(18, "fbcon mapping returned");
 	if (fbcon_base != NULL) {
+		int verbose = 0;
+		/* Quiet unless -v: the boot framebuffer is not cleared or drawn over until the GUI presents. */
+		if (!PE_parse_boot_argn("-v", &verbose, sizeof(verbose))) {
+			sweet_console_muted = 1;
+		}
 		register_serial_functions(&sweet_fbcon_serial_functions);
 	}
 }
