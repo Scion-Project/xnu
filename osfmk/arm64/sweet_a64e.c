@@ -782,10 +782,12 @@ sweet_m3_unpin_check(thread_t th)
 }
 
 /* Where the traps come from: an open table of user PCs (racy counts are fine), read and reset by the
- * STARLTE TOP report (bsd/dev/starlte_smp.c). Shared-cache PCs are the same in every process. */
+ * STARLTE TOP report (bsd/dev/starlte_smp.c). Shared-cache PCs are the same in every process; a main binary's
+ * (0x1...) are not, so the site keeps the pid that last trapped there ("pc:count@pid" in "STARLTE LSE hot"). */
 #define SWEET_LSE_SITES 512
-struct sweet_lse_site { uint64_t pc, count; };
+struct sweet_lse_site { uint64_t pc, count; int pid; };     /* pid: the last process that trapped there */
 struct sweet_lse_site sweet_lse_sites[SWEET_LSE_SITES];
+extern int task_pid(task_t);
 
 static void
 lse_site(uint64_t pc)
@@ -796,6 +798,7 @@ lse_site(uint64_t pc)
 		if (e->pc == pc || e->pc == 0) {
 			e->pc = pc;
 			e->count++;
+			e->pid = task_pid(current_task());
 			return;
 		}
 	}
