@@ -35,6 +35,7 @@
  * the first swap on (it still reaches the persistent log; panics draw).
  */
 #include "SweetSurface.h"
+#include "hakios.sweetfb_frameinfo.h"   /* scion-kernel drivers/display/sweetfb, profiles/ios-27.copy */
 
 extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
@@ -323,6 +324,8 @@ enum {
 	kSweetFBIsMainDisplay           = 18,
 	kSweetFBGetDotPitch             = 28,
 	kSweetFBNotifications           = 72,
+	kSweetFBChangeFrameInfo         = 73,   /* sweetfb_frameinfo */
+	kSweetFBSupportedFrameInfo      = 74,
 };
 
 /* the shortest swap record taken: macOS 13 (Ventura) sends 0x468, iOS 16 0x46c, iPadOS 18 0x514; every
@@ -348,6 +351,14 @@ static int sweet_fb_relbuf;
 static uint32_t sweet_fb_nowait, sweet_fb_nowait_deferred, sweet_fb_nowait_dropped;
 #endif
 static uint32_t sweet_fb_relbuf_sent;
+/*
+ * boot-arg sweetfb_frameinfo=N (off by default; NOT run on a phone when written, 18 Nov 2026): IOMFB's frame info
+ * (docs/ios27/PRESENT.md, "Frame info"; the keys and the message in hakios.sweetfb_frameinfo.h). N's bits offer keys:
+ * 1 Presentation_time (when the present of a swap finished), 2 Last_Fence_or_Event_Time (when its GPU chains were seen
+ * done, STARLTE only). Selector 74 lists them, 73 takes a client's mask, and each shown swap goes to every client that
+ * asked as notification type 3. Without it: no key (selector 74 answers a count of 0, as before) and nothing sent.
+ */
+static uint32_t sweet_fb_fi, sweet_fb_fi_sent;
 /*
  * sweetfb_cav=1 (default off): CoreAnimation pacing aids for iOS 27.
  * iOS 27 backboardd does not pace on IOMFB vsync (type 5) or FrameInfo (type 3): IOMFBServer
@@ -440,6 +451,7 @@ public:
 	void removeClient(IOMobileFramebufferUserClient *client);
 	void swap(const uint8_t *rec, uint32_t size);
 	void relbuf(uint32_t swapId);
+	void frameInfo(uint32_t swapId, uint64_t presented, uint64_t fence);
 	uint64_t present(const uint8_t *rec);
 	void sweetSaveUnderRect(int32_t dx, int32_t dy, int32_t w, int32_t h);
 	void sweetSaveUnder(bool save);
@@ -467,6 +479,7 @@ public:
 	mach_port_t         fPort;
 	io_user_reference_t fFunc[SWEET_FB_NOTIFY_TYPES];
 	io_user_reference_t fRefcon[SWEET_FB_NOTIFY_TYPES];
+	uint32_t            fFIMask;        /* sweetfb_frameinfo: the keys this client enabled (selector 73) */
 
 	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
@@ -659,6 +672,13 @@ AppleCLCD::start(IOService *provider)
 		}
 	}
 	PE_parse_boot_argn("sweetfb_relbuf", &sweet_fb_relbuf, sizeof(sweet_fb_relbuf));
+	if (PE_parse_boot_argn("sweetfb_frameinfo", &sweet_fb_fi, sizeof(sweet_fb_fi))) {
+#if !defined(ARM64_BOARD_CONFIG_STARLTE)
+		sweet_fb_fi &= ~(1u << SFI_KEY_FENCE);  /* no GPU completion time known here */
+#endif
+		sweet_fb_fi = sfi_on(sweet_fb_fi);
+		IOLog("SWEET FB: sweetfb_frameinfo=%u: frame info offered, %u key(s)\n", sweet_fb_fi, sfi_count(sweet_fb_fi));
+	}
 	PE_parse_boot_argn("sweetfb_prof", &sweet_fb_prof, sizeof(sweet_fb_prof));
 	PE_parse_boot_argn("sweetfb_trace", &sweet_fb_trace, sizeof(sweet_fb_trace));
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
@@ -834,6 +854,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		}
 	}
 	IOLockUnlock(fb->fLock);
+	uint64_t fi_fence = 0;  /* sweetfb_frameinfo: when this frame's chains were seen done */
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
 	{
 		/* kern.hakios.sweetfb_dpp: off at the next tick; a write of 1 lets a DPP that gave itself up try again */
@@ -876,10 +897,11 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 	}
 	if (rec != NULL) {
 		sweet_fb_trace_event('G', 0);
+		fi_fence = sweet_fb_fi ? mach_continuous_time() : 0;
 	}
 	uint64_t pf_woke = sweet_fb_prof ? mach_absolute_time() : 0;
 #else
-	(void)recSeq; uint64_t pf_woke = sweet_fb_prof ? mach_absolute_time() : 0; /* FRANKEL (generic boards): as STARLTE */
+	(void)recSeq; (void)fi_fence; uint64_t pf_woke = sweet_fb_prof ? mach_absolute_time() : 0; /* FRANKEL (generic boards): as STARLTE */
 #endif
 	if (rec != NULL) {
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
@@ -902,6 +924,9 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 		}
 #endif
 		sweet_fb_trace_event('P', 0);
+		if (sweet_fb_fi) {
+			fb->frameInfo(sweet_fb_swap_id(rec), mach_continuous_time(), fi_fence);
+		}
 		if (sweet_fb_relbuf) {
 			fb->relbuf(sweet_fb_swap_id(rec));
 		}
@@ -1060,6 +1085,33 @@ AppleCLCD::relbuf(uint32_t swapId)
 	IOLockUnlock(fLock);
 	if (++sweet_fb_relbuf_sent <= 3 || (sweet_fb_relbuf_sent % 1000) == 0) {
 		IOLog("SWEET FB: relbuf info for swap %u (%u sent)\n", swapId, sweet_fb_relbuf_sent);
+	}
+}
+
+/* sweetfb_frameinfo: a shown swap's frame info (type 3) to each client that enabled a key (hakios.sweetfb_frameinfo.h) */
+void
+AppleCLCD::frameInfo(uint32_t swapId, uint64_t presented, uint64_t fence)
+{
+	struct sfi_frame f;
+	f.swap_id = swapId;
+	f.value[SFI_KEY_PRESENTED] = presented;
+	f.value[SFI_KEY_FENCE] = fence;
+	uint64_t values[SFI_ARGS], said = 0;
+	uint32_t n, sent = 0;
+	IOLockLock(fLock);
+	for (unsigned int i = 0; i < fClients->getCount(); i++) {
+		IOMobileFramebufferUserClient *c = (IOMobileFramebufferUserClient *)fClients->getObject(i);
+		n = sfi_message(sweet_fb_fi, c->fFIMask, &f, values);
+		if (n != 0) {
+			c->notify(SFI_TYPE, values, n);
+			said = values[0];
+			sent = n;
+		}
+	}
+	IOLockUnlock(fLock);
+	if (sent != 0 && (++sweet_fb_fi_sent <= 3 || (sweet_fb_fi_sent % 1000) == 0)) {
+		IOLog("SWEET FB: frame info for swap %u: mask %#llx, %u values (%u sent)\n", swapId, said, sent - 2,
+		    sweet_fb_fi_sent);
 	}
 }
 
@@ -2260,6 +2312,8 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 	IOReturn ret = kIOReturnSuccess;
 	uint64_t out[2] = { 0, 0 };
 	uint32_t outCount = 0;
+	char fiName[SFI_NAME_BYTES];
+	bool fiNamed = false;
 
 	switch (selector) {
 	case kSweetFBGetLayerDefaultSurface:
@@ -2300,6 +2354,23 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 	case kSweetFBIsMainDisplay:
 		out[0] = 1;
 		outCount = 1;
+		break;
+	case kSweetFBSupportedFrameInfo:
+		/* in: the key's index; out: the number of keys, the mode (0: notifications), the name (64 bytes) */
+		if (sfi_supported(sweet_fb_fi, args->scalarInputCount > 0 ? args->scalarInput[0] : 0, &out[0], &out[1],
+		    fiName) != 0 && sweet_fb_fi != 0) {
+			ret = kIOReturnBadArgument;
+		}
+		outCount = 2;
+		fiNamed = sweet_fb_fi != 0;
+		break;
+	case kSweetFBChangeFrameInfo:
+		/* in: 3 (the notification type) and the mask of the keys' indices */
+		if (sweet_fb_fi != 0 && args->scalarInputCount >= 2) {
+			fFIMask = sfi_mask(sweet_fb_fi, args->scalarInput[1]);
+			IOLog("SWEET FB: frame info mask %#x (asked %#llx %#llx)\n", fFIMask, args->scalarInput[0],
+			    args->scalarInput[1]);
+		}
 		break;
 	case kSweetFBGetDotPitch:
 		out[0] = SWEET_FB_DOT_PITCH;
@@ -2402,6 +2473,10 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 	}
 	if (args->structureOutputDescriptor == NULL && args->structureOutput != NULL) {
 		bzero(args->structureOutput, args->structureOutputSize);
+		if (fiNamed) {
+			memcpy(args->structureOutput, fiName,
+			    args->structureOutputSize < SFI_NAME_BYTES ? args->structureOutputSize : SFI_NAME_BYTES);
+		}
 	}
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
 	/* (sweetspeed&512) every call of the rarer selectors with its scalar inputs when they change (300 lines in all):
