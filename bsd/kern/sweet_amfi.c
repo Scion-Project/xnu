@@ -629,6 +629,17 @@ static const struct {
 } sweet_priv_entitlements[] = {
 	{ PRIV_SYSTEM_OVERRIDE, "com.apple.private.kernel.system-override" },
 	{ PRIV_PROC_CPUMON_OVERRIDE, "com.apple.private.kernel.override-cpumon" },
+	/*
+	 * Denied on the 18 November restore boot (every iOS 27 daemon back; daemon-restore census), each asked by daemons
+	 * that carry the entitlement on 24B156: terminusd aborts (_NRLogAbortWithPack, SIGTRAP) right after its NECP
+	 * session open is refused (10004); networkserviceproxy, rapportd and mDNSResponder ask the same.
+	 */
+	{ PRIV_GLOBAL_PROC_INFO, "com.apple.private.kernel.global-proc-info" },              /* 1002: dasd */
+	{ PRIV_VM_PRESSURE, "vm-pressure-level" },                                          /* 6000: dasd */
+	{ PRIV_NET_PRIVILEGED_SOCKET_DELEGATE, "com.apple.private.network.socket-delegate" }, /* 10001: mDNSResponder, trustd, cloudd, dasd */
+	{ PRIV_NET_PRIVILEGED_NETWORK_STATISTICS, "com.apple.private.network.statistics" },  /* 10003: symptomsd, terminusd */
+	{ PRIV_NET_PRIVILEGED_NECP_POLICIES, "com.apple.private.necp.policies" },           /* 10004: terminusd, networkserviceproxy */
+	{ PRIV_SKYWALK_REGISTER_USER_PIPE, "com.apple.private.skywalk.register-user-pipe" }, /* 12000: rapportd */
 };
 
 static int
