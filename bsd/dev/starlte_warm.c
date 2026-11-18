@@ -137,7 +137,9 @@ extern void hakios_exynos_camera_quiesce(void);
 extern void hakios_shannon_quiesce(void);
 extern void hakios_exynos_pcie_quiesce(void);
 extern void hakios_usb_gadget_quiesce(void);
-extern void starlte_gpu_quiesce(void);             /* bsd/dev/starlte_gpu.c */
+extern void starlte_gpu_quiesce(char *out, size_t outlen);   /* bsd/dev/starlte_gpu.c: silent, says what it did */
+extern void starlte_pmsg_append(const char *s);   /* herolte_ufs.c: one line appended to the pmsg ring */
+extern void console_suspend(void);                /* osfmk/console/serial_console.c */
 extern unsigned int processor_avail_count;
 extern int get_preemption_level(void);
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -706,11 +708,35 @@ warm_cpu_off(void *arg)
 	}
 }
 
+/*
+ * The steps once interrupts are off: printf may not be called then (XNU panics "Console I/O from interrupt-disabled
+ * context", serial_console.c: the phone, 18 Nov, at the first such printf). Each step is appended to the pmsg ring at
+ * once (a hang leaves it there for TWRP) and kept here, to be appended again after the note before the jump (which
+ * starts the ring again).
+ */
+static char warm_steps[1024];
+
+static void
+warm_mark(const char *fmt, ...) __printflike(1, 2);
+static void
+warm_mark(const char *fmt, ...)
+{
+	char line[256];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	starlte_pmsg_append(line);
+	strlcat(warm_steps, line, sizeof(warm_steps));
+}
+
 __attribute__((noreturn))
 static void
 warm_go(struct warm_plan *w)
 {
 	uint32_t others = processor_avail_count - 1;
+	char gpu[160];
 
 	printf("STARLTE WARM: point of no return: %llu pages to 0x%llx (+ %u more parts), payload SHA-256 %02x%02x%02x%02x..., "
 	    "the next kernel at 0x%llx (%llu MiB); the watchdog armed for %u s\n", w->list_n, WARM_SLOT_PA, w->nparts - 1,
@@ -743,16 +769,20 @@ warm_go(struct warm_plan *w)
 			warm_reset("not every processor went off");
 		}
 	}
+	/* No printf from here on (interrupts off: see warm_mark). The console suspended as for sleep, so that a line
+	 * some driver still prints goes straight out (and into the log's ring) instead of panicking. */
+	warm_steps[0] = '\0';
+	console_suspend();
 	(void)ml_set_interrupts_enabled(FALSE);
-	printf("STARLTE WARM: step 4: interrupts off\n");
+	warm_mark("STARLTE WARM: step 4: the console suspended, interrupts off\n");
 	/* with nothing else running from here (one processor, interrupts off), what other threads could have started
 	 * again: the GPU's jobs (a soft reset and its cores off) */
-	starlte_gpu_quiesce();
-	printf("STARLTE WARM: step 5: the GPU stopped\n");
+	starlte_gpu_quiesce(gpu, sizeof(gpu));
+	warm_mark("STARLTE WARM: step 5: the GPU: %s\n", gpu);
 	__builtin_arm_wsr64("CNTV_CTL_EL0", CNTV_CTL_EL0_IMASKED);
 	__builtin_arm_wsr64("CNTP_CTL_EL0", 0);
 	a5xelte_gic_quiesce();
-	printf("STARLTE WARM: step 6: the timers and the GIC off\n");
+	warm_mark("STARLTE WARM: step 6: the timers and the GIC off\n");
 	/* the staged pages to the point of coherency by address (any cache that holds them), then this core's caches */
 	for (unsigned i = 0; i < w->nparts; i++) {
 		for (vm_offset_t p = w->part[i].va; p < w->part[i].va + round_page(w->part[i].size); p += 64) {
@@ -765,10 +795,11 @@ warm_go(struct warm_plan *w)
 		}
 	}
 	__builtin_arm_dsb(DSB_SY);
-	printf("STARLTE WARM: step 7: the staged pages cleaned; TCR_EL1 %#llx SCTLR_EL1 %#llx; into the stub at 0x%llx "
+	warm_mark("STARLTE WARM: step 7: the staged pages cleaned; TCR_EL1 %#llx SCTLR_EL1 %#llx; into the stub at 0x%llx "
 	    "(%llu pages, then the loader at 0x%llx)\n", __builtin_arm_rsr64("TCR_EL1"), __builtin_arm_rsr64("SCTLR_EL1"),
 	    WARM_STUB_PA, w->list_n, WARM_SLOT_PA + SCNR_ENTRY_OFFSET);
 	starlte_pmsg_note("STARBITE: warm restart: XNU's handoff reached the stub (no panic); the console's last lines:\n");
+	starlte_pmsg_append(warm_steps);
 	FlushPoC_Dcache();
 
 	register uint64_t x0 __asm__("x0") = WARM_REC_PA;

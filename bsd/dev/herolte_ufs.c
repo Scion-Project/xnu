@@ -1189,6 +1189,38 @@ starlte_pmsg_note(const char *hdr)
 	starlte_pmsg_console(hdr, false);
 }
 
+/*
+ * One line appended to the pmsg ring as the loader appends (xnuloader/sboot xnu_boot.c pmsg_put: a ring that is not a
+ * ring is started again). For the warm restart's steps once interrupts are off, when printf may not be called (XNU
+ * panics "Console I/O from interrupt-disabled context"). Nothing when the ring was not mapped.
+ */
+void starlte_pmsg_append(const char *s);
+void
+starlte_pmsg_append(const char *s)
+{
+	volatile uint32_t *h = (volatile uint32_t *)(void *)starlte_pmsg_va;
+	volatile uint8_t *d;
+
+	if (h == NULL) {
+		return;
+	}
+	d = starlte_pmsg_va + 12;
+	if (h[0] != 0x43474244U || h[1] >= STARLTE_PMSG_DATA || h[2] > STARLTE_PMSG_DATA) {
+		h[0] = 0x43474244U;                     /* "DBGC" */
+		h[1] = 0;
+		h[2] = 0;
+	}
+	for (; *s != '\0'; s++) {
+		uint32_t start = h[1];
+		d[start] = (uint8_t)*s;
+		h[1] = (start + 1) % STARLTE_PMSG_DATA;
+		if (h[2] < STARLTE_PMSG_DATA) {
+			h[2] = h[2] + 1;
+		}
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+
 static void
 starlte_reboot_setup(void)
 {

@@ -2602,16 +2602,38 @@ starlte_gpu_probe(void)
  * bsd/dev/starlte_warm.c (sweetwarm=, NOT run on a phone): before a warm restart hands the memory to the next kernel,
  * the GPU stops reading and writing it (its page tables and buffers are in this kernel's RAM): a soft reset, which ends
  * every job and the MMU's state, then its cores off. Called with interrupts off, after the warm restart's point of no
- * return; nothing when this driver never mapped the GPU.
+ * return, so it prints nothing (XNU panics on console output with interrupts off: the phone, 18 Nov): what it did is
+ * written into `out` instead. The same registers and order as sg_soft_reset() and sg_cores_off(). Nothing when this
+ * driver never mapped the GPU.
  */
-void starlte_gpu_quiesce(void);
+void starlte_gpu_quiesce(char *out, size_t outlen);
 void
-starlte_gpu_quiesce(void)
+starlte_gpu_quiesce(char *out, size_t outlen)
 {
+	uint32_t raw = 0;
+	unsigned us;
+
 	if (!sg_gpu) {
+		snprintf(out, outlen, "no GPU mapped");
 		return;
 	}
-	(void)sg_soft_reset();
-	sg_cores_off();
+	sg_wr(sg_gpu, GPU_IRQ_CLEAR, 0xffffffffu);
+	sg_wr(sg_gpu, GPU_COMMAND, 1);                  /* SOFT_RESET */
+	for (us = 0; us < 10000; us += 10) {
+		raw = sg_rd(sg_gpu, GPU_IRQ_RAWSTAT);
+		if (raw & 0x100) {                      /* RESET_COMPLETED */
+			break;
+		}
+		delay(10);
+	}
+	sg_wr(sg_gpu, GPU_IRQ_CLEAR, 0xffffffffu);
+	sg_wr(sg_gpu, TILER_PWROFF_LO, sg_rd(sg_gpu, TILER_READY_LO));
+	sg_wr(sg_gpu, SHADER_PWROFF_LO, sg_rd(sg_gpu, SHADER_READY_LO));
+	delay(100);
+	sg_wr(sg_gpu, L2_PWROFF_LO, sg_rd(sg_gpu, L2_READY_LO));
+	delay(100);
+	snprintf(out, outlen, "soft reset %s after %u us (rawstat %#x), cores off: ready shader=%#x tiler=%#x l2=%#x",
+	    (raw & 0x100) ? "done" : "TIMEOUT", us, raw, sg_rd(sg_gpu, SHADER_READY_LO), sg_rd(sg_gpu, TILER_READY_LO),
+	    sg_rd(sg_gpu, L2_READY_LO));
 }
 #endif /* ARM64_BOARD_CONFIG_STARLTE */
