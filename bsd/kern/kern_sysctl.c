@@ -2361,15 +2361,14 @@ sysctl_sysctl_bootargs
 	char buf[PE_BOOT_ARGS_LENGTH];
 
 	strlcpy(buf, PE_boot_args(), sizeof(buf));
-#if defined(ARM64_BOARD_CONFIG_STARLTE)
 	/*
-	 * The S9's line can be longer than BOOT_LINE_LENGTH (its built-in defaults, osfmk/arm/arm_init.c): a reader that
-	 * asks with a BOOT_LINE_LENGTH buffer gets the line's first BOOT_LINE_LENGTH - 1 bytes, not ENOMEM.
+	 * Not truncated (trunc 0), on the S9 too, whose line can be longer than BOOT_LINE_LENGTH (its built-in defaults,
+	 * osfmk/arm/arm_init.c): a buffer too small for the whole line gets ENOMEM, as on every Darwin. User space relies on
+	 * it. launchd_cache_loader asks with 128 bytes, and on ENOMEM asks for the size and reads the whole line; given the
+	 * line's first 127 bytes and success instead, it never saw launchd_unsecure_cache=1 (a built-in default), went to
+	 * verify launchd's cache with AMFI and aborted ("Unable to find AMFI"): launchd, and the boot, ended 4 s in.
 	 */
-	error = sysctl_io_string(req, buf, sizeof(buf), 1, NULL);
-#else
 	error = sysctl_io_string(req, buf, sizeof(buf), 0, NULL);
-#endif
 	return error;
 }
 
