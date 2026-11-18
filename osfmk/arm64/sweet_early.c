@@ -19,7 +19,25 @@
 #define A5_COL_WIDTH (8u * A5_SCALE)
 #define A5_COLS (A5XELTE_FB_WIDTH / A5_COL_WIDTH)
 extern unsigned char iso_font[256 * 16];
-static unsigned int a5_row = 4, a5_col, a5_active = 1, a5_panicking;
+/*
+ * Quiet boot: like the sweet-fbcon console (pe_serial.c), the bootstrap
+ * console draws nothing on the framebuffer unless boot-arg -v is given, so the
+ * bootloader's splash survives. A panic always draws.
+ */
+static unsigned int a5_row = 4, a5_col, a5_active = 1, a5_panicking, a5_quiet = 1;
+
+void
+sweet_early_boot_args(const char *cmdline)
+{
+	/* boot-args are not parsed yet: look for a "-v" word by hand. */
+	for (const char *p = cmdline; p && *p; p++) {
+		if (*p == '-' && p[1] == 'v' && (p[2] == '\0' || p[2] == ' ') &&
+		    (p == cmdline || p[-1] == ' ')) {
+			a5_quiet = 0;
+			return;
+		}
+	}
+}
 
 static void
 a5_clear_row(void)
@@ -78,7 +96,7 @@ a5_string(const char *s)
 void
 sweet_early_mark(unsigned int stage, const char *label)
 {
-	if (!a5_active) {
+	if (!a5_active || a5_quiet) {
 		return;
 	}
 	a5_string("A5 XNU STAGE ");
@@ -135,6 +153,9 @@ extern unsigned char iso_font[256 * 16];
 /* Initialized data must remain writable until disable, including panics. */
 static unsigned int early_row, early_col;
 static unsigned int early_started, early_disabled, early_panicking;
+
+/* Not an A5XELTE board: this early screen is unchanged. */
+void sweet_early_boot_args(const char *cmdline) { (void)cmdline; }
 
 static void
 sweet_early_clear_row(void)
@@ -256,6 +277,7 @@ sweet_early_disable(void)
  * (pe_serial.c) and the framebuffer console ("sweet-fbcon") start where they do on every board.
  */
 void sweet_early_mark(unsigned int stage, const char *label) { (void)stage; (void)label; }
+void sweet_early_boot_args(const char *cmdline) { (void)cmdline; }
 void sweet_early_putc(char c) { (void)c; }
 void sweet_early_panic(const char *fmt, va_list *args) { (void)fmt; (void)args; }
 void sweet_early_relocate(uint64_t base) { (void)base; }

@@ -9,6 +9,7 @@
 #if defined(SWEET)
 void sweet_early_mark(unsigned int stage, const char *label);
 void sweet_early_putc(char c);
+void sweet_early_boot_args(const char *cmdline);
 void sweet_early_panic(const char *fmt, va_list *args);
 void sweet_early_relocate(uint64_t base);
 void sweet_early_disable(void);
@@ -19,6 +20,7 @@ static inline void sweet_early_mark(unsigned int stage, const char *label)
 	(void)label;
 }
 static inline void sweet_early_disable(void) {}
+static inline void sweet_early_boot_args(const char *cmdline) { (void)cmdline; }
 #endif
 
 #endif
