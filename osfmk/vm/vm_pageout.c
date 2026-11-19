@@ -240,6 +240,22 @@ TUNABLE_DEV_WRITEABLE(unsigned int, vm_page_max_speculative_age_q, "vm_page_max_
  *	until vm_page_free_count meets or exceeds vm_page_free_target.
  */
 
+#if (defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)) && !XNU_TARGET_OS_OSX
+/*
+ * sweet: the embedded free-page targets below are page counts sized for 16 KiB pages. This kernel runs iOS on
+ * 4 KiB pages (four times the pages for the same memory), so as counts they kept a quarter of the memory free:
+ * on the Galaxy S9 (4 GB) vm_page_free_min was 1500 pages (5.9 MiB), the target 2000 (7.8 MiB) and the reserve
+ * 128 (0.5 MiB), against 23, 31 and 2 MiB on an iPhone. Every 4 KiB page-in of a 16 KiB-slid shared-cache page
+ * takes several free pages at once (the slide page's neighbours), the compressor needs free pages to compress
+ * into, and the faulting threads queued in VM_PAGE_WAIT behind the few pages there were. Scaled by the page-size
+ * ratio here, so the reserve, the minimum and the target are the same amounts of memory as on an iPhone.
+ */
+#define SWEET_VM_PAGE_SCALE             ((16384 >> PAGE_SHIFT) ? (16384 >> PAGE_SHIFT) : 1)
+#define VM_PAGE_FREE_TARGET(free)       (15 * SWEET_VM_PAGE_SCALE + ((free) * SWEET_VM_PAGE_SCALE) / 100)
+#define VM_PAGE_FREE_MIN(free)          (10 * SWEET_VM_PAGE_SCALE + ((free) * SWEET_VM_PAGE_SCALE) / 200)
+#define SWEET_VM_PAGE_FREE_LIMITS       1
+#endif /* SWEET || A5XELTE */
+
 #ifndef VM_PAGE_FREE_TARGET
 #if !XNU_TARGET_OS_OSX
 #define VM_PAGE_FREE_TARGET(free)       (15 + (free) / 100)
@@ -262,7 +278,11 @@ TUNABLE_DEV_WRITEABLE(unsigned int, vm_page_max_speculative_age_q, "vm_page_max_
 #endif /* !XNU_TARGET_OS_OSX */
 #endif  /* VM_PAGE_FREE_MIN */
 
-#if !XNU_TARGET_OS_OSX
+#if defined(SWEET_VM_PAGE_FREE_LIMITS)
+#define VM_PAGE_FREE_RESERVED_LIMIT     (100 * SWEET_VM_PAGE_SCALE)
+#define VM_PAGE_FREE_MIN_LIMIT          (1500 * SWEET_VM_PAGE_SCALE)
+#define VM_PAGE_FREE_TARGET_LIMIT       (2000 * SWEET_VM_PAGE_SCALE)
+#elif !XNU_TARGET_OS_OSX
 #define VM_PAGE_FREE_RESERVED_LIMIT     100
 #define VM_PAGE_FREE_MIN_LIMIT          1500
 #define VM_PAGE_FREE_TARGET_LIMIT       2000
@@ -1788,6 +1808,108 @@ extern  uint32_t c_segment_pages_compressed;
 extern uint64_t shared_region_pager_reclaimed;
 extern struct memory_object_pager_ops shared_region_pager_ops;
 
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+/*
+ * sweet: boot-arg sweet_vmlog=N (seconds; default 60 on the Galaxy S9, STARLTE, 0 = off elsewhere) prints two "SWEET VM:"
+ * console lines every N seconds: the page queues, the pageout daemon's targets, the compressor, the laundry queues and
+ * what memorystatus sees (available pages, pressure level, jetsam bands, kills); then what vm_pageout_scan did with the
+ * pages it looked at since the last line. Sizes are MiB, except the targets ("p" = pages).
+ */
+extern void sweet_memstat_summary(char *buf, size_t len);
+static int sweet_vmlog_secs = -1;
+static unsigned int sweet_vmlog_tick;
+static struct vm_pageout_vminfo sweet_vmlog_last;
+#define SWEET_MB(p) ((unsigned int)(((uint64_t)(p) * PAGE_SIZE) >> 20))
+
+static void
+sweet_vm_log(void)
+{
+	if (sweet_vmlog_secs < 0) {
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		int v = 60;
+#else
+		int v = 0;
+#endif
+		(void)PE_parse_boot_argn("sweet_vmlog", &v, sizeof(v));
+		sweet_vmlog_secs = (v < 0) ? 0 : v;
+	}
+	if (sweet_vmlog_secs == 0 || ++sweet_vmlog_tick < (unsigned int)sweet_vmlog_secs) {
+		return;
+	}
+	sweet_vmlog_tick = 0;
+
+	struct vm_pageout_vminfo *c = &vm_pageout_vminfo, *l = &sweet_vmlog_last;
+	char ms[192];
+	sweet_memstat_summary(ms, sizeof(ms));
+#define D(f) ((unsigned long)(c->f - l->f))
+	printf("SWEET VM: free %u (min %up tgt %up rsv %up) want %u/%u | act %u inact %u (anon %u cleaned %u) spec %u thr %u"
+	    " | ext %u int %u xpm %u sr %u | wired %u | cmp %u in %u segs %u/%u low %d | laundry int %u/%u ext %u/%u%s%s"
+	    " | %s\n",
+	    SWEET_MB(vm_page_free_count), vm_page_free_min, vm_page_free_target, vm_page_free_reserved,
+	    vm_page_free_wanted, vm_page_free_wanted_privileged,
+	    SWEET_MB(vm_page_active_count), SWEET_MB(vm_page_inactive_count), SWEET_MB(vm_page_anonymous_count),
+	    SWEET_MB(vm_page_cleaned_count), SWEET_MB(vm_page_speculative_count), SWEET_MB(vm_page_throttled_count),
+	    SWEET_MB(vm_page_pageable_external_count), SWEET_MB(vm_page_pageable_internal_count),
+	    SWEET_MB(vm_page_xpmapped_external_count), SWEET_MB(os_atomic_load(&vm_page_shared_region_count, relaxed)),
+	    SWEET_MB(vm_page_wire_count),
+	    SWEET_MB(c_segment_pages_compressed), SWEET_MB(VM_PAGE_COMPRESSOR_COUNT), c_segment_count, c_segments_limit,
+	    vm_compressor_low_on_space(),
+	    vm_pageout_queue_internal.pgo_laundry, vm_pageout_queue_internal.pgo_maxlaundry,
+	    vm_pageout_queue_external.pgo_laundry, vm_pageout_queue_external.pgo_maxlaundry,
+	    vm_pageout_queue_internal.pgo_throttled ? " ithr" : "", vm_pageout_queue_external.pgo_throttled ? " ethr" : "",
+	    ms);
+	printf("SWEET VM: %ds: considered %lu freed spec %lu clean %lu ext %lu int %lu cleaned %lu | dirty ext %lu int %lu"
+	    " | referenced %lu react-limit %lu force %lu prot-sc %lu fc-min %lu | throttled ext %lu int %lu skipped ext %lu int %lu"
+	    " | busy %u nolock %lu deadlock %u starve %u | compressions %llu | ghosts found %lu added %lu\n",
+	    sweet_vmlog_secs, D(vm_pageout_considered_page), D(vm_pageout_freed_speculative), D(vm_pageout_inactive_clean),
+	    D(vm_pageout_freed_external), D(vm_pageout_freed_internal), D(vm_pageout_freed_cleaned),
+	    D(vm_pageout_inactive_dirty_external), D(vm_pageout_inactive_dirty_internal),
+	    D(vm_pageout_inactive_referenced), D(vm_pageout_reactivation_limit_exceeded), D(vm_pageout_inactive_force_reclaim),
+	    D(vm_pageout_protected_sharedcache), D(vm_pageout_filecache_min_reactivated),
+	    D(vm_pageout_scan_inactive_throttled_external), D(vm_pageout_scan_inactive_throttled_internal),
+	    D(vm_pageout_skipped_external), D(vm_pageout_skipped_internal),
+	    vm_pageout_debug.vm_pageout_inactive_busy, D(vm_pageout_inactive_nolock),
+	    vm_pageout_debug.vm_pageout_scan_deadlock_detected, vm_pageout_debug.vm_pageout_inactive_external_forced_jetsam_count,
+	    (unsigned long long)(c->vm_pageout_compressions - l->vm_pageout_compressions),
+	    D(vm_phantom_cache_found_ghost), D(vm_phantom_cache_added_ghost));
+#undef D
+	*l = *c;
+
+	/*
+	 * The VM's own threads: state (W = waiting), block hint, wait event and continuation (both unslid: look them up in
+	 * the kernel's symbols) and seconds since each last ran. A pageout thread that waits while free is at its minimum
+	 * shows here.
+	 */
+	char tb[400];
+	int n = 0;
+	uint64_t now = mach_absolute_time();
+	struct { const char *name; thread_t th; } vt[2 + MAX_COMPRESSOR_THREAD_COUNT];
+	int nvt = 0;
+	vt[nvt].name = "scan"; vt[nvt++].th = vm_pageout_scan_thread;
+	vt[nvt].name = "ext"; vt[nvt++].th = pgo_iothread_external_state.pgo_iothread;
+	for (int i = 0; i < vm_pageout_state.vm_compressor_thread_count && i < MAX_COMPRESSOR_THREAD_COUNT; i++) {
+		vt[nvt].name = "cmp"; vt[nvt++].th = pgo_iothread_internal_state[i].pgo_iothread;
+	}
+	for (int i = 0; i < nvt && n < (int)sizeof(tb) - 80; i++) {
+		thread_t th = vt[i].th;
+		if (th == THREAD_NULL) {
+			continue;
+		}
+		uint64_t ns = 0;
+		if (now > th->last_run_time) {
+			absolutetime_to_nanoseconds(now - th->last_run_time, &ns);
+		}
+		n += scnprintf(tb + n, sizeof(tb) - n, " %s%.0d %s h%d ev 0x%llx c 0x%llx %llus", vt[i].name, (i >= 2) ? i - 1 : 0,
+		    (th->state & TH_RUN) ? "R" : ((th->state & TH_WAIT) ? "W" : "?"), (int)th->block_hint,
+		    (unsigned long long)VM_KERNEL_UNSLIDE((vm_offset_t)th->wait_event),
+		    (unsigned long long)VM_KERNEL_UNSLIDE((vm_offset_t)th->continuation), ns / NSEC_PER_SEC);
+	}
+	printf("SWEET VM: threads%s | free_wanted ev 0x%llx iq ev 0x%llx\n", tb,
+	    (unsigned long long)VM_KERNEL_UNSLIDE((vm_offset_t)&vm_page_free_wanted),
+	    (unsigned long long)VM_KERNEL_UNSLIDE((vm_offset_t)&vm_pageout_queue_internal.pgo_laundry));
+}
+#endif /* SWEET || A5XELTE */
+
 void
 update_vm_info(void)
 {
@@ -2404,6 +2526,10 @@ update_vm_info(void)
 	last_vm_mte_refill_thread_wakeups = vm_mte_refill_thread_wakeups;
 #endif /* HAS_MTE */
 	record_memory_pressure();
+
+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
+	sweet_vm_log();
+#endif
 }
 
 extern boolean_t hibernation_vmqueues_inspection;
