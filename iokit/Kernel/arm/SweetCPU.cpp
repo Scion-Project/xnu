@@ -23,6 +23,13 @@ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
 #if defined(STARLTE) || defined(FRANKEL)
 extern "C" void sweet_c2_start(void);
 #endif
+#if defined(STARLTE)
+/* osfmk/arm64/sweet_m3off.c: an M3 taken offline and started again (m3off=2) */
+extern "C" void sweet_m3off_init(void);
+extern "C" void sweet_m3off_dying(void) __attribute__((noreturn));
+extern "C" bool sweet_m3off_back(unsigned int cpu);
+extern "C" bool sweet_m3off_may_start(unsigned int cpu);
+#endif
 #if defined(HEROLTE)
 /* kern/sched_prim.h declares it for MACH_KERNEL_PRIVATE only. */
 extern "C" processor_t thread_bind(processor_t processor);
@@ -292,6 +299,10 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
 	/* core power-down in idle: nothing unless sweetc2 or sweetc2dry (osfmk/arm64/sweet_c2.c) */
 	sweet_c2_start();
 #endif
+#if defined(STARLTE)
+	/* M3s offline and back: nothing unless m3off (osfmk/arm64/sweet_m3off.c) */
+	sweet_m3off_init();
+#endif
 #if defined(HEROLTE)
 	/* A CPU whose timer interrupt never fires still answers SGIs: sleep once
 	 * on each CPU. Boot does not wait for this thread, so a CPU that never
@@ -324,7 +335,14 @@ void
 SweetCPU::initCPU(bool boot)
 {
 	if (!boot) {
+#if defined(STARLTE)
+		/* an M3 started again after m3off took it offline: Samsung's hotplug-in PMU writes, then as at boot */
+		if (!sweet_m3off_back(getCPUNumber())) {
+			panic(CPU_PORT_NAME " CPU: cpu=%u resume is not implemented (not taken offline by m3off)", getCPUNumber());
+		}
+#else
 		panic(CPU_PORT_NAME " CPU: cpu=%u resume is not implemented", getCPUNumber());
+#endif
 	}
 	assert(cpu_number() == (int)getCPUNumber());
 
@@ -399,7 +417,12 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
 #else
 	if (start_paddr != 0 || arg_paddr != 0 || cpu->phys_id == 0 ||
 #endif
-	    __atomic_load_n(&initialized, __ATOMIC_ACQUIRE) != 0) {
+	    (__atomic_load_n(&initialized, __ATOMIC_ACQUIRE) != 0
+#if defined(STARLTE)
+	    /* again, after m3off took it offline: only that, and only with the PMU reading it off */
+	    && !sweet_m3off_may_start(getCPUNumber())
+#endif
+	    )) {
 		panic(CPU_PORT_NAME " CPU: cpu=%u unsupported restart", getCPUNumber());
 	}
 	vm_offset_t entry = ml_static_vtop((vm_offset_t)&sweet_secondary_entry);
@@ -452,7 +475,12 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
 void
 SweetCPU::quiesceCPU(void)
 {
+#if defined(STARLTE)
+	/* cpu_sleep() on a core XNU takes offline (processor_exit): only m3off's M3s; CPU_OFF, never returns */
+	sweet_m3off_dying();
+#else
 	panic(CPU_PORT_NAME " CPU: CPU quiesce is not implemented");
+#endif
 }
 
 void
