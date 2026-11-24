@@ -88,6 +88,7 @@ static uint64_t sweet_fb_pf_stamp;                              /* when the pend
  *   G that frame's chains are done                              P its present is done
  *   S a swap call comes in (chains queued)                      R the swap is recorded (it was held until now)
  *   B the GPU's queue gets its first chain after being empty    E the queue runs empty (chains run since B)
+ *   W a client's thread begins a GPU wait, X it ends (StarbiteMali.cpp: the number says which thread and which wait)
  * One store and a clock read an event; nothing is printed until the dump.
  * The ring also starts at a write of S to kern.hakios.sweetfb_trace_go on the USB console (no scripted input needed): it is
  * emptied and printed S seconds later (6144 events, ~10 to 15 s of swipes). The dump's first line gives the first event's
@@ -145,6 +146,13 @@ sweet_fb_trace_dump(void)
 		}
 	}
 	IOLog("FBT: done, %u events\n", count);
+}
+
+/* whether the ring takes events now (StarbiteMali.cpp asks before it looks up a waiting thread's name) */
+extern "C" bool
+sweet_fb_trace_active(void)
+{
+	return sweet_fb_trace != 0 && !sweet_fb_tr_dumped;
 }
 
 /* kern.hakios.sweetfb_trace_go (bsd/dev/starlte_gpu.c): start the ring now, print it S seconds later */

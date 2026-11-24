@@ -935,6 +935,8 @@ static int sbm_prof_checked;
 static struct { uint64_t tid, n, ns; char name[24]; } sbm_waiter[8];
 static uint64_t sbm_wait_kind_n[3], sbm_wait_kind_ns[3];
 extern "C" uint64_t thread_tid(thread_t thread);
+extern "C" void sweet_fb_trace_event(char what, uint32_t arg);  /* iokit/Kernel/arm/SweetFramebuffer.cpp (sweetfb_trace) */
+extern "C" bool sweet_fb_trace_active(void);
 extern "C" void bsd_getthreadname(void *uth, char *buffer);
 extern "C" void *current_uthread(void);
 
@@ -951,12 +953,38 @@ sbm_call_kind(uint32_t selector)
 	}
 }
 
+static bool
+sbm_has(const char *s, const char *w)
+{
+	size_t n = strlen(w);
+	for (; *s != 0; s++) {
+		if (strncmp(s, w, n) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 IOReturn
 StarbiteMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
     __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target, __unused void *reference)
 {
 	uint64_t t0 = mach_absolute_time();
+	/* the framebuffer's event ring (sweetfb_trace): a GPU wait by a client as W (begun) and X (ended), the number says whose: 1 a
+	 * thread named *display* (CoreAnimation's render thread), 2 *render-server*, 3 *metal2vulkan*, 4 another; +10 for a wait for the
+	 * whole queue, +20 for one chain (by number), +0 for one buffer */
+	unsigned trace_who = 0;
+	if (sbm_call_kind(selector) == 5 && sweet_fb_trace_active()) {
+		char tn[64] = "";
+		bsd_getthreadname(current_uthread(), tn);
+		trace_who = (sbm_has(tn, "display") ? 1 : sbm_has(tn, "render-server") ? 2 : sbm_has(tn, "metal2vulkan") ? 3 : 4) +
+		    (selector == SBM_WAIT_IDLE ? 10 : selector == SBM_WAIT_SEQ ? 20 : 0);
+		sweet_fb_trace_event('W', trace_who);
+	}
 	IOReturn ret = dispatchMethod(selector, args);
+	if (trace_who != 0) {
+		sweet_fb_trace_event('X', trace_who);
+	}
 	uint64_t t1 = mach_absolute_time(), ns = 0;
 	absolutetime_to_nanoseconds(t1 - t0, &ns);
 	unsigned k = sbm_call_kind(selector);
