@@ -954,6 +954,20 @@ ml_cpu_can_exit(__unused int cpu_id)
 
 #endif /* USE_APPLEARMSMP */
 
+#if defined(STARLTE)
+	/*
+	 * (Starbite) the Galaxy S9's M3s 5-7 may go offline with m3off=2 and processor_exit=1 (osfmk/arm64/sweet_m3off.c:
+	 * SweetCPU's quiesce is PSCI CPU_OFF for them). Asked once, by sched_cpu_init_completed(), before that file reads its
+	 * arguments: hence the boot-argument here. Cores 0-4 never (Samsung's fast_hp_cpus is "5-7").
+	 */
+	if (enable_processor_exit && cpu_id >= 5 && cpu_id <= 7) {
+		uint32_t m3off = 0;
+
+		if (PE_parse_boot_argn("m3off", &m3off, sizeof(m3off)) && m3off >= 2) {
+			return true;
+		}
+	}
+#endif
 	return false;
 }
 

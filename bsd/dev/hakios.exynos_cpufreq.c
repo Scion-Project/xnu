@@ -171,6 +171,23 @@
 #include <sys/hakios.exynos_soc.h>
 #include <sys/hakios.scion_gov.h>
 #include "hakios.exynos_cpufreq_ceiling.h"
+
+/*
+ * (Starbite) osfmk/arm64/sweet_m3off.c: M3s taken offline (XNU's processor offline, Samsung's PMU writes, PSCI CPU_OFF) and
+ * started again; m3off= (0 off, 1 decisions logged only, 2 run). The policy that asks for it is m3off_decide() below
+ * (docs/ios27/BIG-CORES.md): with the interface moving and the M3s' load fitting on two, cores 6 and 7 go offline and the two
+ * left may run at Samsung's dual_freq, 2314000, under the rule of hakios.exynos_cpufreq_ceiling.h (the PMIC's warning read on,
+ * a fresh temperature under 75 C, at most two M3s on, PMU-checked). Back when the interface is still for a second, when the
+ * two cannot carry the load, at 75 C (a stop for the rest of the boot), or on any failure (the same).
+ */
+extern uint32_t sweet_m3off_mode;
+extern int sweet_m3off_take(unsigned int cpu);
+extern int sweet_m3off_give(unsigned int cpu);
+extern uint32_t sweet_m3off_count(void);
+extern bool sweet_m3off_is_off(unsigned int cpu);
+extern size_t sweet_m3off_format(char *buf, size_t len);
+static bool m3off_returning;            /* cores are coming back: the M3s at 1794000 at most until they have */
+static uint32_t m3off_returning_gen, m3off_seen_gen;    /* the governor's acknowledgement of it (a window decided since) */
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/sysctl.h>
@@ -458,6 +475,7 @@ SYSCTL_PROC(_kern_hakios, OID_AUTO, gov_policy, CTLTYPE_INT | CTLFLAG_RW | CTLFL
 
 static uint64_t idle_before[MAX_CPUS];
 static bool ever_idle[MAX_CPUS];
+static bool idle_rebase[MAX_CPUS];      /* (m3off) a core offline: its idle time is taken afresh when it is back */
 
 static bool
 ever_idle_cpu(unsigned int i)
@@ -694,7 +712,8 @@ ocpg_read_pmu(void)
 static uint32_t
 ocpg_m3s_off(void)
 {
-	return 0;
+	/* (m3off: the cores this kernel took offline and the PMU reads off; none while they are being brought back) */
+	return __atomic_load_n(&m3off_returning, __ATOMIC_ACQUIRE) ? 0 : sweet_m3off_count();
 }
 
 /* the PMIC's CPU over-current warning, read (never written): on when bit 7 of OCP_WARN1 is set */
@@ -929,10 +948,12 @@ static enum ceil_why
 ocpg_top(struct cluster *c)
 {
 	struct ceil_in in = { .guard = ocpg_mode, .alive = ocpg_alive(), .temp_fresh = temp_fresh(c),
-		              .big_mc = hakios_exynos_tmu_zone_mc(c->tmu_zone), .m3s_off = ocpg_m3s_off() };
+		              .big_mc = hakios_exynos_tmu_zone_mc(c->tmu_zone), .m3s_off = ocpg_m3s_off(),
+		              .m3off = __atomic_load_n(&sweet_m3off_mode, __ATOMIC_ACQUIRE),
+		              .pmic_on = ocpg_mode >= 1 && ocpg.pmic_on };
 	enum ceil_why why = ceil_why(&in);
 
-	if (why != ocpg.two_said && ocpg_mode >= 4) {
+	if (why != ocpg.two_said && (ocpg_mode >= 4 || in.m3off >= 2)) {
 		ocpg.two_said = why;
 		say("cpufreq_gov: ocp_guard: stage two: %s (%u M3s on, big %d mC)\n", ceil_reason(why), ceil_m3s_on(&in), in.big_mc);
 	}
@@ -1335,7 +1356,7 @@ measure_mhz(const struct cluster *c)
 	int cpu = -1;
 
 	for (unsigned int i = 0; i < topology->num_cpus && i < MAX_CPUS; i++) {
-		if (cpu_affinity(&topology->cpus[i]) == c->affinity && ever_idle_cpu(i)) {
+		if (cpu_affinity(&topology->cpus[i]) == c->affinity && ever_idle_cpu(i) && !sweet_m3off_is_off(i)) {
 			cpu = (int)topology->cpus[i].cpu_id;
 			break;
 		}
@@ -1377,7 +1398,16 @@ measure(uint64_t span)
 		uint64_t idle = 0, busy;
 		struct cluster *c;
 
+		if (sweet_m3off_is_off(i)) {
+			idle_rebase[i] = true;  /* (offline, or on its way: neither measured nor counted) */
+			continue;
+		}
 		if (!ml_cpu_idle_time((int)i, &idle)) {
+			continue;
+		}
+		if (idle_rebase[i]) {
+			idle_rebase[i] = false;
+			idle_before[i] = idle;
 			continue;
 		}
 		busy = span > idle - idle_before[i] ? span - (idle - idle_before[i]) : 0;
@@ -1467,6 +1497,370 @@ decide_scion(struct cluster *c, uint64_t now, uint32_t window)
 	}
 }
 
+/*
+ * (Starbite) m3off: the policy (docs/ios27/BIG-CORES.md). Decided on this file's thread every window, done on a thread of
+ * its own (taking a core offline blocks for milliseconds and takes the scheduler's locks): m3off_thread().
+ *
+ *   to two M3s (cores 6 and 7 offline): m3off=2 (or 1: logged only), policy 1, no stop met, up 120 s or more, a fresh big-zone
+ *       temperature under 70 C, no thermal step, the PMIC's CPU warning read on (ocp_guard=1), the interface moving (a finger
+ *       or frames under 50 ms apart), and for three windows in a row the M3s' load fitting on two: the third-busiest core at
+ *       30% or less and the four's busy shares adding up to 150% or less; at least a second after the last change.
+ *   back to four: the interface still for a second, or the two busy shares adding up to 180% or more for five windows, or no
+ *       longer eligible; at least half a second after the last change. The rate first: m3off_returning holds the M3s at
+ *       1794000 and the cores are started only once the governor has decided a window with it and the rate is under it
+ *       (Samsung's exynos_hpgov_validate_hpin: no core online while the rate is above what one more allows).
+ *   stop, for the rest of the boot, all four back: the big zone at 75 C (CEIL_M3OFF_STOP_MC; Samsung cools from 83), a core
+ *       XNU will not take offline or start (sweet_m3off.c panics itself when the hardware does not follow), the rate not
+ *       coming under 1794000 for the return within 2 s.
+ * Above 1794000 only by the rule (ocpg_top()): two M3s on, PMU-checked; the load law of policy 1 picks the rate up to it.
+ */
+static uint32_t m3off_want;             /* M3s the policy wants offline: 0, or 2 (cores 6 and 7) */
+static uint32_t m3off_dry_off;          /* m3off=1: what would be offline now */
+static bool m3off_stopped;
+static char m3off_stop_why[120];
+static uint32_t m3off_floor;            /* a test's floor for the M3s, kHz (0: none) */
+static uint32_t m3off_test;             /* kern.hakios.m3off_test: the test running (0: none) */
+static uint64_t m3off_changed, m3off_ui_last;
+static uint32_t m3off_fit, m3off_over;
+static int m3off_event;
+static bool m3off_started;
+static uint32_t m3off_auto = 1;         /* m3off_auto=0: the policy off, only kern.hakios.m3off_test moves cores */
+static uint32_t m3off_n_off, m3off_n_on, m3off_secs_two;
+static uint64_t m3off_two_since;
+
+static uint64_t
+m3off_ms_abs(uint32_t ms)
+{
+	uint64_t abs;
+
+	nanoseconds_to_absolutetime((uint64_t)ms * NSEC_PER_MSEC, &abs);
+	return abs;
+}
+
+static void
+m3off_stop(const char *why)
+{
+	if (!__atomic_exchange_n(&m3off_stopped, true, __ATOMIC_ACQ_REL)) {
+		strlcpy(m3off_stop_why, why, sizeof(m3off_stop_why));
+		say("cpufreq_gov: m3off: STOP: %s: all four M3s back and at 1794 MHz at most for the rest of this boot\n", why);
+	}
+	__atomic_store_n(&m3off_want, 0, __ATOMIC_RELEASE);
+	(void)thread_wakeup_prim((event_t)&m3off_event, FALSE, THREAD_AWAKENED);
+}
+
+/* the governor's thread, every window of the M3s (policy 1) */
+static void
+m3off_decide(struct cluster *c, uint64_t now)
+{
+	uint32_t mode = __atomic_load_n(&sweet_m3off_mode, __ATOMIC_ACQUIRE), want = __atomic_load_n(&m3off_want, __ATOMIC_ACQUIRE);
+	uint32_t off = mode >= 2 ? sweet_m3off_count() : m3off_dry_off;
+	int32_t mc = hakios_exynos_tmu_zone_mc(c->tmu_zone);
+	bool fresh = temp_fresh(c), eligible, quiet;
+	uint64_t ns;
+
+	if (mode == 0 || !m3off_started || __atomic_load_n(&m3off_test, __ATOMIC_ACQUIRE) != 0) {
+		return;
+	}
+	if (m3off_auto == 0) {
+		if (fresh && mc >= CEIL_M3OFF_STOP_MC && !m3off_stopped) {
+			m3off_stop("the big zone at 75 C");
+		}
+		return;
+	}
+	if (fresh && mc >= CEIL_M3OFF_STOP_MC && !m3off_stopped) {
+		char why[80];
+
+		snprintf(why, sizeof(why), "the big zone at %d mC (this path stops at %d)", mc, CEIL_M3OFF_STOP_MC);
+		m3off_stop(why);
+	}
+	if (m3off_stopped) {
+		return;
+	}
+	if (touch_held(now) || frames_moving(now)) {
+		m3off_ui_last = now;
+	}
+	quiet = m3off_ui_last == 0 || now - m3off_ui_last > m3off_ms_abs(1000);
+	absolutetime_to_nanoseconds(now, &ns);
+	eligible = ns >= 120ull * NSEC_PER_SEC && fresh && mc < CEIL_M3OFF_STOP_MC - 5000 && c->thermal == 0 && ocpg_mode >= 1 &&
+	    ocpg.pmic_on;
+	if (off == 0 && want == 0) {
+		m3off_fit = c->online >= 3 && c->core_load[2] <= 30 && c->sum_now <= 150 ? m3off_fit + 1 : 0;
+		if (eligible && !quiet && m3off_fit >= 3 && now - m3off_changed >= m3off_ms_abs(1000)) {
+			__atomic_store_n(&m3off_want, 2, __ATOMIC_RELEASE);
+			m3off_changed = now;
+			m3off_over = 0;
+			(void)thread_wakeup_prim((event_t)&m3off_event, FALSE, THREAD_AWAKENED);
+		}
+	} else if (want != 0) {
+		m3off_over = c->sum_now >= 180 ? m3off_over + 1 : 0;
+		if ((!eligible || quiet || m3off_over >= 5) && now - m3off_changed >= m3off_ms_abs(500)) {
+			__atomic_store_n(&m3off_want, 0, __ATOMIC_RELEASE);
+			m3off_changed = now;
+			m3off_fit = 0;
+			(void)thread_wakeup_prim((event_t)&m3off_event, FALSE, THREAD_AWAKENED);
+		}
+	}
+}
+
+/* the M3s under 1794000 before any core comes back: the governor told, a window decided with it, the rate read */
+static bool
+m3off_rate_down(void)
+{
+	uint32_t gen;
+
+	__atomic_store_n(&m3off_returning, true, __ATOMIC_RELEASE);
+	gen = __atomic_add_fetch(&m3off_returning_gen, 1, __ATOMIC_ACQ_REL);
+	__atomic_store_n(&ocpg_kick, true, __ATOMIC_RELEASE);
+	(void)thread_wakeup_prim((event_t)&boost_event, FALSE, THREAD_AWAKENED);
+	for (int i = 0; i < 200; i++) {
+		if (__atomic_load_n(&m3off_seen_gen, __ATOMIC_ACQUIRE) == gen && clusters[1].cur <= CEIL_HELD_KHZ) {
+			return true;
+		}
+		delay(10 * 1000);
+	}
+	return false;
+}
+
+static int
+m3off_take_two(void)
+{
+	int kr;
+
+	if (__atomic_load_n(&sweet_m3off_mode, __ATOMIC_ACQUIRE) < 2) {
+		m3off_dry_off = 2;
+		return 0;
+	}
+	if ((kr = sweet_m3off_take(7)) != 0 || (kr = sweet_m3off_take(6)) != 0) {
+		return kr;
+	}
+	m3off_n_off++;
+	return 0;
+}
+
+static int
+m3off_give_all(void)
+{
+	int kr = 0;
+
+	if (__atomic_load_n(&sweet_m3off_mode, __ATOMIC_ACQUIRE) < 2) {
+		m3off_dry_off = 0;
+		return 0;
+	}
+	if (sweet_m3off_count() == 0 && !sweet_m3off_is_off(6) && !sweet_m3off_is_off(7)) {
+		__atomic_store_n(&m3off_returning, false, __ATOMIC_RELEASE);
+		return 0;
+	}
+	if (!m3off_rate_down()) {
+		say("cpufreq_gov: m3off: the M3s not under 1794 MHz 2 s after the return was asked (%u kHz): no core started\n",
+		    clusters[1].cur);
+		return -1;
+	}
+	if ((kr = sweet_m3off_give(6)) == 0) {
+		kr = sweet_m3off_give(7);
+	}
+	if (kr == 0) {
+		m3off_n_on++;
+		__atomic_store_n(&m3off_returning, false, __ATOMIC_RELEASE);
+	}
+	return kr;
+}
+
+static void
+m3off_sleep_ms(uint32_t ms)
+{
+	uint64_t deadline;
+
+	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+	(void)assert_wait_deadline((event_t)&m3off_sleep_ms, THREAD_UNINT, deadline);
+	(void)thread_block(NULL);
+}
+
+/*
+ * kern.hakios.m3off_test (m3off=2 only; the policy waits while one runs; each step said):
+ *   1 cpu 7 offline 5 s, back | 2 cpus 7 and 6 offline 5 s, back | 3 as 2 with the M3s at 1924 MHz for the 5 s | 4 the same at
+ *   2314 MHz | 10+N test 1 N times | 20+N test 2 N times (N 1 to 9), a second apart
+ */
+static void
+m3off_run_test(uint32_t t)
+{
+	uint32_t times = t > 20 ? t - 20 : t > 10 ? t - 10 : 1, kind = t > 20 ? 2 : t > 10 ? 1 : t;
+	char line[256];
+
+	say("cpufreq_gov: m3off: test %u: %s, %u time%s\n", t, kind == 1 ? "cpu 7 offline 5 s" : kind == 2 ? "cpus 7 and 6 offline 5 s" :
+	    kind == 3 ? "cpus 7 and 6 offline, the M3s at 1924 MHz 5 s" : "cpus 7 and 6 offline, the M3s at 2314 MHz 5 s", times,
+	    times == 1 ? "" : "s");
+	for (uint32_t n = 0; n < times && !m3off_stopped; n++) {
+		int kr = sweet_m3off_take(7);
+
+		if (kr == 0 && kind >= 2) {
+			kr = sweet_m3off_take(6);
+		}
+		if (kr != 0) {
+			m3off_stop("a test: a core not taken offline");
+			break;
+		}
+		if (kind >= 3) {
+			__atomic_store_n(&m3off_floor, kind == 3 ? 1924000u : 2314000u, __ATOMIC_RELEASE);
+		}
+		for (int i = 0; i < 5; i++) {
+			m3off_sleep_ms(1000);
+			say("cpufreq_gov: m3off: test %u: %d s: big %u kHz (max %u), %u off, temp big %d mC\n", t, i + 1, clusters[1].cur,
+			    ceiling_now(&clusters[1]), sweet_m3off_count(), hakios_exynos_tmu_zone_mc(0));
+			if (hakios_exynos_tmu_zone_mc(0) >= CEIL_M3OFF_STOP_MC) {
+				m3off_stop("a test: the big zone at 75 C");
+				break;
+			}
+		}
+		__atomic_store_n(&m3off_floor, 0, __ATOMIC_RELEASE);
+		if (m3off_give_all() != 0) {
+			m3off_stop("a test: a core not started again");
+			break;
+		}
+		(void)sweet_m3off_format(line, sizeof(line));
+		say("cpufreq_gov: m3off: test %u: round %u done: big %u kHz; %s\n", t, n + 1, clusters[1].cur, line);
+		if (n + 1 < times) {
+			m3off_sleep_ms(1000);
+		}
+	}
+	say("cpufreq_gov: m3off: test %u %s\n", t, m3off_stopped ? "STOPPED" : "passed");
+}
+
+static void
+m3off_thread(void *arg __unused, wait_result_t wr __unused)
+{
+	for (;;) {
+		uint64_t deadline;
+		uint32_t t, want;
+
+		clock_interval_to_deadline(1000, NSEC_PER_MSEC, &deadline);
+		(void)assert_wait_deadline((event_t)&m3off_event, THREAD_UNINT, deadline);
+		(void)thread_block(NULL);
+		t = __atomic_load_n(&m3off_test, __ATOMIC_ACQUIRE);
+		if (t != 0) {
+			if (sweet_m3off_mode >= 2 && sweet_m3off_count() == 0) {
+				m3off_run_test(t);
+			} else {
+				say("cpufreq_gov: m3off: test %u refused (m3off=%u, %u M3s offline)\n", t, sweet_m3off_mode, sweet_m3off_count());
+			}
+			__atomic_store_n(&m3off_test, 0, __ATOMIC_RELEASE);
+			continue;
+		}
+		want = m3off_stopped ? 0 : __atomic_load_n(&m3off_want, __ATOMIC_ACQUIRE);
+		if (want == 2 && (sweet_m3off_mode >= 2 ? sweet_m3off_count() : m3off_dry_off) < 2) {
+			if (m3off_take_two() != 0) {
+				m3off_stop("a core not taken offline");
+			} else {
+				m3off_two_since = mach_absolute_time();
+				if (sweet_m3off_mode < 2) {
+					say("cpufreq_gov: m3off: (decisions only) would take cpus 7 and 6 offline now\n");
+				}
+			}
+		}
+		if (want == 0 && (sweet_m3off_mode >= 2 ? sweet_m3off_count() != 0 || sweet_m3off_is_off(6) || sweet_m3off_is_off(7) :
+		    m3off_dry_off != 0)) {
+			if (m3off_two_since != 0) {
+				uint64_t ns;
+
+				absolutetime_to_nanoseconds(mach_absolute_time() - m3off_two_since, &ns);
+				m3off_secs_two += (uint32_t)(ns / NSEC_PER_MSEC);
+				m3off_two_since = 0;
+			}
+			if (m3off_give_all() != 0) {
+				m3off_stop("the cores not brought back");
+				(void)m3off_give_all();
+			} else if (sweet_m3off_mode < 2) {
+				say("cpufreq_gov: m3off: (decisions only) would bring cpus 6 and 7 back now\n");
+			}
+		}
+	}
+}
+
+/* once a second with m3off on: what it holds, on one line */
+static void
+m3off_line(uint64_t seconds)
+{
+	static uint32_t last_off, last_n;
+	uint32_t off = sweet_m3off_mode >= 2 ? sweet_m3off_count() : m3off_dry_off;
+
+	if (sweet_m3off_mode == 0 || !m3off_started) {
+		return;
+	}
+	if (off == 0 && last_off == 0 && last_n == m3off_n_off + m3off_n_on && seconds % 10 != 0) {
+		return;
+	}
+	last_off = off;
+	last_n = m3off_n_off + m3off_n_on;
+	say("cpufreq_gov: m3off: %llu s: %s%u off (want %u), M3s online %u, big %u kHz max %u, sum %u%%, temp big %d mC, PMIC warning %s | "
+	    "to two %u, back %u, %u ms at two%s%s\n", seconds, sweet_m3off_mode < 2 ? "(decisions only) " : "", off, m3off_want,
+	    clusters[1].online, clusters[1].cur, ceiling_now(&clusters[1]), clusters[1].sum_now, hakios_exynos_tmu_zone_mc(0),
+	    ocpg_mode >= 1 ? (ocpg.pmic_on ? "on" : "OFF") : "not read", m3off_n_off, m3off_n_on, m3off_secs_two,
+	    m3off_stopped ? " | STOPPED: " : "", m3off_stopped ? m3off_stop_why : "");
+}
+
+static int
+m3off_test_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int value = (int)m3off_test, error;
+
+	error = sysctl_io_number(req, value, sizeof(value), &value, NULL);
+	if (error != 0 || req->newptr == 0) {
+		return error;
+	}
+	if (!((value >= 1 && value <= 4) || (value >= 11 && value <= 19) || (value >= 21 && value <= 29)) ||
+	    sweet_m3off_mode < 2 || !m3off_started || m3off_stopped) {
+		say("cpufreq_gov: m3off: test %d refused (m3off=%u%s)\n", value, sweet_m3off_mode, m3off_stopped ? ", stopped" : "");
+		return EINVAL;
+	}
+	__atomic_store_n(&m3off_want, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&m3off_test, (uint32_t)value, __ATOMIC_RELEASE);
+	(void)thread_wakeup_prim((event_t)&m3off_event, FALSE, THREAD_AWAKENED);
+	return 0;
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, m3off_test, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
+    m3off_test_sysctl, "I", "m3off=2: 1 cpu 7 offline 5 s; 2 cpus 7 and 6; 3 those at 1924 MHz; 4 at 2314 MHz; 1N, 2N: N times");
+
+static int
+m3off_stats_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	char buf[400];
+	size_t n = sweet_m3off_format(buf, sizeof(buf));
+
+	return SYSCTL_OUT(req, buf, n + 1);
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, m3off_stats, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
+    m3off_stats_sysctl, "A", "the M3s taken offline and started again (m3off=)");
+
+/* gov_setup(): the thread, with m3off= and policy 1 */
+static void
+m3off_start(void)
+{
+	thread_t thread;
+
+	if (sweet_m3off_mode == 0) {
+		return;
+	}
+	if (gov_policy != 1) {
+		say("cpufreq_gov: m3off=%u: only under gov_policy=1; not started\n", sweet_m3off_mode);
+		return;
+	}
+	if (ocpg_mode < 1) {
+		say("cpufreq_gov: m3off=%u: the PMIC's warning is not read without ocp_guard=1: the M3s stay at 1794 MHz at most\n",
+		    sweet_m3off_mode);
+	}
+	(void)PE_parse_boot_argn("m3off_auto", &m3off_auto, sizeof(m3off_auto));
+	if (kernel_thread_start(m3off_thread, NULL, &thread) != KERN_SUCCESS) {
+		say("cpufreq_gov: m3off: no thread\n");
+		return;
+	}
+	thread_deallocate(thread);
+	m3off_started = true;
+	say("cpufreq_gov: m3off=%u%s: %s; to two M3s with the interface moving and the load fitting, back after a second still or when "
+	    "two cannot carry it; above 1794 MHz only by the rule (PMIC warning on, temp under 75 C, two M3s on), 2314 MHz at most; "
+	    "the M3s' ceiling now %u kHz\n", sweet_m3off_mode, m3off_auto ? "" : " m3off_auto=0 (the policy off: tests only)",
+	    sweet_m3off_mode >= 2 ? "cores 6 and 7 taken offline and started again" :
+	    "decisions logged, no core touched", clusters[1].ceiling);
+}
+
 static void
 decide(struct cluster *c, uint64_t now, uint32_t window)
 {
@@ -1489,6 +1883,7 @@ decide(struct cluster *c, uint64_t now, uint32_t window)
 	}
 	if (c == &clusters[1]) {
 		cores_set(SCION_BIG_CORES, now);
+		m3off_decide(c, now);
 	}
 	want = c->levels[level_at_least(c, (uint64_t)c->cur * c->load / target_load)];
 	if (c->load >= SATURATED && c->touch_khz != 0) {
@@ -1497,6 +1892,9 @@ decide(struct cluster *c, uint64_t now, uint32_t window)
 	}
 	target = MAX(want, c->floor);
 	target = MAX(target, c->boost_floor);
+	if (c == &clusters[1]) {
+		target = MAX(target, __atomic_load_n(&m3off_floor, __ATOMIC_ACQUIRE));    /* (an m3off test's) */
+	}
 	target = MIN(target, max);
 	if (target < c->cur && c->cur <= max) {
 		if (++c->low_windows < down_windows) {
@@ -1738,12 +2136,19 @@ gov_thread(void *arg __unused, wait_result_t wr __unused)
 			cool(&clusters[1]);
 		}
 		decide(&clusters[0], now, (uint32_t)span_ms);
-		decide(&clusters[1], now, (uint32_t)span_ms);
+		{
+			/* (m3off: a window decided with the return asked: m3off_rate_down() may start the cores once the rate is under) */
+			uint32_t gen = __atomic_load_n(&m3off_returning_gen, __ATOMIC_ACQUIRE);
+
+			decide(&clusters[1], now, (uint32_t)span_ms);
+			__atomic_store_n(&m3off_seen_gen, gen, __ATOMIC_RELEASE);
+		}
 		ramp_check(now);
 		if (log_seconds != 0 && now - last_log >= log_every) {
 			last_log = now;
 			absolutetime_to_nanoseconds(now - start, &ns);
 			summary(ns / NSEC_PER_SEC);
+			m3off_line(ns / NSEC_PER_SEC);
 		}
 	}
 }
@@ -1918,6 +2323,7 @@ gov_setup(void)
 	    boost_ms ? touch_big : 0, boost_ms ? touch_lit : 0, boost_ms, frame_ms ? frame_big : 0, frame_ms, SATURATED);
 	say("cpufreq_gov: policy %u (kern.hakios.gov_policy; 3 scion, 2 scion without parking)\n", gov_policy);
 	ocpg_start();
+	m3off_start();
 	return true;
 }
 #endif /* ARM64_BOARD_CONFIG_STARLTE */
