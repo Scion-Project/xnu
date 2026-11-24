@@ -89,13 +89,19 @@ static uint64_t sweet_fb_pf_stamp;                              /* when the pend
  *   S a swap call comes in (chains queued)                      R the swap is recorded (it was held until now)
  *   B the GPU's queue gets its first chain after being empty    E the queue runs empty (chains run since B)
  * One store and a clock read an event; nothing is printed until the dump.
+ * The ring also starts at a write of S to kern.hakios.sweetfb_trace_go on the USB console (no scripted input needed): it is
+ * emptied and printed S seconds later (6144 events, ~10 to 15 s of swipes). The dump's first line gives the first event's
+ * mach_absolute_time, so user-space stamps (mach_absolute_time) line up with it. P's number is the DECON's frame counter
+ * when dpu_probe=1 made it readable (0 otherwise): the refresh the present finished in.
  */
+#define SWEET_FB_TR_N   6144
 static uint32_t sweet_fb_trace;
 static struct {
 	uint64_t at;
 	uint32_t arg;
 	char what;
-} sweet_fb_tr[768];
+} sweet_fb_tr[SWEET_FB_TR_N];
+static uint64_t sweet_fb_tr_t0;         /* kern.hakios.sweetfb_trace_go: when the ring was started (0: the scripted input's) */
 static volatile uint32_t sweet_fb_tr_n;
 static bool sweet_fb_tr_dumped;
 extern "C" unsigned long long starlte_touch_script_t0;         /* bsd/dev/starlte_touch.c */
@@ -109,7 +115,7 @@ sweet_fb_trace_event(char what, uint32_t arg)
 	if (!sweet_fb_trace || sweet_fb_tr_dumped) {
 		return;
 	}
-	uint32_t at = __atomic_fetch_add(&sweet_fb_tr_n, 1, __ATOMIC_RELAXED) % 768;
+	uint32_t at = __atomic_fetch_add(&sweet_fb_tr_n, 1, __ATOMIC_RELAXED) % SWEET_FB_TR_N;
 	sweet_fb_tr[at].at = mach_absolute_time();
 	sweet_fb_tr[at].arg = arg;
 	sweet_fb_tr[at].what = what;
@@ -119,12 +125,14 @@ static void
 sweet_fb_trace_dump(void)
 {
 	sweet_fb_tr_dumped = true;
-	uint32_t n = sweet_fb_tr_n, count = n < 768 ? n : 768, first = n < 768 ? 0 : n % 768;
-	uint64_t t0 = sweet_fb_tr[first].at;
+	uint32_t n = sweet_fb_tr_n, count = n < SWEET_FB_TR_N ? n : SWEET_FB_TR_N, first = n < SWEET_FB_TR_N ? 0 : n % SWEET_FB_TR_N;
+	uint64_t t0 = sweet_fb_tr[first].at, t0ns = 0;
+	absolutetime_to_nanoseconds(t0, &t0ns);
+	IOLog("FBT: first event at mach_absolute_time %llu (%llu us)\n", t0, t0ns / 1000);
 	char line[200];
 	int len = 0;
 	for (uint32_t i = 0; i < count; i++) {
-		uint32_t at = (first + i) % 768;
+		uint32_t at = (first + i) % SWEET_FB_TR_N;
 		uint64_t ns = 0;
 		absolutetime_to_nanoseconds(sweet_fb_tr[at].at - t0, &ns);
 		len += snprintf(line + len, sizeof(line) - (size_t)len, " %llu%c%u", ns / 1000, sweet_fb_tr[at].what, sweet_fb_tr[at].arg);
@@ -137,6 +145,18 @@ sweet_fb_trace_dump(void)
 		}
 	}
 	IOLog("FBT: done, %u events\n", count);
+}
+
+/* kern.hakios.sweetfb_trace_go (bsd/dev/starlte_gpu.c): start the ring now, print it S seconds later */
+extern "C" void
+sweet_fb_trace_go(uint32_t s)
+{
+	sweet_fb_tr_dumped = true;              /* (no events while it is reset) */
+	__atomic_store_n(&sweet_fb_tr_n, 0, __ATOMIC_RELAXED);
+	sweet_fb_tr_t0 = mach_absolute_time();
+	sweet_fb_trace = s;
+	__atomic_store_n(&sweet_fb_tr_dumped, s == 0, __ATOMIC_RELEASE);
+	IOLog("FBT: started at mach_absolute_time %llu, printed in %u s\n", sweet_fb_tr_t0, s);
 }
 extern "C" unsigned starlte_gpu_user_pending(void);            /* bsd/dev/starlte_gpu.c: app chains queued or running */
 
@@ -807,9 +827,9 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
 	if (sweet_fb_trace && !sweet_fb_tr_dumped) {
 		sweet_fb_trace_event('T', starlte_gpu_user_pending());
-		uint64_t since = 0;
-		if (starlte_touch_script_t0 != 0) {
-			absolutetime_to_nanoseconds(now - starlte_touch_script_t0, &since);
+		uint64_t since = 0, tr_t0 = sweet_fb_tr_t0 != 0 ? sweet_fb_tr_t0 : starlte_touch_script_t0;
+		if (tr_t0 != 0) {
+			absolutetime_to_nanoseconds(now - tr_t0, &since);
 			if (since >= (uint64_t)sweet_fb_trace * NSEC_PER_SEC) {
 				sweet_fb_trace_dump();
 			}
@@ -924,7 +944,11 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
 			}
 		}
 #endif
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+		sweet_fb_trace_event('P', sweet_fb_trace ? hakios_scanout_refreshes() : 0);
+#else
 		sweet_fb_trace_event('P', 0);
+#endif
 		if (sweet_fb_fi) {
 			fb->frameInfo(sweet_fb_swap_id(rec), mach_continuous_time(), fi_fence);
 		}

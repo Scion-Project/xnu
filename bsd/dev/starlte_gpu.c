@@ -1084,6 +1084,23 @@ sweet_fb_dpp_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unu
 	    value ? "the present by the DPP asked for" : "today's present (the scaled copy into the panel's buffer)");
 	return 0;
 }
+/* kern.hakios.sweetfb_trace_go=S: the framebuffer's event ring (sweetfb_trace) started now and printed S seconds later */
+extern void sweet_fb_trace_go(uint32_t s);
+static int
+sweet_fb_trace_go_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int value = 0, error = sysctl_io_number(req, value, sizeof(value), &value, NULL);
+	if (error != 0 || req->newptr == 0) {
+		return error;
+	}
+	if (value < 0 || value > 60) {
+		return EINVAL;
+	}
+	sweet_fb_trace_go((uint32_t)value);
+	return 0;
+}
+SYSCTL_PROC(_kern_hakios, OID_AUTO, sweetfb_trace_go, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
+    sweet_fb_trace_go_sysctl, "I", "start the framebuffer's event ring now and print it S seconds later (0: stop)");
 SYSCTL_PROC(_kern_hakios, OID_AUTO, sweetfb_dpp, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, NULL, 0,
     sweet_fb_dpp_sysctl, "I", "the present by the DPU's scaler (1) or the GPU's scaled copy as before (0) (sweetfb_dpp=)");
 
