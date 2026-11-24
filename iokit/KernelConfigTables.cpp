@@ -120,6 +120,11 @@ const char * gIOKernelConfigTables =
     "     'IOProviderClass' = IOResources;"
     "     'IOMatchCategory' = StarbiteAccelerator;"
     "   },"
+    "   {"                                                          /* scion-kernel drivers/media/m2m: the M2M scaler */
+    "     'IOClass'         = AppleM2ScalerCSCDriver;"                   /* that iOS's IOSurfaceAccelerator opens (m2m=0: off) */
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = AppleM2ScalerCSCDriver;"
+    "   },"
 #endif
 #if defined(ARM64_BOARD_CONFIG_A5XELTE)
     "   {"

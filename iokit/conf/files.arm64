@@ -21,6 +21,7 @@ iokit/Kernel/arm/StarbiteMali.cpp                                optional iokitc
 iokit/Kernel/arm/A5XELTEGPU.cpp                                 optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp scion_generic_arm64
 iokit/Kernel/hakios.bt_node.cpp                                  optional iokitcpp scion_generic_arm64
+iokit/Kernel/hakios.m2m_scaler.cpp                               optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/StarbiteAccelerator.cpp                         optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp scion_generic_arm64
 iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp scion_generic_arm64
