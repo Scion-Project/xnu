@@ -148,6 +148,10 @@
  *                            1 observe, 2 and the OCP block's registers read, 3 stage one (armed, the M3s still at
  *                            1794000 at most), 4 stage two (refuses: no M3 can be taken offline yet)
  *   ocp_guard_flags=1        with ocp_guard: also the S2MPS18's INT5 read each second (BUCK2 at its current limit)
+ *   m3off=<n>                (with processor_exit=1) the M3s 6 and 7 offline and back, and 2314000 kHz with two on (docs/ios27/
+ *                            BIG-CORES.md): 1 decisions logged only, 2 run; off by default. Needs ocp_guard=1 (the PMIC warning read)
+ *                            and cpufreq_gov_big_max=2314000 to go above 1794000
+ *   m3off_auto=0             with m3off=2: the policy off; only kern.hakios.m3off_test (1-4, 1N, 2N) moves cores
  *
  * Sources (Samsung's kernel for the S9, Scion-Project/android_kernel_samsung_exynos9810, lineage-24.0 at e5906667068e,
  * and Silicium's Resources/DTBs/starlte.dts, the phone's own tree): arch/arm64/boot/dts/exynos/
