@@ -1569,13 +1569,15 @@ static struct {
  */
 static uint32_t sgu_prof;
 /*
- * boot-arg sgu_dump=S (off by default): the chains run from S seconds after the scripted input began (sweetspeed&4096), 208 of
- * them in the order they ran: "f" a fragment chain, "v" a vertex/tiler (or compute) chain, the microseconds it ran, and a "."
- * in front when nothing was queued before it came (the GPU stood idle). Printed once, 16 a line, as "STARLTE GPU DUMP".
+ * boot-arg sgu_dump=S (off by default): the chains run from S seconds after the scripted input began (sweetspeed&4096) or the
+ * framebuffer's event ring was started (kern.hakios.sweetfb_trace_go), 480 of them in the order they ran: "f" a fragment chain,
+ * "v" a vertex/tiler (or compute) chain, the microseconds it ran, and a "." in front when nothing was queued before it came (the
+ * GPU stood idle); "+N" after it: it was waiting when the chain before ended and started N us later (the GPU idle between two
+ * waiting chains). Printed once, 16 a line, as "STARLTE GPU DUMP".
  */
 static uint32_t sgu_dump;
-#define SGU_DUMP_ROWS 208
-static struct { uint32_t us; uint8_t fragment, idle; } sgu_dump_row[SGU_DUMP_ROWS];
+#define SGU_DUMP_ROWS 480
+static struct { uint32_t us, gap; uint8_t fragment, idle; } sgu_dump_row[SGU_DUMP_ROWS];
 static unsigned sgu_dump_n;
 extern unsigned long long starlte_touch_script_t0;      /* bsd/dev/starlte_touch.c */
 extern int proc_selfpid(void);
@@ -1991,13 +1993,18 @@ sgu_q_worker(__unused void *parameter, __unused wait_result_t result)
 				sgu_dump_row[sgu_dump_n].us = (uint32_t)(ran / 1000);
 				sgu_dump_row[sgu_dump_n].fragment = (req & 1) != 0;
 				sgu_dump_row[sgu_dump_n].idle = queued > dump_prev_end;
+				uint64_t gap_ns = 0;
+				if (dump_prev_end != 0 && queued <= dump_prev_end && began > dump_prev_end) {
+					absolutetime_to_nanoseconds(began - dump_prev_end, &gap_ns);
+				}
+				sgu_dump_row[sgu_dump_n].gap = (uint32_t)(gap_ns / 1000);
 				if (++sgu_dump_n == SGU_DUMP_ROWS) {
 					for (unsigned i = 0; i < SGU_DUMP_ROWS; i += 16) {
-						char line[200];
+						char line[320];
 						unsigned at = 0;
 						for (unsigned k = i; k < i + 16 && k < SGU_DUMP_ROWS; k++) {
-							at += scnprintf(line + at, sizeof(line) - at, " %s%c%u", sgu_dump_row[k].idle ? "." : "",
-							    sgu_dump_row[k].fragment ? 'f' : 'v', sgu_dump_row[k].us);
+							at += scnprintf(line + at, sizeof(line) - at, " %s%c%u+%u", sgu_dump_row[k].idle ? "." : "",
+							    sgu_dump_row[k].fragment ? 'f' : 'v', sgu_dump_row[k].us, sgu_dump_row[k].gap);
 						}
 						printf("STARLTE GPU DUMP %3u:%s\n", i, line);
 					}

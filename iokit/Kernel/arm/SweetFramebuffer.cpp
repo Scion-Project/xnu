@@ -154,6 +154,11 @@ sweet_fb_trace_go(uint32_t s)
 	sweet_fb_tr_dumped = true;              /* (no events while it is reset) */
 	__atomic_store_n(&sweet_fb_tr_n, 0, __ATOMIC_RELAXED);
 	sweet_fb_tr_t0 = mach_absolute_time();
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+	if (starlte_touch_script_t0 == 0) {
+		starlte_touch_script_t0 = sweet_fb_tr_t0;      /* (sgu_dump's clock too, when no scripted input ran) */
+	}
+#endif
 	sweet_fb_trace = s;
 	__atomic_store_n(&sweet_fb_tr_dumped, s == 0, __ATOMIC_RELEASE);
 	IOLog("FBT: started at mach_absolute_time %llu, printed in %u s\n", sweet_fb_tr_t0, s);
