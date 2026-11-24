@@ -679,6 +679,18 @@ AppleCLCD::start(IOService *provider)
 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
 	setProperty("external", false);
 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+	/*
+	 * What this display takes as a layer. present() draws 4-byte BGRA layers only (layer 0 copied or scaled, the layers
+	 * above blended as premultiplied BGRA): no YCbCr layer, neither packed nor 4:2:0 two-plane, and no RGB of more than
+	 * one plane. QuartzCore's window server assumes a display takes all of these unless it says otherwise
+	 * (CA::WindowServer::AppleDisplay::update_display_limits reads these four keys from the framebuffer service), and
+	 * then hands the camera preview's '420f' surfaces to SwapEnd as a layer of their own, which was never drawn.
+	 * Told the truth, it composites such content into layer 0 on the GPU.
+	 */
+	setProperty("IOMFBYUVSupportKey", false);
+	setProperty("IOMFBYUVPackedUnSupported", true);
+	setProperty("IOMFBYUV420UnSupported", true);
+	setProperty("IOMFBRGBMultiPlaneSupportKey", false);
 	PE_parse_boot_argn("sweetfb_cav", &sweet_fb_cav, sizeof(sweet_fb_cav));
 	{
 		/* also on with boot-arg sweetspeed&2048 */
@@ -1628,7 +1640,7 @@ AppleCLCD::sweetSaveUnder(bool save)
  *   "SWEET FB LAYERS: swap S mask M: L id fmt 'xxxx' WxH bpe E bpr B planes P [p0 WxH bpr B off O bpe E] [p1 ...]
  *    a X,Y WxH b X,Y WxH"  per enabled layer,
  * the record's non-zero words of the first 4 such swaps (the fields beyond the rectangles: transform, blend, opacity),
- * layer 0's pixels over each upper layer's destination (16 x 16 grid: how many have alpha 0, mean alpha, mean RGB, how
+ * the pixels of the layer below over each upper layer's destination (16 x 16 grid: how many have alpha 0, mean alpha, mean RGB, how
  * many are lit), the upper layer's own picture (BGRA: the same; two planes: luma mean and lit, chroma means), and with
  * sweetfb_layerlog=2 the time a CPU conversion of a two-plane 4:2:0 layer to the panel's pixels would cost (each panel row
  * of the destination converted into a row buffer, nearest sampling, BT.601: an estimate, the row is not shown).
@@ -1689,7 +1701,7 @@ sweet_fb_layer_describe(const uint8_t *rec, uint32_t sh, uint32_t panelW, uint32
 		}
 		IOLog("SWEET FB LAYERS: rec swap %u%s\n", swap, k ? line : " end");
 	}
-	SweetSurface *s0 = (mask & 1u) ? sweet_surface_copy(get32(rec, 0x54 + sh)) : NULL;
+	SweetSurface *s0 = NULL;        /* the nearest enabled layer below the one described */
 	for (uint32_t l = 0; l < SWEET_FB_LAYERS; l++) {
 		uint32_t id = get32(rec, 0x54 + sh + 4 * l);
 		if (!(mask & (1u << l)) || id == 0) {
@@ -1733,7 +1745,7 @@ sweet_fb_layer_describe(const uint8_t *rec, uint32_t sh, uint32_t panelW, uint32
 						sa += A; sr += R; sg += G; sb += B;
 					}
 				}
-				IOLog("SWEET FB LAYERS: swap %u: layer 0 (surface %u) under layer %u's destination: alpha 0 at %u/256, "
+				IOLog("SWEET FB LAYERS: swap %u: the layer below (surface %u) under layer %u's destination: alpha 0 at %u/256, "
 				    "mean a %llu rgb %llu,%llu,%llu, lit %u/256\n", swap, s0->id, l, zero, sa / 256, sr / 256, sg / 256, sb / 256, lit);
 			}
 			if (base != 0 && s->planeCount >= 2 && s->planes[0].bytesPerElement == 1 && s->planes[1].bytesPerElement == 2) {
@@ -1787,7 +1799,10 @@ sweet_fb_layer_describe(const uint8_t *rec, uint32_t sh, uint32_t panelW, uint32
 				}
 			}
 		}
-		OSSafeReleaseNULL(s);
+		if (s != NULL) {
+			OSSafeReleaseNULL(s0);
+			s0 = s;
+		}
 	}
 	OSSafeReleaseNULL(s0);
 }
@@ -1858,6 +1873,20 @@ AppleCLCD::present(const uint8_t *rec)
 		}
 		uintptr_t src = s->kernelAddress();
 		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
+		if (s->planeCount > 1) {
+			/* a surface of planes (YCbCr 4:2:0, ...) is not a format this display takes (see start()): not drawn as
+			 * if it were BGRA; said once per format */
+			static uint32_t told[4];
+			uint32_t k;
+			for (k = 0; k < 4 && told[k] != 0 && told[k] != s->pixelFormat; k++) {
+			}
+			if (k < 4 && told[k] == 0) {
+				told[k] = s->pixelFormat;
+				IOLog("SWEET FB: layer %u surface %u format %#x (%u planes) is not a format this display takes: not drawn\n",
+				    layer, id, s->pixelFormat, s->planeCount);
+			}
+			src = 0;
+		}
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
 		{
 			/* sweetfbstats=1: what is on screen, without eyes on the panel. For a full-screen
