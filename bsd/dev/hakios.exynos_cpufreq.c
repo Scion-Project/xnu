@@ -1562,12 +1562,13 @@ m3off_decide(struct cluster *c, uint64_t now)
 		return;
 	}
 	if (m3off_auto == 0) {
-		if (fresh && mc >= CEIL_M3OFF_STOP_MC && !m3off_stopped) {
+		if (fresh && mc >= CEIL_M3OFF_STOP_MC && !m3off_stopped && off != 0) {
 			m3off_stop("the big zone at 75 C");
 		}
 		return;
 	}
-	if (fresh && mc >= CEIL_M3OFF_STOP_MC && !m3off_stopped) {
+	/* (the stop while the path is doing something: cores offline or asked to be; a hot boot with all four on is only not eligible) */
+	if (fresh && mc >= CEIL_M3OFF_STOP_MC && !m3off_stopped && (off != 0 || want != 0)) {
 		char why[80];
 
 		snprintf(why, sizeof(why), "the big zone at %d mC (this path stops at %d)", mc, CEIL_M3OFF_STOP_MC);

@@ -1446,11 +1446,12 @@ static volatile uint64_t starlte_wdog_kbeat, starlte_wdog_ubeat;
 static uint64_t starlte_wdog_limit, starlte_wdog_step, starlte_wdog_kage_ms, starlte_wdog_uage_ms;
 static timer_call_data_t starlte_wdog_tc;
 static char starlte_wdog_why[160];
-SYSCTL_UINT(_kern, OID_AUTO, sweetwdog_test, CTLFLAG_RW | CTLFLAG_LOCKED, &starlte_wdog_test, 0,
+/* (CTLFLAG_KERN: the USB console's "sysctl kern.sweetwdog_test=N" is the kernel's own kernel_sysctlbyname) */
+SYSCTL_UINT(_kern, OID_AUTO, sweetwdog_test, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &starlte_wdog_test, 0,
     "hang watchdog test: 1 = ignore user space's signs of life, 2 = stop the kernel thread's");
-SYSCTL_QUAD(_kern, OID_AUTO, sweetwdog_kernel_age_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &starlte_wdog_kage_ms,
+SYSCTL_QUAD(_kern, OID_AUTO, sweetwdog_kernel_age_ms, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &starlte_wdog_kage_ms,
     "hang watchdog: ms since the kernel thread's last sign of life, at the last look");
-SYSCTL_QUAD(_kern, OID_AUTO, sweetwdog_user_age_ms, CTLFLAG_RD | CTLFLAG_LOCKED, &starlte_wdog_uage_ms,
+SYSCTL_QUAD(_kern, OID_AUTO, sweetwdog_user_age_ms, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &starlte_wdog_uage_ms,
     "hang watchdog: ms since user space's last system call, at the last look");
 
 /* From the timer interrupt: the reason and the console's tail into the pmsg ring, then the reset. No lock, no allocation. */
