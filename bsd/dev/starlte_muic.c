@@ -38,6 +38,7 @@ static struct hakios_hsi2c bus = {
 	.pins_pa = 0, .ipclk_mhz = 400, .bus_hz = 400000,
 };
 static thread_call_t muic_call;
+extern bool starlte_chg_afc_owns_switch(uint8_t bc);  /* bsd/dev/starlte_charger.c */
 static int muic_ticks;
 static bool muic_up;
 
@@ -93,6 +94,27 @@ muic_bus_up(void)
 	return true;
 }
 
+/* bsd/dev/starlte_charger.c (sweetchg=): the same bus, brought up and held; NULL if it could not be (then nothing to give) */
+struct hakios_hsi2c *starlte_muic_bus_take(void);
+void starlte_muic_bus_give(void);
+
+struct hakios_hsi2c *
+starlte_muic_bus_take(void)
+{
+	lck_mtx_lock(&muic_bus_lock);
+	if (!muic_bus_up()) {
+		lck_mtx_unlock(&muic_bus_lock);
+		return NULL;
+	}
+	return &bus;
+}
+
+void
+starlte_muic_bus_give(void)
+{
+	lck_mtx_unlock(&muic_bus_lock);
+}
+
 static void
 muic_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
@@ -103,6 +125,12 @@ muic_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 	}
 	uint8_t bc = 0;
 	(void)hakios_hsi2c_read_reg(&bus, MUIC, MUIC_BC_STATUS, &bc, 1);
+	if (starlte_chg_afc_owns_switch(bc)) {
+		/* a wall charger with the fast-charge path on (starlte_charger.c, sweetafc=1): the switch is left open for it,
+		 * as Samsung leaves it for a TA; there is no host on the other end for the console */
+		lck_mtx_unlock(&muic_bus_lock);
+		goto next;
+	}
 	int c = ctrl1_read();
 	if (c != COM_USB) {
 		uint32_t e = ctrl1_write(COM_USB);
@@ -114,6 +142,7 @@ muic_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 		printf("STARLTE MUIC: CONTROL1 %#x (USB to the AP); BC_STATUS %#x\n", c, bc);
 	}
 	lck_mtx_unlock(&muic_bus_lock);
+next:
 	if (++muic_ticks < 60) {
 		uint64_t deadline;
 		clock_interval_to_deadline(2, NSEC_PER_SEC, &deadline);

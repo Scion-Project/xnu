@@ -205,6 +205,9 @@ static const char starlte_default_bootargs[] =
      * pdp_ip0 (cp_if=1: no data without cp_apn=, which only a run gives).
      */
     "tmu=3 shub=6 shub_hid=3 sweethalt=1 sweetfg=1 rtc_pmic=1 persona_lax=1 wifi_pcie=6 brcmfmac=8 "
+    /* On by default since 24 November 2026: the charger guard (bsd/dev/starlte_charger.c): the charger's watchdog fed,
+     * Samsung's temperature bands and limits for the charger type. Its fast-charge path (sweetafc=1) stays off. */
+    "sweetchg=2 "
     "abox=8 max98512=3 cs47l93=6 abox_mic=1 abox_rmem=1 bt=7 "
     "cp=7 cp_nv=2 cp_delay=40 cp_rfs=1 cp_if=1 "
     /*

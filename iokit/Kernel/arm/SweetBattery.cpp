@@ -20,6 +20,16 @@ extern "C" int herolte_fg_read(unsigned *percent, unsigned *mv, int *ma,
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
 /* bsd/dev/starlte_muic.c: the MAX77705's fuel gauge, read-only (boot-arg sweetfg=1) */
 extern "C" int starlte_fg_read(unsigned *percent, unsigned *mv, int *ma, unsigned *rem_mah, unsigned *full_mah, bool *vbus);
+/* bsd/dev/starlte_charger.c (sweetchg=1 or 2): the charger's own state, its type and the battery's thermistor */
+struct starlte_chg_report {
+	bool valid;
+	int type;                       /* 0 none, 1 SDP, 2 CDP, 3 DCP, 4 AFC 9 V, 5 unknown */
+	bool external, charging, full;
+	int32_t temp_centi;
+	uint32_t input_ma, vbus_mv;
+	const char *type_name;
+};
+extern "C" int starlte_chg_report(struct starlte_chg_report *r);
 #define BATTERY_DESIGN_MAH 3000u        /* SM-G960F EB-BG960ABE */
 #else
 #define BATTERY_DESIGN_MAH 3000u        /* SM-G930F EB-BG930ABE */
@@ -43,11 +53,15 @@ private:
 	IOTimerEventSource *fTimer;
 	bool fTimerAdded, fRunning, fReal;
 	int fLastMode;
+	int32_t fTempCenti;             /* the battery's thermistor (sweetchg=), else 2500, not measured */
+	bool fTempMeasured;
+	int fLastType;
 	void putNumber(const char *key, UInt32 value);
 	void putBool(const char *key, bool value);
 	void publish(unsigned percent, unsigned mv, int ma, bool external,
 	    bool capable, bool charging, bool full, bool measured, bool currentValid);
 	void poll(void);
+	void publishAdapter(bool external, int type, uint32_t input_ma, uint32_t vbus_mv);
 	static void timerFired(OSObject *owner, IOTimerEventSource *sender);
 	static IOReturn stopPolling(OSObject *owner, void *, void *, void *, void *);
 	static bool readWord(unsigned address, uint16_t *value);
@@ -87,6 +101,9 @@ SweetBattery::init(OSDictionary *dictionary)
 		}
 	}
 	fLastMode = -1;
+	fTempCenti = 2500;
+	fTempMeasured = false;
+	fLastType = -2;
 	return true;
 }
 
@@ -137,12 +154,12 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
 	putNumber("AppleRawMaxCapacity", BATTERY_DESIGN_MAH);
 	putNumber("DesignCapacity", BATTERY_DESIGN_MAH);
 	putNumber("InstantAmperage", (UInt32)ma);
-	/* iOS battery convention: centidegrees C; fixed 25 C, NOT measured. */
-	putNumber("Temperature", 2500);
+	/* iOS battery convention: centidegrees C; the battery's thermistor with sweetchg=, else a fixed 25 C, NOT measured. */
+	putNumber("Temperature", (UInt32)fTempCenti);
 	putBool("SweetBatteryHardwareSampleValid", measured);
 	putBool("SweetBatteryCurrentValid", currentValid);
 	putBool("SweetBatterySOCEstimated", measured);
-	putBool("SweetBatteryTemperatureEstimated", true);
+	putBool("SweetBatteryTemperatureEstimated", !fTempMeasured);
 	putBool("SweetBatteryFallback", !measured);
 	putNumber("SweetBatteryPercent", percent);
 
@@ -224,6 +241,51 @@ SweetBattery::estimatePercent(unsigned mv)
 }
 #endif
 
+/*
+ * The adapter's details as powerd reads them (kIOPMPSAdapterDetailsKey): the family from the charger type (the codes of
+ * IOPSKeysPrivate.h's kIOPSFamilyCode*, as Scion's hakios.battery.cpp uses them), the input limit, VBUS 5 or 9 V.
+ */
+void
+SweetBattery::publishAdapter(bool external, int type, uint32_t input_ma, uint32_t vbus_mv)
+{
+	OSDictionary *adapter = OSDictionary::withCapacity(5);
+	UInt32 family;
+
+	if (!adapter) {
+		return;
+	}
+	switch (external ? type : 0) {
+	case 0: family = 0; break;                      /* kIOPSFamilyCodeDisconnected */
+	case 1: family = 0xe0004000; break;             /* SDP: kIOPSFamilyCodeUSBHost */
+	case 2: family = 0xe0004005; break;             /* CDP: kIOPSFamilyCodeUSBChargingPortDownstream */
+	case 3: case 4: family = 0xe0004004; break;     /* DCP, AFC: kIOPSFamilyCodeUSBChargingPortDedicated */
+	default: family = 0xe0004007; break;            /* kIOPSFamilyCodeUSBUnknown */
+	}
+	const UInt32 values[] = { family, external ? (vbus_mv * input_ma + 500000u) / 1000000u : 0, external ? input_ma : 0,
+		                  external ? vbus_mv : 0 };
+	const char *keys[] = { kIOPMPSAdapterDetailsFamilyKey, kIOPMPSAdapterDetailsWattsKey,
+		               kIOPMPSAdapterDetailsAmperageKey, kIOPMPSAdapterDetailsVoltage };
+	for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
+		if (!external && i > 0) {
+			break;
+		}
+		OSNumber *number = OSNumber::withNumber(values[i], 32);
+		if (number) {
+			adapter->setObject(keys[i], number);
+			number->release();
+		}
+	}
+	if (external) {
+		adapter->setObject("IsWireless", kOSBooleanFalse);
+	}
+	const OSSymbol *symbol = OSSymbol::withCString(kIOPMPSAdapterDetailsKey);
+	if (symbol) {
+		setPSProperty(symbol, adapter);
+		symbol->release();
+	}
+	adapter->release();
+}
+
 #if defined(ARM64_BOARD_CONFIG_HEROLTE)
 void
 SweetBattery::poll(void)
@@ -244,6 +306,22 @@ SweetBattery::poll(void)
 	/* No charger driver: the gauge's charge current marks a cable. */
 	bool charging = ma > 20;
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
+	/* sweetchg=1 or 2: the charger says whether it charges (its CHG_DTLS with charging on), whether it is done, what the
+	 * cable is, and the battery's temperature (starlte_charger.c) */
+	struct starlte_chg_report chg;
+	if (starlte_chg_report(&chg) == 0) {
+		fTempCenti = chg.temp_centi;
+		fTempMeasured = true;
+		publishAdapter(chg.external, chg.type, chg.input_ma, chg.vbus_mv);
+		if (chg.type != fLastType) {
+			IOLog("SWEET BATTERY: %s; %u%% %umV %dmA, battery %d.%02d C\n", chg.type_name, percent, mv, ma,
+			    chg.temp_centi / 100, (chg.temp_centi < 0 ? -chg.temp_centi : chg.temp_centi) % 100);
+			fLastType = chg.type;
+		}
+		publish(percent, mv, ma, chg.external, chg.external, chg.charging, chg.external && (chg.full || percent >= 100),
+		    true, true);
+		return;
+	}
 	/* On the S9 the switch's VBUS bit says whether a cable is in, charging or not (full, or the charger's watchdog). */
 	if (vbus && !charging) {
 		static unsigned vlogged;
@@ -312,7 +390,7 @@ SweetBattery::timerFired(OSObject *owner, IOTimerEventSource *sender)
 	SweetBattery *self = OSDynamicCast(SweetBattery, owner);
 	if (self && self->fRunning) {
 		self->poll();
-		sender->setTimeoutMS(30000);
+		sender->setTimeoutMS(self->fTempMeasured ? 10000 : 30000);
 	}
 }
 
