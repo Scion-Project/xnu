@@ -679,6 +679,18 @@ AppleCLCD::start(IOService *provider)
 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
 	setProperty("external", false);
 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+	/*
+	 * What this display takes as a layer. present() draws 4-byte BGRA layers only (layer 0 copied or scaled, the layers
+	 * above blended as premultiplied BGRA): no YCbCr layer, neither packed nor 4:2:0 two-plane, and no RGB of more than
+	 * one plane. QuartzCore's window server assumes a display takes all of these unless it says otherwise
+	 * (CA::WindowServer::AppleDisplay::update_display_limits reads these four keys from the framebuffer service), and
+	 * then hands the camera preview's '420f' surfaces to SwapEnd as a layer of their own, which was never drawn.
+	 * Told the truth, it composites such content into layer 0 on the GPU.
+	 */
+	setProperty("IOMFBYUVSupportKey", false);
+	setProperty("IOMFBYUVPackedUnSupported", true);
+	setProperty("IOMFBYUV420UnSupported", true);
+	setProperty("IOMFBRGBMultiPlaneSupportKey", false);
 	PE_parse_boot_argn("sweetfb_cav", &sweet_fb_cav, sizeof(sweet_fb_cav));
 	{
 		/* also on with boot-arg sweetspeed&2048 */
@@ -1621,6 +1633,181 @@ AppleCLCD::sweetSaveUnder(bool save)
 }
 #endif
 
+#if defined(ARM64_BOARD_CONFIG_STARLTE)
+/*
+ * boot-arg sweetfb_layerlog=1 (off by default; a measurement, nothing is drawn differently): every swap that enables more
+ * than one layer is described, the first 24 such swaps and then one every 2 s (at most 240 descriptions):
+ *   "SWEET FB LAYERS: swap S mask M: L id fmt 'xxxx' WxH bpe E bpr B planes P [p0 WxH bpr B off O bpe E] [p1 ...]
+ *    a X,Y WxH b X,Y WxH"  per enabled layer,
+ * the record's non-zero words of the first 4 such swaps (the fields beyond the rectangles: transform, blend, opacity),
+ * the pixels of the layer below over each upper layer's destination (16 x 16 grid: how many have alpha 0, mean alpha, mean RGB, how
+ * many are lit), the upper layer's own picture (BGRA: the same; two planes: luma mean and lit, chroma means), and with
+ * sweetfb_layerlog=2 the time a CPU conversion of a two-plane 4:2:0 layer to the panel's pixels would cost (each panel row
+ * of the destination converted into a row buffer, nearest sampling, BT.601: an estimate, the row is not shown).
+ */
+static int sweet_fb_layerlog = -1;
+
+static void
+sweet_fb_fourcc(uint32_t f, char out[5])
+{
+	for (int i = 0; i < 4; i++) {
+		char c = (char)((f >> (24 - 8 * i)) & 0xff);
+		out[i] = (c >= 0x20 && c < 0x7f) ? c : '?';
+	}
+	out[4] = 0;
+}
+
+static void
+sweet_fb_layer_describe(const uint8_t *rec, uint32_t sh, uint32_t panelW, uint32_t panelH, uint32_t lw, uint32_t lh)
+{
+	static uint32_t described, recs;
+	static uint64_t last;
+	if (sweet_fb_layerlog < 0) {
+		sweet_fb_layerlog = 0;
+		PE_parse_boot_argn("sweetfb_layerlog", &sweet_fb_layerlog, sizeof(sweet_fb_layerlog));
+	}
+	if (sweet_fb_layerlog <= 0 || described >= 240) {
+		return;
+	}
+	uint32_t mask = get32(rec, 0x104 + sh), n = 0;
+	for (uint32_t l = 0; l < SWEET_FB_LAYERS; l++) {
+		n += (mask & (1u << l)) && get32(rec, 0x54 + sh + 4 * l) != 0;
+	}
+	if (n < 2) {
+		return;
+	}
+	uint64_t now = mach_absolute_time(), ns = 0;
+	absolutetime_to_nanoseconds(now - last, &ns);
+	if (described >= 24 && ns < 2000000000ULL) {
+		return;
+	}
+	last = now;
+	described++;
+	uint32_t swap = get32(rec, 0x50 + sh);
+	if (recs < 4) {
+		char line[160];
+		int k = 0;
+		recs++;
+		for (uint32_t off = 0; off + 4 <= SWEET_FB_SWAP_REC_MAX; off += 4) {
+			uint32_t v = get32(rec, off);
+			if (v == 0) {
+				continue;
+			}
+			k += snprintf(line + k, sizeof(line) - k, " %x=%x", off, v);
+			if (k > (int)sizeof(line) - 24) {
+				IOLog("SWEET FB LAYERS: rec swap %u%s\n", swap, line);
+				k = 0;
+			}
+		}
+		IOLog("SWEET FB LAYERS: rec swap %u%s\n", swap, k ? line : " end");
+	}
+	SweetSurface *s0 = NULL;        /* the nearest enabled layer below the one described */
+	for (uint32_t l = 0; l < SWEET_FB_LAYERS; l++) {
+		uint32_t id = get32(rec, 0x54 + sh + 4 * l);
+		if (!(mask & (1u << l)) || id == 0) {
+			continue;
+		}
+		const uint8_t *a = rec + 0x64 + sh + 16 * l, *b = rec + 0xc4 + sh + 16 * l;
+		int32_t bx = (int32_t)get32(b, 0), by = (int32_t)get32(b, 4), bw = (int32_t)get32(b, 8), bh = (int32_t)get32(b, 12);
+		SweetSurface *s = sweet_surface_copy(id);
+		char cc[5] = "----", p0[80] = "", p1[80] = "";
+		if (s != NULL) {
+			sweet_fb_fourcc(s->pixelFormat, cc);
+			if (s->planeCount > 0) {
+				snprintf(p0, sizeof(p0), " [p0 %ux%u bpr %u off %u bpe %u]", s->planes[0].width, s->planes[0].height,
+				    s->planes[0].bytesPerRow, s->planes[0].offset, s->planes[0].bytesPerElement);
+			}
+			if (s->planeCount > 1) {
+				snprintf(p1, sizeof(p1), " [p1 %ux%u bpr %u off %u bpe %u]", s->planes[1].width, s->planes[1].height,
+				    s->planes[1].bytesPerRow, s->planes[1].offset, s->planes[1].bytesPerElement);
+			}
+		}
+		IOLog("SWEET FB LAYERS: swap %u mask %#x: %u id %u fmt '%s' %ux%u bpe %u bpr %u planes %u%s%s a %d,%d %ux%u b %d,%d %dx%d\n",
+		    swap, mask, l, id, cc, s ? s->width : 0, s ? s->height : 0, s ? s->bytesPerElement : 0, s ? s->bytesPerRow : 0,
+		    s ? s->planeCount : 0, p0, p1, (int32_t)get32(a, 0), (int32_t)get32(a, 4), get32(a, 8), get32(a, 12), bx, by, bw, bh);
+		uintptr_t base = s ? s->kernelAddress() : 0;
+		if (l > 0 && bw > 0 && bh > 0) {
+			/* layer 0 under this layer's destination: a hole (alpha 0) or a picture? */
+			uintptr_t b0 = s0 ? s0->kernelAddress() : 0;
+			if (b0 != 0 && s0->planeCount < 2 && s0->bytesPerRow != 0) {
+				uint32_t zero = 0, lit = 0;
+				uint64_t sa = 0, sr = 0, sg = 0, sb = 0;
+				for (uint32_t gy = 0; gy < 16; gy++) {
+					for (uint32_t gx = 0; gx < 16; gx++) {
+						uint32_t px = (uint32_t)bx + (gx * 2 + 1) * (uint32_t)bw / 32, py = (uint32_t)by + (gy * 2 + 1) * (uint32_t)bh / 32;
+						if (px >= s0->width || py >= s0->height) {
+							continue;
+						}
+						uint32_t v = *(const volatile uint32_t *)(b0 + s0->offset + (size_t)py * s0->bytesPerRow + px * 4);
+						uint32_t A = v >> 24, R = (v >> 16) & 0xff, G = (v >> 8) & 0xff, B = v & 0xff;
+						zero += A == 0;
+						lit += (R * 3 + G * 6 + B) / 10 > 16;
+						sa += A; sr += R; sg += G; sb += B;
+					}
+				}
+				IOLog("SWEET FB LAYERS: swap %u: the layer below (surface %u) under layer %u's destination: alpha 0 at %u/256, "
+				    "mean a %llu rgb %llu,%llu,%llu, lit %u/256\n", swap, s0->id, l, zero, sa / 256, sr / 256, sg / 256, sb / 256, lit);
+			}
+			if (base != 0 && s->planeCount >= 2 && s->planes[0].bytesPerElement == 1 && s->planes[1].bytesPerElement == 2) {
+				uint32_t lit = 0;
+				uint64_t sy = 0, su = 0, sv = 0;
+				int32_t ax = (int32_t)get32(a, 0), ay = (int32_t)get32(a, 4);
+				uint32_t aw = get32(a, 8), ah = get32(a, 12);
+				for (uint32_t gy = 0; gy < 16; gy++) {
+					for (uint32_t gx = 0; gx < 16; gx++) {
+						uint32_t px = (uint32_t)ax + (gx * 2 + 1) * aw / 32, py = (uint32_t)ay + (gy * 2 + 1) * ah / 32;
+						if (px >= s->planes[0].width || py >= s->planes[0].height) {
+							continue;
+						}
+						uint32_t Y = *(const volatile uint8_t *)(base + s->planes[0].offset + (size_t)py * s->planes[0].bytesPerRow + px);
+						const volatile uint8_t *c = (const volatile uint8_t *)(base + s->planes[1].offset +
+						    (size_t)(py / 2) * s->planes[1].bytesPerRow + (px / 2) * 2);
+						lit += Y > 32;
+						sy += Y; su += c[0]; sv += c[1];
+					}
+				}
+				IOLog("SWEET FB LAYERS: swap %u: layer %u (two planes) over its source: Y mean %llu lit %u/256, Cb %llu Cr %llu\n",
+				    swap, l, sy / 256, lit, su / 256, sv / 256);
+				if (sweet_fb_layerlog >= 2) {
+					/* the cost of converting it on the CPU at the panel's scale, into a row buffer */
+					static uint32_t row[2048];
+					int32_t outW = (int32_t)((int64_t)lw * panelH / lh), outH = (int32_t)panelH;
+					if (outW > (int32_t)panelW) {
+						outW = (int32_t)panelW;
+						outH = (int32_t)((int64_t)lh * panelW / lw);
+					}
+					int32_t pw = (int32_t)((int64_t)bw * outW / lw), ph = (int32_t)((int64_t)bh * outH / lh);
+					pw = pw > 2048 ? 2048 : pw;
+					uint64_t t0 = mach_absolute_time(), acc = 0;
+					for (int32_t y = 0; y < ph; y++) {
+						uint32_t sy2 = (uint32_t)ay + (uint32_t)((int64_t)y * ah / ph);
+						const uint8_t *yr = (const uint8_t *)(base + s->planes[0].offset + (size_t)sy2 * s->planes[0].bytesPerRow);
+						const uint8_t *cr = (const uint8_t *)(base + s->planes[1].offset + (size_t)(sy2 / 2) * s->planes[1].bytesPerRow);
+						for (int32_t x = 0; x < pw; x++) {
+							uint32_t sx2 = (uint32_t)ax + (uint32_t)((int64_t)x * aw / pw);
+							int32_t Y = yr[sx2], U = cr[(sx2 & ~1u)] - 128, V = cr[(sx2 & ~1u) + 1] - 128;
+							int32_t R = Y + ((359 * V) >> 8), G = Y - ((88 * U + 183 * V) >> 8), B = Y + ((454 * U) >> 8);
+							R = R < 0 ? 0 : R > 255 ? 255 : R; G = G < 0 ? 0 : G > 255 ? 255 : G; B = B < 0 ? 0 : B > 255 ? 255 : B;
+							row[x] = 0xff000000u | ((uint32_t)R << 16) | ((uint32_t)G << 8) | (uint32_t)B;
+						}
+						acc += row[y % (pw > 0 ? pw : 1)];
+					}
+					uint64_t cns = 0;
+					absolutetime_to_nanoseconds(mach_absolute_time() - t0, &cns);
+					IOLog("SWEET FB LAYERS: swap %u: a CPU conversion of layer %u to %dx%d panel pixels takes %llu us (row buffer, "
+					    "not shown; check %llx)\n", swap, l, pw, ph, cns / 1000, acc & 0xff);
+				}
+			}
+		}
+		if (s != NULL) {
+			OSSafeReleaseNULL(s0);
+			s0 = s;
+		}
+	}
+	OSSafeReleaseNULL(s0);
+}
+#endif
+
 uint64_t
 AppleCLCD::present(const uint8_t *rec)
 {
@@ -1631,6 +1818,7 @@ AppleCLCD::present(const uint8_t *rec)
 	uint32_t mask = get32(rec, 0x104 + sh);
 	uint64_t copied = 0;
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
+	sweet_fb_layer_describe(rec, sh, fWidth, fHeight, fLogicalW, fLogicalH);
 	if (sweet_fb_dp.attached) {
 		/* sweetfb_dpp takes a frame of one layer, layer 0: any other is drawn into the boot framebuffer as before */
 		for (uint32_t layer = 1; layer < SWEET_FB_LAYERS; layer++) {
@@ -1685,6 +1873,20 @@ AppleCLCD::present(const uint8_t *rec)
 		}
 		uintptr_t src = s->kernelAddress();
 		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
+		if (s->planeCount > 1) {
+			/* a surface of planes (YCbCr 4:2:0, ...) is not a format this display takes (see start()): not drawn as
+			 * if it were BGRA; said once per format */
+			static uint32_t told[4];
+			uint32_t k;
+			for (k = 0; k < 4 && told[k] != 0 && told[k] != s->pixelFormat; k++) {
+			}
+			if (k < 4 && told[k] == 0) {
+				told[k] = s->pixelFormat;
+				IOLog("SWEET FB: layer %u surface %u format %#x (%u planes) is not a format this display takes: not drawn\n",
+				    layer, id, s->pixelFormat, s->planeCount);
+			}
+			src = 0;
+		}
 #if defined(ARM64_BOARD_CONFIG_STARLTE)
 		{
 			/* sweetfbstats=1: what is on screen, without eyes on the panel. For a full-screen
