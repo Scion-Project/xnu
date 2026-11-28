@@ -219,7 +219,21 @@ static const char starlte_default_bootargs[] =
      * Not here on purpose: sweetfb_dpp (the display's scaler: after its probe boot), sweetc2 (a core powered down has
      * never come back on a phone), gov_policy=3 and ocp_guard=4 (above 1794 MHz), sgu_depth (measured harmful).
      */
-    "cam_s9=7 cam_switch=1 sgu_irq=1 decmpfs_lz4=1 sweetatpath=1";
+    "cam_s9=7 cam_switch=1 sgu_irq=1 decmpfs_lz4=1 sweetatpath=1 "
+    /*
+     * On by default since 28 November 2026, for the first gold master: what every test phone's own line has carried since
+     * 18 November and was booted with on both S9s (phone 2 on 28 November: main + fork f2f59ddd, SpringBoard 21 s after the
+     * flash, Wi-Fi 8 s later, 0xFE3B answered), so that a line the user makes with tools/ios27/s9/make-boot-image.sh boots
+     * the same kernel as the phones. Each can still be turned off on the loader's line (bt_vsc=0, ...).
+     * bt_vsc=1: answer the vendor commands iOS 27.2.1's bluetoothd sends (0xFE3B, LP-core statistics, 212 bytes).
+     * bt_addr_efs=1: the phone's own Bluetooth address, read from EFS:/bluetooth/bt_addr READ ONLY (as cp_nv=2 reads the
+     * modem's), instead of the chip's default address that every S9 shares.
+     * sweet_priv_ent=1: privileges iOS grants by entitlement (cameracaptured, dasd, mDNSResponder, terminusd, symptomsd ...).
+     * wifi_delay=10: Wi-Fi's link 10 s after the root, not 60.
+     * Not here: bt_module= (the module is read from the chip's OTP when it is not named; one phone names its own to skip
+     * that ~9 s wait) and sweetfb_lh= (it must match the device tree's canvas: make-boot-image.sh writes both).
+     */
+    "bt_vsc=1 bt_addr_efs=1 sweet_priv_ent=1 wifi_delay=10";
 
 /* STARLTE_BOOTARGS_ASSEMBLY_BEGIN: from here to ..._END builds on its own too (a host test of the line's assembly). */
 static bool
