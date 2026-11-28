@@ -1086,6 +1086,7 @@ sweet_fb_dpp_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unu
 }
 /* kern.hakios.sweetfb_trace_go=S: the framebuffer's event ring (sweetfb_trace) started now and printed S seconds later */
 extern void sweet_fb_trace_go(uint32_t s);
+static void sgu_pc_go(void);
 static int
 sweet_fb_trace_go_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
 {
@@ -1096,6 +1097,7 @@ sweet_fb_trace_go_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, 
 	if (value < 0 || value > 60) {
 		return EINVAL;
 	}
+	sgu_pc_go();             /* sgu_pc=S: the hardware counters for S seconds from now */
 	sweet_fb_trace_go((uint32_t)value);
 	return 0;
 }
@@ -1576,6 +1578,189 @@ static uint32_t sgu_prof;
  * waiting chains). Printed once, 16 a line, as "STARLTE GPU DUMP".
  */
 static uint32_t sgu_dump;
+/*
+ * Diagnostic, off by default: boot-arg sgu_pc=S: the Mali's hardware counters (manual mode, set 0, every counter of every
+ * block) for S seconds from each kern.hakios.sweetfb_trace_go. After every app chain, with the GPU idle: sample, clean the
+ * caches, clear; a fragment chain's sample is summed into a bin by its run time (>= 8 ms, 4-8 ms, 1-4 ms, < 1 ms). One dump
+ * is 33 blocks of 64 counters: the job manager, the tiler, four L2 slices, then a block per shader core by its bit in
+ * SHADER_PRESENT (absent cores' blocks are not written). Dump at data offset SGU_PC_OFF of the kernel's own pages (AS0).
+ * The dump address register moves on after each dump, so it is set again before every sample (dumps past the area wrote
+ * into the present's heap and hung chains, 28 Nov). Printed at the end ("STARLTE GPU PC ..."), decoded by scion-kernel's
+ * tools/ios27/perf/gpu-counters.py with Arm's Mali-G72 counter layout.
+ */
+#define SGU_PC_OFF      0x6000u         /* (free: the self-test ends at 0x6000, the present blob is at 0xc000, the heap at 0x10000) */
+#define SGU_PC_BLOCKS   33u             /* what one dump writes here (the base register moves on by 33 x 256 B) */
+#define SGU_PC_BINS     4u
+static uint32_t sgu_pc;
+static bool sgu_pc_on;
+static uint64_t sgu_pc_until;
+static uint64_t sgu_pc_sum[SGU_PC_BINS][4][64];
+static uint32_t sgu_pc_n[SGU_PC_BINS];
+static uint64_t sgu_pc_us[SGU_PC_BINS];
+static uint32_t sgu_pc_fail, sgu_pc_cores_seen, sgu_pc_last_us, sgu_pc_fail_s, sgu_pc_fail_c;
+#define PRFCNT_BASE_LO   0x060
+#define PRFCNT_BASE_HI   0x064
+#define PRFCNT_CONFIG    0x068
+#define PRFCNT_JM_EN     0x06c
+#define PRFCNT_SHADER_EN 0x070
+#define PRFCNT_TILER_EN  0x074
+#define PRFCNT_MMU_L2_EN 0x07c
+static bool
+sgu_pc_cmd(uint32_t cmd, uint32_t bit)
+{
+	if (bit == 0) {
+		sg_wr(sg_gpu, 0x030, cmd);
+		delay(5);
+		return true;
+	}
+	if (cmd == 0x04) {      /* the dump address moves on after every dump: set it again each time */
+		uint64_t va = SG_VA + SGU_PC_OFF;
+		sg_wr(sg_gpu, 0x060, (uint32_t)va);
+		sg_wr(sg_gpu, 0x064, (uint32_t)(va >> 32));
+	}
+	sg_wr(sg_gpu, 0x024, bit);                      /* GPU_IRQ_CLEAR */
+	sg_wr(sg_gpu, 0x030, cmd);                      /* GPU_COMMAND */
+	for (unsigned i = 0; i < 20000; i++) {
+		if (sg_rd(sg_gpu, 0x020) & bit) {       /* GPU_IRQ_RAWSTAT */
+			sg_wr(sg_gpu, 0x024, bit);
+			sgu_pc_last_us = i;
+			return true;
+		}
+		delay(1);
+	}
+	sgu_pc_last_us = 99999;
+	return false;
+}
+static void
+sgu_pc_arm(void)
+{
+	if (sgu_pc == 0) {
+		return;
+	}
+	bzero(sgu_pc_sum, sizeof(sgu_pc_sum));
+	bzero(sgu_pc_n, sizeof(sgu_pc_n));
+	bzero(sgu_pc_us, sizeof(sgu_pc_us));
+	sgu_pc_fail = sgu_pc_fail_s = sgu_pc_fail_c = 0;
+	uint64_t va = SG_VA + SGU_PC_OFF;
+	sg_wr(sg_gpu, PRFCNT_BASE_LO, (uint32_t)va);
+	sg_wr(sg_gpu, PRFCNT_BASE_HI, (uint32_t)(va >> 32));
+	sg_wr(sg_gpu, PRFCNT_JM_EN, 0xffffffffu);
+	sg_wr(sg_gpu, PRFCNT_SHADER_EN, 0xffffffffu);
+	sg_wr(sg_gpu, PRFCNT_TILER_EN, 0xffffffffu);
+	sg_wr(sg_gpu, PRFCNT_MMU_L2_EN, 0xffffffffu);
+	sg_wr(sg_gpu, PRFCNT_CONFIG, 0u);               /* off first, as kbase */
+	sg_wr(sg_gpu, PRFCNT_BASE_LO, (uint32_t)va);
+	sg_wr(sg_gpu, PRFCNT_BASE_HI, (uint32_t)(va >> 32));
+	sg_wr(sg_gpu, PRFCNT_CONFIG, 1u | (0u << 4));   /* manual, AS0, set 0 */
+	{       /* a test sample with nothing running: the registers read back, the time to each completion, the header words */
+		volatile uint32_t *d = (volatile uint32_t *)(sg_mem + SG_DATA_OFF + SGU_PC_OFF);
+		for (unsigned i = 0; i < SGU_PC_BLOCKS * 64; i++) {
+			d[i] = 0xdeadbeefu;
+		}
+		uint32_t raw0 = sg_rd(sg_gpu, 0x020);
+		bool c0 = sgu_pc_cmd(0x03, 0);
+		bool c1 = sgu_pc_cmd(0x04, 1u << 16);
+		uint32_t t1 = sgu_pc_last_us;
+		bool c2 = sgu_pc_cmd(0x07, 1u << 17);
+		uint32_t t2 = sgu_pc_last_us;
+		printf("STARLTE GPU PC: test: cfg %#x base %#x:%#x en %#x/%#x/%#x/%#x raw before %#x after %#x; sample %d in %u us, clean %d in %u us (clear %d)\n",
+		    sg_rd(sg_gpu, PRFCNT_CONFIG), sg_rd(sg_gpu, PRFCNT_BASE_HI), sg_rd(sg_gpu, PRFCNT_BASE_LO), sg_rd(sg_gpu, PRFCNT_JM_EN),
+		    sg_rd(sg_gpu, PRFCNT_TILER_EN), sg_rd(sg_gpu, PRFCNT_MMU_L2_EN), sg_rd(sg_gpu, PRFCNT_SHADER_EN), raw0, sg_rd(sg_gpu, 0x020), c1, t1, c2, t2, c0);
+		(void)sgu_pc_cmd(0x03, 0);
+		printf("STARLTE GPU PC: test: base after %#x; headers:", sg_rd(sg_gpu, 0x060));
+		for (unsigned blk = 0; blk < SGU_PC_BLOCKS; blk++) {
+			printf(" %x", d[blk * 64 + 2]);
+		}
+		printf("\n");
+		for (unsigned blk = 0; blk < 4; blk++) {
+			printf("STARLTE GPU PC: test blk %u: %#x %#x %#x %#x %#x %#x %#x %#x\n", blk, d[blk * 64 + 0], d[blk * 64 + 1], d[blk * 64 + 2],
+			    d[blk * 64 + 3], d[blk * 64 + 4], d[blk * 64 + 5], d[blk * 64 + 6], d[blk * 64 + 7]);
+		}
+	}
+	uint64_t span = 0;
+	nanoseconds_to_absolutetime((uint64_t)sgu_pc * NSEC_PER_SEC, &span);
+	sgu_pc_until = mach_absolute_time() + span;
+	sgu_pc_on = true;
+	printf("STARLTE GPU PC: armed for %u s (dump at %#llx)\n", sgu_pc, va);
+}
+static void
+sgu_pc_print(void)
+{
+	static const char *const bn[SGU_PC_BINS] = { "long>=8ms", "mid4-8ms", "short1-4ms", "tiny<1ms" };
+	static const char *const kn[4] = { "JM", "TILER", "L2", "SC" };
+	printf("STARLTE GPU PC: fails: sample %u clean %u\n", sgu_pc_fail_s, sgu_pc_fail_c);
+	printf("STARLTE GPU PC: done: chains %u/%u/%u/%u us %llu/%llu/%llu/%llu fail %u cores %u\n",
+	    sgu_pc_n[0], sgu_pc_n[1], sgu_pc_n[2], sgu_pc_n[3], sgu_pc_us[0], sgu_pc_us[1], sgu_pc_us[2], sgu_pc_us[3],
+	    sgu_pc_fail, sgu_pc_cores_seen);
+	for (unsigned b = 0; b < SGU_PC_BINS; b++) {
+		for (unsigned k = 0; k < 4; k++) {
+			for (unsigned q = 0; q < 4; q++) {
+				char line[400];
+				int at = scnprintf(line, sizeof(line), "STARLTE GPU PC %s %s %u:", bn[b], kn[k], q * 16);
+				for (unsigned i = q * 16; i < q * 16 + 16; i++) {
+					at += scnprintf(line + at, sizeof(line) - at, " %llu", sgu_pc_sum[b][k][i]);
+				}
+				printf("%s\n", line);
+			}
+		}
+	}
+}
+static void
+sgu_pc_go(void)
+{
+	lck_mtx_lock(&sg_lock);
+	sgu_pc_arm();
+	lck_mtx_unlock(&sg_lock);
+}
+/* sg_lock held, the chain just retired (ok) */
+static void
+sgu_pc_take(uint32_t req, uint64_t ns)
+{
+	if (!sgu_pc_on) {
+		return;
+	}
+	if (!(req & 1)) {       /* a vertex/tiler chain: its counts dropped (sampled and cleared with the GPU idle) */
+		(void)sgu_pc_cmd(0x04, 1u << 16);
+		(void)sgu_pc_cmd(0x07, 1u << 17);
+		(void)sgu_pc_cmd(0x03, 0);
+		return;
+	}
+	volatile uint32_t *d = (volatile uint32_t *)(sg_mem + SG_DATA_OFF + SGU_PC_OFF);
+	for (unsigned i = 0; i < SGU_PC_BLOCKS * 64; i++) {
+		d[i] = 0;
+	}
+	bool sampled = sgu_pc_cmd(0x04, 1u << 16);                         /* PRFCNT_SAMPLE */
+	bool cleaned = sampled && sgu_pc_cmd(0x07, 1u << 17);               /* CLEAN_CACHES */
+	if (!sampled || !cleaned) {
+		sgu_pc_fail++;
+		if (!sampled) sgu_pc_fail_s++; else sgu_pc_fail_c++;
+	} else {
+		unsigned b = ns >= 8000000 ? 0 : ns >= 4000000 ? 1 : ns >= 1000000 ? 2 : 3;
+		sgu_pc_n[b]++;
+		sgu_pc_us[b] += ns / 1000;
+		unsigned cores = 0;
+		for (unsigned blk = 0; blk < SGU_PC_BLOCKS; blk++) {
+			unsigned k = blk < 2 ? blk : blk < 6 ? 2 : 3;       /* JM, tiler, four L2 slices, shader cores from block 6 */
+			if (blk >= 6 && d[blk * 64 + 4] == 0 && d[blk * 64 + 26] == 0) {
+				continue;       /* (a core that is not there, or idle: nothing counted) */
+			}
+			if (blk >= 6) {
+				cores++;
+			}
+			for (unsigned i = 0; i < 64; i++) {
+				sgu_pc_sum[b][k][i] += d[blk * 64 + i];
+			}
+		}
+		sgu_pc_cores_seen = cores;
+	}
+	sg_wr(sg_gpu, 0x030, 0x03);                     /* PRFCNT_CLEAR, the GPU idle */
+	delay(5);
+	if (mach_absolute_time() >= sgu_pc_until) {
+		sgu_pc_on = false;
+		sg_wr(sg_gpu, PRFCNT_CONFIG, 0);
+		sgu_pc_print();
+	}
+}
 #define SGU_DUMP_ROWS 480
 static struct { uint32_t us, gap; uint8_t fragment, idle; } sgu_dump_row[SGU_DUMP_ROWS];
 static unsigned sgu_dump_n;
@@ -1787,6 +1972,9 @@ sgu_retire_locked(bool block)
 	} else {
 		sg_wr(sg_gpu, JOB_IRQ_CLEAR, 0xffffffffu);
 		sg_wr(sg_gpu, MMU_IRQ_CLEAR, 0xffffffffu);
+	}
+	if (ok && !sgu_side) {
+		sgu_pc_take(sgu_busy_req, ns);
 	}
 	sgu_busy = false;
 	sgu_seq_done = sgu_seq_sub - (sgu_side ? 1 : 0);
@@ -2125,6 +2313,7 @@ sgu_q_enabled(void)
 			(void)PE_parse_boot_argn("sgu_prof", &sgu_prof, sizeof(sgu_prof));
 			(void)PE_parse_boot_argn("sgu_pipe", &sgu_pipe, sizeof(sgu_pipe));
 			(void)PE_parse_boot_argn("sgu_dump", &sgu_dump, sizeof(sgu_dump));
+			(void)PE_parse_boot_argn("sgu_pc", &sgu_pc, sizeof(sgu_pc));
 			(void)PE_parse_boot_argn("sgu_pipe_side", &sgu_pipe_side, sizeof(sgu_pipe_side));
 			(void)PE_parse_boot_argn("sgu_pipe_main", &sgu_pipe_main, sizeof(sgu_pipe_main));
 			uint32_t slots = 1;
