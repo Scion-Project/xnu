@@ -244,6 +244,9 @@ extern "C" {
 void proc_selfname(char *buf, int size);
 int proc_selfpid(void);
 }
+/* boot-arg sbm_holdings=0: no line as a client's own buffers pass each 32 MiB step (StarbiteMaliUserClient::sayHoldings) */
+static bool sbm_holdings_log = true;
+
 static uint64_t sbm_cap_pages, sbm_client_cap_pages;   /* in 4 KiB pages; 0 = no cap */
 static uint64_t sbm_refused, sbm_refused_bytes;
 
@@ -261,10 +264,22 @@ sbm_cap_init(void)
 			client_mb = mb / 2;
 		}
 	}
+	uint32_t holdings = 1;
+	if (PE_parse_boot_argn("sbm_holdings", &holdings, sizeof(holdings))) {
+		sbm_holdings_log = holdings != 0;
+	}
 	sbm_cap_pages = (uint64_t)mb << 8;
 	sbm_client_cap_pages = (uint64_t)client_mb << 8;
 	IOLog("STARLTE GPU: buffer cap: all clients %u MiB, one client %u MiB (0 = none; memory %llu MiB; sweetspeed&134217728, "
 	    "sbm_cap_mb, sbm_client_cap_mb)\n", mb, client_mb, max_mem >> 20);
+}
+
+/* Would the caps let this client (holding `mine` pages of buffers) have `pages` more? Says nothing. */
+static bool
+sbm_cap_would_allow(uint64_t mine, uint32_t pages)
+{
+	return (sbm_cap_pages == 0 || (uint64_t)sbm_live_pages[0] + pages <= sbm_cap_pages) &&
+	       (sbm_client_cap_pages == 0 || mine + pages <= sbm_client_cap_pages);
 }
 
 /* May this client (holding `mine` pages of buffers) have `pages` more? Says so when not (the first 10, then every 100th). */
@@ -315,6 +330,9 @@ class StarbiteMaliUserClient : public IOUserClient {
 	void reap(void);
 	uint32_t fDying[256];                   /* handles closed by the client whose buffers still wait for their chains */
 	uint32_t fDyingCount = 0;
+	uint64_t fSaidPages = 0;                /* fBufferPages when its holdings were last said (sayHoldings) */
+	bool reapAllDying(void);
+	void sayHoldings(const char *why);
 
 public:
 	bool initWithTask(task_t owningTask, void *securityID, UInt32 type,
@@ -388,6 +406,62 @@ StarbiteMaliUserClient::reap(void)
 		closeBO(bo);
 	}
 	fDyingCount = kept;
+}
+
+/*
+ * fLock held. Every buffer the client has closed goes now: the chains queued by now are waited for (all of them, as a
+ * GEM_CLOSE without the queue waits), then each closed buffer is freed. For a CREATE_BO the cap would refuse: buffers the
+ * client has already closed still count against it until reap() frees them at a later call, and while the GPU is busy
+ * (the camera's preview: every frame's chains queued behind the next) a client that closes and makes buffers of the same
+ * size at once was refused for memory it had given back. True when one went.
+ */
+bool
+StarbiteMaliUserClient::reapAllDying(void)
+{
+	if (fDyingCount == 0) {
+		return false;
+	}
+	(void)starlte_gpu_user_wait_seq(0, true);
+	uint32_t n = fDyingCount;
+	for (uint32_t i = 0; i < n; i++) {
+		sbm_bo *bo = &fBos[fDying[i] - 1];
+		if (bo->mem != NULL && bo->dying != 0) {
+			closeBO(bo);
+		}
+	}
+	fDyingCount = 0;
+	return true;
+}
+
+/*
+ * fLock held. The client's own buffers, said when they pass a new 32 MiB step up from what was said last, or fall 64 MiB
+ * below it, and before a refusal: how many, how many of a pooled block's size or more (16 MiB), and how many closed ones
+ * still wait for their chains. A client's GPU memory over a session is then a few lines in the log (the camera's preview).
+ */
+void
+StarbiteMaliUserClient::sayHoldings(const char *why)
+{
+	uint32_t live = 0, big = 0, dying = 0;
+	uint64_t dyingPages = 0;
+	for (uint32_t i = 0; i < fCount; i++) {
+		const sbm_bo *bo = &fBos[i];
+		if (bo->mem == NULL || bo->surface != 0 || bo->host) {
+			continue;
+		}
+		if (bo->dying != 0) {
+			dying++;
+			dyingPages += bo->pages;
+		} else {
+			live++;
+			big += bo->pages >= 4096;
+		}
+	}
+	char name[32];
+	proc_selfname(name, sizeof(name));
+	IOLog("STARLTE GPU: %s[%d] holds %llu MiB of buffers (%s): %u live (%u of 16 MiB or more), %u closed waiting for chains "
+	    "(%llu MiB); all clients %llu MiB\n", name, proc_selfpid(), fBufferPages >> 8, why, live, big, dying, dyingPages >> 8,
+	    (uint64_t)sbm_live_pages[0] >> 8);
+	fSaidPages = fBufferPages;
 }
 
 /*
@@ -487,7 +561,13 @@ StarbiteMaliUserClient::createBO(sbm_create_bo *a)
 	/* whole 16 KiB pages: Mesa maps the buffer into a task with 16 KiB pages */
 	uint64_t bytes = ((uint64_t)a->size + 0x3fff) & ~0x3fffull;
 	uint32_t pages = (uint32_t)(bytes / 0x1000);
+	if (!sbm_cap_would_allow(fBufferPages, pages) && reapAllDying()) {
+		sayHoldings("closed buffers freed before a refusal");
+	}
 	if (!sbm_cap_allows(fBufferPages, pages)) {
+		if (sbm_refused <= 10 || (sbm_refused % 100) == 1) {
+			sayHoldings("a buffer refused");
+		}
 		return kIOReturnNoMemory;
 	}
 	uint64_t va = sbm_va_alloc(bytes);
@@ -527,6 +607,9 @@ StarbiteMaliUserClient::createBO(sbm_create_bo *a)
 	fBos[handle - 1] = (sbm_bo){ .mem = mem, .map = NULL, .va = va, .pages = pages };
 	sbm_count_pages(&fBos[handle - 1], 1);
 	fBufferPages += pages;
+	if (sbm_holdings_log && (fBufferPages >= fSaidPages + (32u << 8) || fBufferPages + (64u << 8) <= fSaidPages)) {
+		sayHoldings(fBufferPages > fSaidPages ? "up" : "down");
+	}
 	a->handle = handle;
 	a->offset = va;
 	return kIOReturnSuccess;
