@@ -92,6 +92,7 @@
 #include <arm64/speculation.h>
 #endif /* #if __arm64__ */
 #include <pexpert/pexpert.h>      /* PE_parse_boot_argn (sweet_sr_spec) */
+#include <kern/clock.h>           /* delay() */
 
 extern int proc_selfpid(void);
 extern char *proc_name_address(struct proc *p);
@@ -1324,6 +1325,9 @@ sweet_dyld_speculate(vm_page_t page)
 	}
 }
 
+/* how often a neighbour's busy source page made a request start again (sysctl-free: read with the kernel debugger or a log) */
+static uint64_t sweet_dyld_neighbour_busy;
+
 /*
  * Copy one kernel page of the backing object at "off" into "buf". Fails with
  * KERN_ALREADY_WAITING if the page is busy, so the whole request is retried.
@@ -1340,6 +1344,25 @@ sweet_dyld_read_src(vm_object_t obj, vm_object_offset_t off, void *buf,
 retry:
 	vm_page_grab_prime();
 	vm_object_lock(obj);
+	/*
+	 * Never sleep here on a busy page. This runs inside a data request that holds its own source page busy (the
+	 * vm_fault_page() of dyld_pager_data_request, released only after the fixup), and a neighbour's source page can be
+	 * held busy by another data request for a neighbouring 4 KiB page of the same 16 KiB block, which in turn reads OUR
+	 * source page as its neighbour: each slept on the other's page for good (vm_page_sleep <- vm_fault_page <-
+	 * dyld_pager_data_request, three securityd threads on one event; phone 1, 28 November 2026). securityd frozen at boot
+	 * left bluetoothd waiting on a keychain query, so Bluetooth did not come up on about one boot in three. A busy
+	 * neighbour now answers KERN_ALREADY_WAITING at once; dyld_pager_data_request() then lets its own source page go,
+	 * waits a moment and takes this page again (sweet_busy_tries), so the cycle cannot form and no fault fails.
+	 */
+	{
+		vm_page_t busy = vm_page_lookup(obj, off);
+
+		if (busy != VM_PAGE_NULL && (busy->vmp_busy || busy->vmp_cleaning)) {
+			vm_object_unlock(obj);
+			sweet_dyld_neighbour_busy++;
+			return KERN_ALREADY_WAITING;
+		}
+	}
 	vm_object_paging_begin(obj);
 	error_code = 0;
 	prot = VM_PROT_READ;
@@ -1442,6 +1465,9 @@ dyld_pager_data_request(
 	vm_object_t             dst_object;
 	kern_return_t           kr;
 	kern_return_t           retval = KERN_SUCCESS;
+#if SWEET_DYLD
+	unsigned int            sweet_busy_tries = 0;  /* a busy neighbour's source page: this request's retries */
+#endif
 	vm_fault_return_t       vmfr;
 	vm_offset_t             src_vaddr;
 	vm_offset_t             dst_vaddr;
@@ -1693,6 +1719,19 @@ retry_src_fault:
 			vm_object_paging_end(src_top_object);
 			vm_object_unlock(src_top_object);
 		}
+#if SWEET_DYLD
+		/*
+		 * A neighbour's source page was busy (sweet_dyld_read_src() does not sleep on it while we hold our own): ours is
+		 * released now, so the request holding that one can finish. Take this page again after 250 us, for up to a
+		 * second in all, before failing as before.
+		 */
+		if (retval == KERN_ALREADY_WAITING && DYLD_FIXUP_PAGE_SIZE > PAGE_SIZE && sweet_busy_tries < 4000) {
+			sweet_busy_tries++;
+			retval = KERN_SUCCESS;
+			delay(250);
+			goto retry_src_fault;
+		}
+#endif
 	}
 
 done:
