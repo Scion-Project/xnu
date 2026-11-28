@@ -616,11 +616,12 @@ static struct {
 static int sweet_priv_logged_count;
 
 /*
- * Privileges iOS grants by an entitlement of the process, with sweet_priv_ent=1 (off by default): cameracaptured has both
+ * Privileges iOS grants by an entitlement of the process, with sweet_priv_ent=1 (on by default on STARLTE since 28 November 2026, in the kernel's built-in line; 0 here elsewhere): cameracaptured has both
  * (iOS 27.0.1's launchd job binary). PRIV_SYSTEM_OVERRIDE is asked by CMCapture's capture-session prewarm,
  * system_override(..., SYS_OVERRIDE_FAST_JETSAM), whose result it does not look at; PRIV_PROC_CPUMON_OVERRIDE by the
  * process's own CPU monitor setting ("denied attempt to escape CPU monitor"). Neither stopped the camera in the phone test of
- * 17 November; granting them makes cameracaptured run as on an iPhone. NOT RUN ON A PHONE.
+ * 17 November; granting them makes cameracaptured run as on an iPhone. On every test phone's line since 18 November
+ * (terminusd's NECP abort gone: PR 60).
  */
 static TUNABLE(uint32_t, sweet_priv_ent, "sweet_priv_ent", 0);
 static const struct {
